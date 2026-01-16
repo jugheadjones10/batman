@@ -1,0 +1,26 @@
+{
+  "name": "Test",
+  "description": "",
+  "classes": [
+    "Chair",
+    "Crane hook",
+    "Person",
+    "container",
+    "container spreader"
+  ],
+  "config": {
+    "sample_mode": "seconds",
+    "sample_interval": 0.5,
+    "tracking_mode": "visible_only",
+    "max_age": 30,
+    "iou_threshold": 0.3,
+    "min_hits": 3,
+    "use_appearance_embedding": false
+  },
+  "video_count": 2,
+  "frame_count": 2054,
+  "annotation_count": 2091,
+  "current_iteration": 0,
+  "created_at": "2026-01-07T12:28:40.884100",
+  "updated_at": "2026-01-11T15:43:13.882540"
+}

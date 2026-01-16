@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 6%;
+    --foreground: 60 5% 90%;
+    --primary: 45 93% 58%;
+    --primary-foreground: 220 20% 6%;
+    --secondary: 220 15% 15%;
+    --secondary-foreground: 60 5% 90%;
+    --muted: 220 15% 20%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 200 90% 50%;
+    --accent-foreground: 220 20% 6%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 60 5% 90%;
+    --border: 220 15% 20%;
+    --ring: 45 93% 58%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted));
+    border-radius: 3px;
+  }
+}
+
+/* Video player custom styles */
+.video-container {
+  position: relative;
+  background: linear-gradient(135deg, hsl(220 20% 4%) 0%, hsl(220 20% 8%) 100%);
+}
+
+.annotation-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: auto;
+}
+
+/* Box handle styles */
+.box-handle {
+  @apply absolute w-3 h-3 bg-primary border-2 border-background rounded-sm cursor-pointer;
+  transform: translate(-50%, -50%);
+}
+
+.box-handle:hover {
+  @apply scale-125;
+}
+
+/* Timeline styles */
+.timeline-track {
+  @apply h-8 bg-secondary/50 rounded overflow-hidden;
+}
+
+.timeline-segment {
+  @apply absolute h-full opacity-80 hover:opacity-100 transition-opacity cursor-pointer;
+}
+
+/* Glow effects */
+.glow-primary {
+  box-shadow: 0 0 20px hsl(var(--primary) / 0.3);
+}
+
+.glow-accent {
+  box-shadow: 0 0 20px hsl(var(--accent) / 0.3);
+}
+
