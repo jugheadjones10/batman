@@ -109,24 +109,54 @@ export default function ProjectPage() {
     },
   })
 
-  const importMutation = useMutation({
-    mutationFn: () => api.import.fromRoboflow(projectName!, importConfig),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
-      toast({
-        title: 'Import successful',
-        description: `${data.images_imported} images, ${data.annotations_imported} annotations imported`,
-        type: 'success',
-      })
-      setShowImport(false)
-      setImportConfig({ api_key: '', workspace: '', project: '', version: 1 })
-    },
-    onError: (error: Error) => {
+  const [importProgress, setImportProgress] = useState<{
+    active: boolean
+    progress: number
+    message: string
+  }>({ active: false, progress: 0, message: '' })
+
+  const handleImport = async () => {
+    if (!projectName || !importConfig.api_key || !importConfig.workspace || !importConfig.project) {
+      return
+    }
+
+    setImportProgress({ active: true, progress: 0, message: 'Starting import...' })
+
+    try {
+      let finalResult: any = null
+      
+      for await (const update of api.import.fromRoboflowWithProgress(projectName, importConfig)) {
+        setImportProgress({
+          active: true,
+          progress: update.progress,
+          message: update.message,
+        })
+
+        if (update.status === 'complete') {
+          finalResult = update
+        } else if (update.status === 'error') {
+          throw new Error(update.message)
+        }
+      }
+
+      if (finalResult) {
+        queryClient.invalidateQueries({ queryKey: ['project', projectName] })
+        queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })
+        queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
+        toast({
+          title: 'Import successful',
+          description: `${finalResult.images_imported} images, ${finalResult.annotations_imported} annotations imported`,
+          type: 'success',
+        })
+        setShowImport(false)
+        setImportConfig({ api_key: '', workspace: '', project: '', version: 1 })
+      }
+    } catch (error: any) {
       toast({ title: 'Import failed', description: error.message, type: 'error' })
-    },
-  })
+    } finally {
+      setImportProgress({ active: false, progress: 0, message: '' })
+    }
+  }
 
   const deleteDatasetMutation = useMutation({
     mutationFn: (videoId: number) => api.import.deleteDataset(projectName!, videoId),
@@ -169,6 +199,22 @@ export default function ProjectPage() {
     },
   })
 
+  const deleteClassMutation = useMutation({
+    mutationFn: (className: string) => api.classes.delete(projectName!, className, true),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
+      toast({
+        title: 'Class deleted',
+        description: `${data.annotations_deleted} annotations removed`,
+        type: 'success',
+      })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Delete failed', description: error.message, type: 'error' })
+    },
+  })
+
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -184,10 +230,14 @@ export default function ProjectPage() {
     setNewClass('')
   }
 
-  const handleRemoveClass = (cls: string) => {
+  const handleRemoveClass = (className: string, annotationCount: number) => {
     if (!project) return
-    const classes = project.classes.filter((c) => c !== cls)
-    updateClassesMutation.mutate(classes)
+    if (annotationCount > 0) {
+      if (!confirm(`Delete class "${className}" and its ${annotationCount} annotations?`)) {
+        return
+      }
+    }
+    deleteClassMutation.mutate(className)
   }
 
   if (projectLoading) {
@@ -363,107 +413,138 @@ export default function ProjectPage() {
                   {classDetails.map((cls, i) => (
                     <div
                       key={cls.name}
-                      className={`group flex items-center gap-2 p-2 rounded-lg border transition-colors ${
+                      className={`group rounded-lg border transition-colors ${
                         mergingClasses.includes(cls.name)
                           ? 'border-primary bg-primary/10'
                           : 'border-border hover:border-primary/50'
                       }`}
                     >
-                      <span
-                        className="w-3 h-3 rounded-full flex-shrink-0"
-                        style={{
-                          backgroundColor: [
-                            '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8'
-                          ][i % 7]
-                        }}
-                      />
-                      
-                      {renamingClass === cls.name ? (
-                        <div className="flex-1 flex gap-2">
-                          <Input
-                            value={newClassName}
-                            onChange={(e) => setNewClassName(e.target.value)}
-                            className="h-7 text-sm"
-                            autoFocus
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                renameClassMutation.mutate({ oldName: cls.name, newName: newClassName })
-                              } else if (e.key === 'Escape') {
-                                setRenamingClass(null)
-                              }
-                            }}
-                          />
-                          <Button
-                            size="sm"
-                            className="h-7"
-                            onClick={() => renameClassMutation.mutate({ oldName: cls.name, newName: newClassName })}
-                          >
-                            Save
-                          </Button>
-                        </div>
-                      ) : (
-                        <>
-                          <span className="flex-1 font-medium text-sm">{cls.name}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {cls.annotation_count} ann.
-                          </span>
-                          {cls.source !== 'manual' && (
-                            <span className={`text-xs px-1.5 py-0.5 rounded ${
-                              cls.source === 'roboflow' ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'
-                            }`}>
-                              {cls.source}
-                            </span>
-                          )}
-                        </>
-                      )}
-                      
-                      {renamingClass !== cls.name && (
-                        <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
-                          {mergingClasses.length > 0 && !mergingClasses.includes(cls.name) ? (
+                      {/* Main row */}
+                      <div className="flex items-center gap-2 p-2">
+                        <span
+                          className="w-3 h-3 rounded-full flex-shrink-0"
+                          style={{
+                            backgroundColor: [
+                              '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8'
+                            ][i % 7]
+                          }}
+                        />
+                        
+                        {renamingClass === cls.name ? (
+                          <div className="flex-1 flex gap-2">
+                            <Input
+                              value={newClassName}
+                              onChange={(e) => setNewClassName(e.target.value)}
+                              className="h-7 text-sm"
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  renameClassMutation.mutate({ oldName: cls.name, newName: newClassName })
+                                } else if (e.key === 'Escape') {
+                                  setRenamingClass(null)
+                                }
+                              }}
+                            />
                             <Button
                               size="sm"
-                              variant="outline"
-                              className="h-6 text-xs"
-                              onClick={() => {
-                                mergeClassesMutation.mutate({ sources: mergingClasses, target: cls.name })
-                              }}
+                              className="h-7"
+                              onClick={() => renameClassMutation.mutate({ oldName: cls.name, newName: newClassName })}
                             >
-                              Merge here
+                              Save
                             </Button>
-                          ) : (
-                            <>
-                              <button
+                          </div>
+                        ) : (
+                          <>
+                            <span className="flex-1 font-medium text-sm">{cls.name}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {cls.annotation_count} ann.
+                            </span>
+                          </>
+                        )}
+                        
+                        {renamingClass !== cls.name && (
+                          <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
+                            {mergingClasses.length > 0 && !mergingClasses.includes(cls.name) ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 text-xs"
                                 onClick={() => {
-                                  if (mergingClasses.includes(cls.name)) {
-                                    setMergingClasses(mergingClasses.filter(c => c !== cls.name))
-                                  } else {
-                                    setMergingClasses([...mergingClasses, cls.name])
-                                  }
+                                  mergeClassesMutation.mutate({ sources: mergingClasses, target: cls.name })
                                 }}
-                                className="text-xs text-muted-foreground hover:text-primary"
-                                title="Select for merge"
                               >
-                                {mergingClasses.includes(cls.name) ? '✓' : '○'}
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setRenamingClass(cls.name)
-                                  setNewClassName(cls.name)
-                                }}
-                                className="text-xs text-muted-foreground hover:text-primary"
-                                title="Rename"
-                              >
-                                ✎
-                              </button>
-                              <button
-                                onClick={() => handleRemoveClass(cls.name)}
-                                className="text-xs text-muted-foreground hover:text-destructive"
-                                title="Delete"
-                              >
-                                ×
-                              </button>
-                            </>
-                          )}
+                                Merge here
+                              </Button>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    if (mergingClasses.includes(cls.name)) {
+                                      setMergingClasses(mergingClasses.filter(c => c !== cls.name))
+                                    } else {
+                                      setMergingClasses([...mergingClasses, cls.name])
+                                    }
+                                  }}
+                                  className="text-xs text-muted-foreground hover:text-primary"
+                                  title="Select for merge"
+                                >
+                                  {mergingClasses.includes(cls.name) ? '✓' : '○'}
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setRenamingClass(cls.name)
+                                    setNewClassName(cls.name)
+                                  }}
+                                  className="text-xs text-muted-foreground hover:text-primary"
+                                  title="Rename"
+                                >
+                                  ✎
+                                </button>
+                                <button
+                                  onClick={() => handleRemoveClass(cls.name, cls.annotation_count)}
+                                  className="text-xs text-muted-foreground hover:text-destructive"
+                                  title="Delete"
+                                >
+                                  ×
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Data sources row */}
+                      {cls.annotation_sources && Object.keys(cls.annotation_sources).length > 0 && (
+                        <div className="px-2 pb-2 pt-0 flex items-center gap-2 flex-wrap">
+                          {Object.entries(cls.annotation_sources).map(([source, count]) => (
+                            <span
+                              key={source}
+                              className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
+                                source === 'roboflow'
+                                  ? 'bg-purple-500/20 text-purple-400'
+                                  : source === 'local_coco'
+                                  ? 'bg-blue-500/20 text-blue-400'
+                                  : source === 'video'
+                                  ? 'bg-green-500/20 text-green-400'
+                                  : source === 'auto'
+                                  ? 'bg-yellow-500/20 text-yellow-400'
+                                  : 'bg-gray-500/20 text-gray-400'
+                              }`}
+                            >
+                              {source === 'roboflow' && (
+                                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                                </svg>
+                              )}
+                              {source === 'video' && (
+                                <Video className="w-2.5 h-2.5" />
+                              )}
+                              {source === 'auto' && (
+                                <Cpu className="w-2.5 h-2.5" />
+                              )}
+                              {source}: {count}
+                            </span>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -683,18 +764,36 @@ export default function ProjectPage() {
                       Cancel
                     </Button>
                     <Button
-                      className="flex-1 gap-2"
-                      onClick={() => importMutation.mutate()}
-                      disabled={importMutation.isPending || !importConfig.api_key || !importConfig.workspace || !importConfig.project}
+                      className="flex-1 gap-2 relative overflow-hidden"
+                      onClick={handleImport}
+                      disabled={importProgress.active || !importConfig.api_key || !importConfig.workspace || !importConfig.project}
                     >
-                      {importMutation.isPending ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Download className="h-4 w-4" />
+                      {importProgress.active && (
+                        <div 
+                          className="absolute inset-0 bg-primary/30 transition-all duration-300"
+                          style={{ width: `${importProgress.progress}%` }}
+                        />
                       )}
-                      Import
+                      <span className="relative flex items-center gap-2">
+                        {importProgress.active ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            {importProgress.progress}%
+                          </>
+                        ) : (
+                          <>
+                            <Download className="h-4 w-4" />
+                            Import
+                          </>
+                        )}
+                      </span>
                     </Button>
                   </div>
+                  {importProgress.active && (
+                    <p className="text-xs text-muted-foreground animate-pulse">
+                      {importProgress.message}
+                    </p>
+                  )}
                   <p className="text-xs text-muted-foreground">
                     Get your API key at{' '}
                     <a

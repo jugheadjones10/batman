@@ -281,28 +281,127 @@ async def get_classes_with_details(project_name: str):
     classes = config.get("classes", [])
     class_sources = config.get("class_sources", {})
     
-    # Count annotations per class
+    # Load frames metadata to identify which frames are from which source
+    frames_by_source = {}  # frame_id -> source
+    
+    # Check for imported frames (video_id = -1 for roboflow, -2 for local_coco)
+    frames_dir = project_path / "frames"
+    if frames_dir.exists():
+        for video_dir in frames_dir.iterdir():
+            if video_dir.is_dir():
+                frames_meta_file = video_dir / "frames.json"
+                if frames_meta_file.exists():
+                    with open(frames_meta_file) as f:
+                        frames_meta = json.load(f)
+                    for frame_id, meta in frames_meta.items():
+                        source = meta.get("source", "video")
+                        frames_by_source[int(frame_id)] = source
+    
+    # Count annotations per class, broken down by source
     annotations_path = project_path / "labels" / "current" / "annotations.json"
-    class_counts = {i: 0 for i in range(len(classes))}
+    # Structure: {class_id: {"total": N, "sources": {"roboflow": N, "video": N, ...}}}
+    class_stats = {i: {"total": 0, "sources": {}} for i in range(len(classes))}
     
     if annotations_path.exists():
         with open(annotations_path) as f:
             annotations = json.load(f)
         for ann in annotations.values():
             class_id = ann.get("class_label_id", 0)
-            if class_id in class_counts:
-                class_counts[class_id] += 1
+            if class_id not in class_stats:
+                continue
+            
+            frame_id = ann.get("frame_id", 0)
+            # Determine source: check annotation source first, then frame source
+            ann_source = ann.get("source", "manual")
+            if ann_source in ("roboflow", "local_coco"):
+                source = ann_source
+            elif frame_id in frames_by_source:
+                source = frames_by_source[frame_id]
+            elif frame_id < 0:
+                # Negative frame IDs are from imports
+                source = "roboflow" if frame_id >= -1000000 else "local_coco"
+            else:
+                source = "video"
+            
+            class_stats[class_id]["total"] += 1
+            class_stats[class_id]["sources"][source] = class_stats[class_id]["sources"].get(source, 0) + 1
     
     result = []
     for i, cls in enumerate(classes):
+        stats = class_stats.get(i, {"total": 0, "sources": {}})
         result.append({
             "id": i,
             "name": cls,
             "source": class_sources.get(cls, "manual"),
-            "annotation_count": class_counts.get(i, 0),
+            "annotation_count": stats["total"],
+            "annotation_sources": stats["sources"],
         })
     
     return result
+
+
+@router.delete("/{project_name}/classes/{class_name}")
+async def delete_class(project_name: str, class_name: str, delete_annotations: bool = True):
+    """Delete a class and optionally its annotations."""
+    project_path = get_project_path(project_name)
+
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    config = load_project_config(project_path)
+    classes = config.get("classes", [])
+    class_sources = config.get("class_sources", {})
+    
+    if class_name not in classes:
+        raise HTTPException(status_code=404, detail=f"Class '{class_name}' not found")
+    
+    class_id = classes.index(class_name)
+    annotations_deleted = 0
+    
+    # Handle annotations
+    annotations_path = project_path / "labels" / "current" / "annotations.json"
+    if annotations_path.exists():
+        with open(annotations_path) as f:
+            annotations = json.load(f)
+        
+        if delete_annotations:
+            # Remove annotations for this class
+            new_annotations = {}
+            for ann_id, ann in annotations.items():
+                if ann.get("class_label_id") == class_id:
+                    annotations_deleted += 1
+                else:
+                    # Shift class IDs for classes after the deleted one
+                    if ann.get("class_label_id", 0) > class_id:
+                        ann["class_label_id"] -= 1
+                    new_annotations[ann_id] = ann
+            annotations = new_annotations
+        else:
+            # Just shift class IDs, don't delete annotations
+            for ann in annotations.values():
+                if ann.get("class_label_id", 0) > class_id:
+                    ann["class_label_id"] -= 1
+        
+        with open(annotations_path, "w") as f:
+            json.dump(annotations, f, indent=2)
+    
+    # Remove class from list
+    classes.remove(class_name)
+    
+    # Remove from class_sources
+    if class_name in class_sources:
+        del class_sources[class_name]
+    
+    config["classes"] = classes
+    config["class_sources"] = class_sources
+    config["annotation_count"] = config.get("annotation_count", 0) - annotations_deleted
+    config["updated_at"] = datetime.utcnow().isoformat()
+    save_project_config(project_path, config)
+    
+    return {
+        "message": f"Deleted class '{class_name}'",
+        "annotations_deleted": annotations_deleted,
+    }
 
 
 from pydantic import BaseModel as PydanticBaseModel

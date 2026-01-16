@@ -315,6 +315,58 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(config),
       }),
+    fromRoboflowWithProgress: async function* (
+      projectName: string,
+      config: {
+        api_key: string
+        workspace: string
+        project: string
+        version: number
+        format?: string
+      },
+      onProgress?: (progress: {
+        status: 'downloading' | 'processing' | 'complete' | 'error'
+        progress: number
+        message: string
+        images_imported?: number
+        annotations_imported?: number
+        classes_added?: string[]
+        splits_imported?: string[]
+      }) => void
+    ) {
+      const response = await fetch(`${API_BASE}/projects/${projectName}/import/roboflow/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Import failed: ${response.statusText}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = JSON.parse(line.slice(6))
+            if (onProgress) onProgress(data)
+            yield data
+          }
+        }
+      }
+    },
     fromLocalCoco: (projectName: string, config: {
       path: string
       split?: string
@@ -355,9 +407,13 @@ export const api = {
   // Class management
   classes: {
     getDetails: (projectName: string) =>
-      request<{ id: number; name: string; source: string; annotation_count: number }[]>(
-        `/projects/${projectName}/classes/details`
-      ),
+      request<{
+        id: number
+        name: string
+        source: string
+        annotation_count: number
+        annotation_sources: Record<string, number>
+      }[]>(`/projects/${projectName}/classes/details`),
     rename: (projectName: string, oldName: string, newName: string) =>
       request<{ message: string }>(`/projects/${projectName}/classes/rename`, {
         method: 'POST',
@@ -370,6 +426,11 @@ export const api = {
           method: 'POST',
           body: JSON.stringify({ source_classes: sourceClasses, target_class: targetClass }),
         }
+      ),
+    delete: (projectName: string, className: string, deleteAnnotations: boolean = true) =>
+      request<{ message: string; annotations_deleted: number }>(
+        `/projects/${projectName}/classes/${encodeURIComponent(className)}?delete_annotations=${deleteAnnotations}`,
+        { method: 'DELETE' }
       ),
   },
 }

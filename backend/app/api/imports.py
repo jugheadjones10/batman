@@ -1,12 +1,13 @@
 """Import API routes for external datasets."""
 
+import asyncio
 import json
 import random
 from pathlib import Path
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -83,6 +84,50 @@ async def import_from_roboflow(
     except Exception as e:
         logger.error(f"Roboflow import failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/roboflow/stream")
+async def import_from_roboflow_stream(
+    project_name: str,
+    request: RoboflowImportRequest,
+):
+    """
+    Import a dataset from Roboflow with streaming progress updates.
+    
+    Returns Server-Sent Events with progress information.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    async def generate_progress() -> AsyncGenerator[str, None]:
+        try:
+            importer = RoboflowImporter(project_path)
+            
+            # Stream progress updates
+            async for progress in importer.import_dataset_with_progress(
+                api_key=request.api_key,
+                workspace=request.workspace,
+                project=request.project,
+                version=request.version,
+                format=request.format,
+            ):
+                yield f"data: {json.dumps(progress)}\n\n"
+                await asyncio.sleep(0)  # Allow other tasks to run
+                
+        except Exception as e:
+            logger.error(f"Roboflow import failed: {e}")
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_progress(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @router.post("/local-coco", response_model=ImportResult)

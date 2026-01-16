@@ -3,10 +3,8 @@
   "description": "",
   "classes": [
     "Chair",
-    "Crane hook",
     "Person",
-    "container",
-    "container spreader"
+    "crane hook"
   ],
   "config": {
     "sample_mode": "seconds",
@@ -19,8 +17,13 @@
   },
   "video_count": 2,
   "frame_count": 2054,
-  "annotation_count": 2091,
+  "annotation_count": 2072,
   "current_iteration": 0,
   "created_at": "2026-01-07T12:28:40.884100",
-  "updated_at": "2026-01-11T15:43:13.882540"
+  "updated_at": "2026-01-16T09:19:50.815062",
+  "class_sources": {
+    "Chair": "manual",
+    "Person": "manual",
+    "crane hook": "roboflow"
+  }
 }
