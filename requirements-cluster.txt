@@ -3,7 +3,7 @@
 
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0  # numpy 2.x has compatibility issues with rfdetr
 pillow>=10.0.0
 rfdetr>=1.0.0
 supervision>=0.18.0

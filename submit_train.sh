@@ -41,6 +41,7 @@ TIME="24:00:00"
 DRY_RUN=false
 PREPARE_ONLY=false
 NUM_GPUS=1
+FILTER_CLASSES=""
 EXTRA_ARGS=""
 
 #-------------------------------------------------------------------------------
@@ -70,6 +71,8 @@ show_help() {
     echo "  --patience=N        Early stopping patience (default: 10)"
     echo "  --model=SIZE        Model size: base, large (default: base)"
     echo "  --output-dir=PATH   Output directory for run"
+    echo "  --filter-classes=NAMES  Only train on specific classes (comma-separated)"
+    echo "                          Example: --filter-classes='crane hook,person'"
     echo ""
     echo "SLURM Options:"
     echo "  --partition=NAME    SLURM partition (auto-detected if not set)"
@@ -95,10 +98,11 @@ for arg in "$@"; do
         --project=*)    PROJECT_DIR="${arg#*=}" ;;
         --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
         --model=*)      MODEL="${arg#*=}" ;;
-        --time=*)       TIME="${arg#*=}" ;;
-        --prepare-only) PREPARE_ONLY=true ;;
-        --dry-run)      DRY_RUN=true ;;
-        --help|-h)      show_help ;;
+        --time=*)           TIME="${arg#*=}" ;;
+        --filter-classes=*) FILTER_CLASSES="${arg#*=}" ;;
+        --prepare-only)     PREPARE_ONLY=true ;;
+        --dry-run)          DRY_RUN=true ;;
+        --help|-h)          show_help ;;
         *)              EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
@@ -276,15 +280,24 @@ echo ""
 
 SLURM_EOF
 
+# Build filter-classes argument if specified (for prepare-only)
+FILTER_ARG_STATIC=""
+if [ -n "${FILTER_CLASSES}" ]; then
+    # Convert comma-separated to space-separated for --filter-classes
+    FILTER_ARG_STATIC="--filter-classes ${FILTER_CLASSES//,/ }"
+fi
+
 # Add the training command
 if [ "$PREPARE_ONLY" = true ]; then
     cat >> "$SLURM_SCRIPT" << EOF
 
 echo "Preparing dataset only..."
+echo "  Filter classes: ${FILTER_CLASSES:-all}"
 python3 finetune_rfdetr.py \\
     --project ${PROJECT_DIR} \\
     --output-dataset ${OUTPUT_DATASET} \\
     --prepare-only \\
+    ${FILTER_ARG_STATIC} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -300,9 +313,18 @@ echo "  Batch Size:  ${BATCH_SIZE}"
 echo "  Image Size:  ${IMAGE_SIZE}"
 echo "  LR:          ${LR}"
 echo "  Patience:    ${PATIENCE}"
+FILTER_CLASSES_DISPLAY="${FILTER_CLASSES:-all}"
+echo "  Classes:     \${FILTER_CLASSES_DISPLAY}"
 echo ""
 
 echo "Starting training..."
+
+# Build filter-classes argument if specified
+FILTER_ARG=""
+if [ -n "${FILTER_CLASSES}" ]; then
+    # Convert comma-separated to space-separated for --filter-classes
+    FILTER_ARG="--filter-classes ${FILTER_CLASSES//,/ }"
+fi
 
 # Use torchrun for multi-GPU, regular python for single-GPU
 if [ "\$NUM_GPUS" -gt 1 ]; then
@@ -320,6 +342,7 @@ if [ "\$NUM_GPUS" -gt 1 ]; then
         --patience ${PATIENCE} \\
         --device cuda \\
         --num-workers 8 \\
+        \${FILTER_ARG} \\
         ${EXTRA_ARGS}
 else
     echo "Using single-GPU training..."
@@ -335,6 +358,7 @@ else
         --patience ${PATIENCE} \\
         --device cuda \\
         --num-workers 8 \\
+        \${FILTER_ARG} \\
         ${EXTRA_ARGS}
 fi
 

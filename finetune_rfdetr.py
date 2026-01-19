@@ -117,6 +117,7 @@ def create_coco_dataset(
     annotations_data: dict,
     class_names: list[str],
     output_dir: Path,
+    original_class_names: list[str] | None = None,
 ) -> tuple[int, int]:
     """
     Create a COCO format dataset from Batman internal format.
@@ -127,8 +128,27 @@ def create_coco_dataset(
     - categories: list of {id, name}
 
     Note: COCO bbox format is [x_min, y_min, width, height] in pixels
+
+    Args:
+        frame_ids: Set of frame IDs to include
+        frames_meta: Frame metadata dict
+        annotations_data: Annotations dict
+        class_names: List of class names to include (filtered if filter_classes was used)
+        output_dir: Output directory
+        original_class_names: Original full list of class names (for ID remapping)
     """
     coco_data = {"images": [], "annotations": [], "categories": []}
+
+    # Build class ID mapping (original ID -> new filtered ID)
+    # If no filtering, original_class_names == class_names
+    if original_class_names is None:
+        original_class_names = class_names
+
+    # Map original class index -> new class index (1-indexed for COCO)
+    class_id_map = {}
+    for new_idx, name in enumerate(class_names):
+        original_idx = original_class_names.index(name) if name in original_class_names else new_idx
+        class_id_map[original_idx] = new_idx + 1  # COCO is 1-indexed
 
     # Create categories (COCO uses 1-indexed category IDs)
     for i, name in enumerate(class_names):
@@ -141,6 +161,7 @@ def create_coco_dataset(
         )
 
     annotation_id = 1
+    images_with_annotations = set()
 
     for frame_id in frame_ids:
         frame_info = frames_meta[frame_id]
@@ -158,19 +179,16 @@ def create_coco_dataset(
         new_filename = f"{frame_id}.jpg"
         dst_path = output_dir / new_filename
 
-        # Copy image
-        shutil.copy(src_path, dst_path)
-
-        # Add image entry
-        image_id = int(frame_id)
-        coco_data["images"].append(
-            {"id": image_id, "file_name": new_filename, "width": img_width, "height": img_height}
-        )
-
         # Get annotations for this frame
+        frame_annotations = []
         for ann in annotations_data.values():
             if str(ann["frame_id"]) != frame_id:
                 continue
+
+            # Check if this annotation's class is in our filtered set
+            original_class_id = ann["class_label_id"]
+            if original_class_id not in class_id_map:
+                continue  # Skip annotations for filtered-out classes
 
             # Convert normalized center format to COCO format
             cx = ann["x"] * img_width
@@ -181,13 +199,13 @@ def create_coco_dataset(
             x_min = cx - w / 2
             y_min = cy - h / 2
 
-            # COCO category_id is 1-indexed
-            category_id = ann["class_label_id"] + 1
+            # Get mapped category_id
+            category_id = class_id_map[original_class_id]
 
-            coco_data["annotations"].append(
+            frame_annotations.append(
                 {
                     "id": annotation_id,
-                    "image_id": image_id,
+                    "image_id": int(frame_id),
                     "category_id": category_id,
                     "bbox": [x_min, y_min, w, h],
                     "area": w * h,
@@ -195,6 +213,26 @@ def create_coco_dataset(
                 }
             )
             annotation_id += 1
+
+        # Only include images that have at least one annotation for filtered classes
+        if frame_annotations:
+            # Copy image
+            shutil.copy(src_path, dst_path)
+
+            # Add image entry
+            image_id = int(frame_id)
+            coco_data["images"].append(
+                {
+                    "id": image_id,
+                    "file_name": new_filename,
+                    "width": img_width,
+                    "height": img_height,
+                }
+            )
+            images_with_annotations.add(frame_id)
+
+            # Add annotations
+            coco_data["annotations"].extend(frame_annotations)
 
     # Save COCO annotations
     coco_file = output_dir / "_annotations.coco.json"
@@ -212,6 +250,7 @@ def prepare_dataset(
     test_split: float = 0.15,
     video_id: int = -1,
     clean: bool = True,
+    filter_classes: list[str] | None = None,
 ) -> tuple[Path, list[str]]:
     """
     Prepare COCO format dataset from Batman project.
@@ -224,6 +263,7 @@ def prepare_dataset(
         test_split: Fraction for testing
         video_id: Video ID to process (-1 for Roboflow imports)
         clean: Whether to remove existing output directory
+        filter_classes: If specified, only include these classes (by name)
 
     Returns:
         Tuple of (dataset_dir, class_names)
@@ -233,7 +273,21 @@ def prepare_dataset(
     print("=" * 60)
 
     # Load project data
-    frames_meta, annotations_data, class_names = load_project_data(project_dir, video_id)
+    frames_meta, annotations_data, original_class_names = load_project_data(project_dir, video_id)
+
+    # Apply class filtering if specified
+    if filter_classes:
+        # Validate that requested classes exist
+        invalid_classes = [c for c in filter_classes if c not in original_class_names]
+        if invalid_classes:
+            raise ValueError(
+                f"Unknown classes: {invalid_classes}. Available classes: {original_class_names}"
+            )
+        class_names = filter_classes
+        print(f"\n✓ Filtering to {len(class_names)} class(es): {class_names}")
+        print(f"  (Original classes: {original_class_names})")
+    else:
+        class_names = original_class_names
 
     # Create output directories
     train_dir = output_dir / "train"
@@ -248,7 +302,7 @@ def prepare_dataset(
     val_dir.mkdir(parents=True, exist_ok=True)
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n✓ Created dataset directories:")
+    print("\n✓ Created dataset directories:")
     print(f"  Train: {train_dir}")
     print(f"  Valid: {val_dir}")
     print(f"  Test:  {test_dir}")
@@ -265,27 +319,27 @@ def prepare_dataset(
     val_frame_ids = set(all_frame_ids[n_train : n_train + n_val])
     test_frame_ids = set(all_frame_ids[n_train + n_val :])
 
-    print(f"\n✓ Split distribution:")
+    print("\n✓ Split distribution:")
     print(f"  Train: {len(train_frame_ids)} ({len(train_frame_ids) / n_total * 100:.1f}%)")
     print(f"  Valid: {len(val_frame_ids)} ({len(val_frame_ids) / n_total * 100:.1f}%)")
     print(f"  Test:  {len(test_frame_ids)} ({len(test_frame_ids) / n_total * 100:.1f}%)")
 
-    # Create datasets
+    # Create datasets (pass original class names for ID remapping)
     print("\n  Creating training dataset...")
     train_images, train_anns = create_coco_dataset(
-        train_frame_ids, frames_meta, annotations_data, class_names, train_dir
+        train_frame_ids, frames_meta, annotations_data, class_names, train_dir, original_class_names
     )
     print(f"  → Train: {train_images} images, {train_anns} annotations")
 
     print("  Creating validation dataset...")
     val_images, val_anns = create_coco_dataset(
-        val_frame_ids, frames_meta, annotations_data, class_names, val_dir
+        val_frame_ids, frames_meta, annotations_data, class_names, val_dir, original_class_names
     )
     print(f"  → Valid: {val_images} images, {val_anns} annotations")
 
     print("  Creating test dataset...")
     test_images, test_anns = create_coco_dataset(
-        test_frame_ids, frames_meta, annotations_data, class_names, test_dir
+        test_frame_ids, frames_meta, annotations_data, class_names, test_dir, original_class_names
     )
     print(f"  → Test: {test_images} images, {test_anns} annotations")
 
@@ -356,7 +410,7 @@ def train_model(
     print(f"  Dataset: {dataset_dir}")
     print(f"  Output: {output_dir}")
     print(f"  Device: {device}")
-    print(f"\n  Training config:")
+    print("\n  Training config:")
     print(f"    Epochs: {epochs}")
     print(f"    Batch size: {batch_size}")
     print(f"    Image size: {image_size}")
@@ -403,7 +457,7 @@ def train_model(
                 checkpoint_path = alt_path
                 break
 
-    print(f"\n✓ Training complete!")
+    print("\n✓ Training complete!")
     print(f"  Best checkpoint: {checkpoint_path}")
 
     return checkpoint_path
@@ -669,6 +723,12 @@ Examples:
         nargs="+",
         help="Class names (required for inference/export without project)",
     )
+    parser.add_argument(
+        "--filter-classes",
+        type=str,
+        nargs="+",
+        help="Only train on these classes (filter out others). Use class names.",
+    )
 
     args = parser.parse_args()
 
@@ -699,6 +759,7 @@ Examples:
             test_split=args.test_split,
             video_id=args.video_id,
             clean=not args.no_clean,
+            filter_classes=args.filter_classes,
         )
 
         if args.prepare_only:
