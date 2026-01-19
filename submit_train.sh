@@ -50,8 +50,16 @@ show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "GPU Options:"
-    echo "  --gpu=TYPE          GPU type: h200, h100-96, h100-47, a100-80, a100-40, v100, titanrtx, t4"
+    echo "  --gpu=TYPE          GPU type (see below)"
     echo "  --num-gpus=N        Number of GPUs (default: 1)"
+    echo ""
+    echo "Available GPUs:"
+    echo "  h200       NVIDIA H200 141GB    (max 4 per node, 3h limit)"
+    echo "  h100-96    NVIDIA H100 96GB     (max 2 per node)"
+    echo "  h100-47    NVIDIA H100 47GB     (max 4 per node)"
+    echo "  a100-80    NVIDIA A100 80GB     (max 1 per node)"
+    echo "  a100-40    NVIDIA A100 40GB     (max 2 per node)"
+    echo "  nv         V100/Titan/T4        (max 2 per node)"
     echo ""
     echo "Training Options:"
     echo "  --project=PATH      Project directory (default: data/projects/Test)"
@@ -106,6 +114,7 @@ case $GPU_TYPE in
         MEM="256G"
         DEFAULT_PARTITION="gpu"  # H200 only on gpu partition (3h limit!)
         MAX_TIME="3:00:00"
+        MAX_GPUS=4
         echo "⚠️  Warning: H200 only available on 'gpu' partition with 3-hour limit!"
         echo "   For longer training, use --gpu=h100-96 or --gpu=h100-47"
         ;;
@@ -115,6 +124,7 @@ case $GPU_TYPE in
         MEM="256G"
         DEFAULT_PARTITION="gpu-long"
         MAX_TIME="3-00:00:00"
+        MAX_GPUS=2
         ;;
     h100-47)
         SLURM_GRES="gpu:h100-47:${NUM_GPUS}"
@@ -122,6 +132,7 @@ case $GPU_TYPE in
         MEM="256G"
         DEFAULT_PARTITION="gpu-long"
         MAX_TIME="3-00:00:00"
+        MAX_GPUS=4
         ;;
     a100-80)
         SLURM_GRES="gpu:a100-80:${NUM_GPUS}"
@@ -129,6 +140,7 @@ case $GPU_TYPE in
         MEM="128G"
         DEFAULT_PARTITION="gpu-long"
         MAX_TIME="3-00:00:00"
+        MAX_GPUS=1
         ;;
     a100-40|a100)
         SLURM_GRES="gpu:a100-40:${NUM_GPUS}"
@@ -136,6 +148,7 @@ case $GPU_TYPE in
         MEM="64G"
         DEFAULT_PARTITION="gpu-long"
         MAX_TIME="3-00:00:00"
+        MAX_GPUS=2
         ;;
     nv|v100|titanv|titanrtx|t4)
         SLURM_GRES="gpu:nv:${NUM_GPUS}"
@@ -143,6 +156,7 @@ case $GPU_TYPE in
         MEM="32G"
         DEFAULT_PARTITION="gpu-long"
         MAX_TIME="3-00:00:00"
+        MAX_GPUS=2
         ;;
     *)
         echo "Error: Unknown GPU type: $GPU_TYPE"
@@ -157,6 +171,12 @@ case $GPU_TYPE in
         exit 1
         ;;
 esac
+
+# Validate number of GPUs
+if [ "$NUM_GPUS" -gt "$MAX_GPUS" ]; then
+    echo "Error: Requested $NUM_GPUS GPUs but $GPU_TYPE only supports max $MAX_GPUS per node"
+    exit 1
+fi
 
 # Set partition (auto or override)
 if [ -z "$PARTITION" ]; then
@@ -207,6 +227,9 @@ cat > "$SLURM_SCRIPT" << SLURM_EOF
 #SBATCH --mem=${MEM}
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=e0425887@u.nus.edu
+
+# Number of GPUs for this job
+NUM_GPUS=${NUM_GPUS}
 SLURM_EOF
 
 cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
@@ -220,6 +243,7 @@ echo "RF-DETR Training Job"
 echo "============================================================"
 echo "Job ID:        $SLURM_JOB_ID"
 echo "Node:          $SLURM_NODELIST"
+echo "GPUs:          $NUM_GPUS"
 echo "Started:       $(date)"
 echo "Working Dir:   $(pwd)"
 echo "============================================================"
@@ -232,6 +256,15 @@ echo ""
 echo "GPU Info:"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv
 echo ""
+
+# Set environment variables for distributed training
+export MASTER_ADDR=localhost
+export MASTER_PORT=$((12355 + RANDOM % 1000))  # Random port to avoid conflicts
+export WORLD_SIZE=$NUM_GPUS
+export RANK=0
+export LOCAL_RANK=0
+
+echo "Distributed config: WORLD_SIZE=$WORLD_SIZE, MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT"
 
 # Using system Python 3.12 (no activation needed)
 # If you set up a venv later, uncomment:
@@ -270,19 +303,40 @@ echo "  Patience:    ${PATIENCE}"
 echo ""
 
 echo "Starting training..."
-python3 finetune_rfdetr.py \\
-    --project ${PROJECT_DIR} \\
-    --output-dataset ${OUTPUT_DATASET} \\
-    --output-dir ${OUTPUT_DIR} \\
-    --model ${MODEL} \\
-    --epochs ${EPOCHS} \\
-    --batch-size ${BATCH_SIZE} \\
-    --image-size ${IMAGE_SIZE} \\
-    --lr ${LR} \\
-    --patience ${PATIENCE} \\
-    --device cuda \\
-    --num-workers 8 \\
-    ${EXTRA_ARGS}
+
+# Use torchrun for multi-GPU, regular python for single-GPU
+if [ "\$NUM_GPUS" -gt 1 ]; then
+    echo "Using torchrun for multi-GPU training (\$NUM_GPUS GPUs)..."
+    torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
+        finetune_rfdetr.py \\
+        --project ${PROJECT_DIR} \\
+        --output-dataset ${OUTPUT_DATASET} \\
+        --output-dir ${OUTPUT_DIR} \\
+        --model ${MODEL} \\
+        --epochs ${EPOCHS} \\
+        --batch-size ${BATCH_SIZE} \\
+        --image-size ${IMAGE_SIZE} \\
+        --lr ${LR} \\
+        --patience ${PATIENCE} \\
+        --device cuda \\
+        --num-workers 8 \\
+        ${EXTRA_ARGS}
+else
+    echo "Using single-GPU training..."
+    python3 finetune_rfdetr.py \\
+        --project ${PROJECT_DIR} \\
+        --output-dataset ${OUTPUT_DATASET} \\
+        --output-dir ${OUTPUT_DIR} \\
+        --model ${MODEL} \\
+        --epochs ${EPOCHS} \\
+        --batch-size ${BATCH_SIZE} \\
+        --image-size ${IMAGE_SIZE} \\
+        --lr ${LR} \\
+        --patience ${PATIENCE} \\
+        --device cuda \\
+        --num-workers 8 \\
+        ${EXTRA_ARGS}
+fi
 
 EOF
 fi
