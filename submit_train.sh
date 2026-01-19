@@ -336,6 +336,7 @@ else
         echo "  squeue -j $JOB_ID              # Check job status"
         echo "  scancel $JOB_ID                # Cancel job"
         echo "  tail -f logs/slurm_${JOB_ID}_${JOB_NAME}.out  # Watch output"
+        echo "  tail -f logs/slurm_${JOB_ID}_${JOB_NAME}.err  # Watch errors"
         echo ""
         
         # Save the script for reference
