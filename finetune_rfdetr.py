@@ -726,8 +726,8 @@ Examples:
     parser.add_argument(
         "--filter-classes",
         type=str,
-        nargs="+",
-        help="Only train on these classes (filter out others). Use class names.",
+        help="Only train on these classes (filter out others). "
+        "Use pipe '|' delimiter for multiple classes with spaces, e.g., 'crane hook|crane-hook'",
     )
 
     args = parser.parse_args()
@@ -750,6 +750,13 @@ Examples:
 
     # === Data Preparation ===
     dataset_dir = args.dataset
+    
+    # Parse filter_classes (pipe-delimited string)
+    filter_classes = None
+    if args.filter_classes:
+        filter_classes = [c.strip() for c in args.filter_classes.split("|") if c.strip()]
+        print(f"Filtering to classes: {filter_classes}")
+    
     if args.project:
         dataset_dir, class_names = prepare_dataset(
             project_dir=args.project,
@@ -759,7 +766,7 @@ Examples:
             test_split=args.test_split,
             video_id=args.video_id,
             clean=not args.no_clean,
-            filter_classes=args.filter_classes,
+            filter_classes=filter_classes,
         )
 
         if args.prepare_only:

@@ -71,8 +71,8 @@ show_help() {
     echo "  --patience=N        Early stopping patience (default: 10)"
     echo "  --model=SIZE        Model size: base, large (default: base)"
     echo "  --output-dir=PATH   Output directory for run"
-    echo "  --filter-classes=NAMES  Only train on specific classes (comma-separated)"
-    echo "                          Example: --filter-classes='crane hook,person'"
+    echo "  --filter-classes=NAMES  Only train on specific classes (pipe-separated)"
+    echo "                          Example: --filter-classes='crane hook|crane-hook'"
     echo ""
     echo "SLURM Options:"
     echo "  --partition=NAME    SLURM partition (auto-detected if not set)"
@@ -281,10 +281,10 @@ echo ""
 SLURM_EOF
 
 # Build filter-classes argument if specified (for prepare-only)
+# Uses pipe '|' delimiter for class names that may contain spaces
 FILTER_ARG_STATIC=""
 if [ -n "${FILTER_CLASSES}" ]; then
-    # Convert comma-separated to space-separated for --filter-classes
-    FILTER_ARG_STATIC="--filter-classes ${FILTER_CLASSES//,/ }"
+    FILTER_ARG_STATIC="--filter-classes '${FILTER_CLASSES}'"
 fi
 
 # Add the training command
@@ -320,10 +320,10 @@ echo ""
 echo "Starting training..."
 
 # Build filter-classes argument if specified
+# Uses pipe '|' delimiter for class names that may contain spaces
 FILTER_ARG=""
 if [ -n "${FILTER_CLASSES}" ]; then
-    # Convert comma-separated to space-separated for --filter-classes
-    FILTER_ARG="--filter-classes ${FILTER_CLASSES//,/ }"
+    FILTER_ARG="--filter-classes '${FILTER_CLASSES}'"
 fi
 
 # Use torchrun for multi-GPU, regular python for single-GPU
