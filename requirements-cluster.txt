@@ -1,0 +1,9 @@
+# Requirements for RF-DETR fine-tuning on cluster
+# Install with: pip install --user -r requirements-cluster.txt
+
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+pillow>=10.0.0
+rfdetr>=1.0.0
+supervision>=0.18.0
