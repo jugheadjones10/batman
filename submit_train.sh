@@ -280,11 +280,11 @@ echo ""
 
 SLURM_EOF
 
-# Build filter-classes argument if specified (for prepare-only)
+# Build filter-classes argument if specified
 # Uses pipe '|' delimiter for class names that may contain spaces
-FILTER_ARG_STATIC=""
+FILTER_ARG=""
 if [ -n "${FILTER_CLASSES}" ]; then
-    FILTER_ARG_STATIC="--filter-classes '${FILTER_CLASSES}'"
+    FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
 fi
 
 # Add the training command
@@ -297,7 +297,7 @@ python3 finetune_rfdetr.py \\
     --project ${PROJECT_DIR} \\
     --output-dataset ${OUTPUT_DATASET} \\
     --prepare-only \\
-    ${FILTER_ARG_STATIC} \\
+    ${FILTER_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -313,56 +313,61 @@ echo "  Batch Size:  ${BATCH_SIZE}"
 echo "  Image Size:  ${IMAGE_SIZE}"
 echo "  LR:          ${LR}"
 echo "  Patience:    ${PATIENCE}"
-FILTER_CLASSES_DISPLAY="${FILTER_CLASSES:-all}"
-echo "  Classes:     \${FILTER_CLASSES_DISPLAY}"
+echo "  Classes:     ${FILTER_CLASSES:-all}"
 echo ""
 
 echo "Starting training..."
 
-# Build filter-classes argument if specified
-# Uses pipe '|' delimiter for class names that may contain spaces
-FILTER_ARG=""
-if [ -n "${FILTER_CLASSES}" ]; then
-    FILTER_ARG="--filter-classes '${FILTER_CLASSES}'"
-fi
+EOF
 
+    # Build the command with proper quoting for filter-classes
+    FILTER_ARG=""
+    if [ -n "${FILTER_CLASSES}" ]; then
+        FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
+    fi
+
+    # Add the training command with proper quoting
+    if [ "$NUM_GPUS" -gt 1 ]; then
+        cat >> "$SLURM_SCRIPT" << EOF
 # Use torchrun for multi-GPU, regular python for single-GPU
-if [ "\$NUM_GPUS" -gt 1 ]; then
-    echo "Using torchrun for multi-GPU training (\$NUM_GPUS GPUs)..."
-    torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
-        finetune_rfdetr.py \\
-        --project ${PROJECT_DIR} \\
-        --output-dataset ${OUTPUT_DATASET} \\
-        --output-dir ${OUTPUT_DIR} \\
-        --model ${MODEL} \\
-        --epochs ${EPOCHS} \\
-        --batch-size ${BATCH_SIZE} \\
-        --image-size ${IMAGE_SIZE} \\
-        --lr ${LR} \\
-        --patience ${PATIENCE} \\
-        --device cuda \\
-        --num-workers 8 \\
-        \${FILTER_ARG} \\
-        ${EXTRA_ARGS}
-else
-    echo "Using single-GPU training..."
-    python3 finetune_rfdetr.py \\
-        --project ${PROJECT_DIR} \\
-        --output-dataset ${OUTPUT_DATASET} \\
-        --output-dir ${OUTPUT_DIR} \\
-        --model ${MODEL} \\
-        --epochs ${EPOCHS} \\
-        --batch-size ${BATCH_SIZE} \\
-        --image-size ${IMAGE_SIZE} \\
-        --lr ${LR} \\
-        --patience ${PATIENCE} \\
-        --device cuda \\
-        --num-workers 8 \\
-        \${FILTER_ARG} \\
-        ${EXTRA_ARGS}
-fi
+echo "Using torchrun for multi-GPU training (\$NUM_GPUS GPUs)..."
+torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
+    finetune_rfdetr.py \\
+    --project ${PROJECT_DIR} \\
+    --output-dataset ${OUTPUT_DATASET} \\
+    --output-dir ${OUTPUT_DIR} \\
+    --model ${MODEL} \\
+    --epochs ${EPOCHS} \\
+    --batch-size ${BATCH_SIZE} \\
+    --image-size ${IMAGE_SIZE} \\
+    --lr ${LR} \\
+    --patience ${PATIENCE} \\
+    --device cuda \\
+    --num-workers 8 \\
+    ${FILTER_ARG} \\
+    ${EXTRA_ARGS}
 
 EOF
+    else
+        cat >> "$SLURM_SCRIPT" << EOF
+echo "Using single-GPU training..."
+python3 finetune_rfdetr.py \\
+    --project ${PROJECT_DIR} \\
+    --output-dataset ${OUTPUT_DATASET} \\
+    --output-dir ${OUTPUT_DIR} \\
+    --model ${MODEL} \\
+    --epochs ${EPOCHS} \\
+    --batch-size ${BATCH_SIZE} \\
+    --image-size ${IMAGE_SIZE} \\
+    --lr ${LR} \\
+    --patience ${PATIENCE} \\
+    --device cuda \\
+    --num-workers 8 \\
+    ${FILTER_ARG} \\
+    ${EXTRA_ARGS}
+
+EOF
+    fi
 fi
 
 cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
