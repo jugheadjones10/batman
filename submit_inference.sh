@@ -29,8 +29,9 @@ MODEL="base"
 CONFIDENCE=0.5
 FRAME_INTERVAL=1
 TRACK=false
-MAX_TRACK_AGE=30
-IOU_THRESHOLD=0.3
+TRACK_THRESH=0.25
+TRACK_BUFFER=30
+MATCH_THRESH=0.8
 DRY_RUN=false
 EXTRA_ARGS=""
 
@@ -55,9 +56,10 @@ show_help() {
     echo ""
     echo "Video Options:"
     echo "  --frame-interval=N   Run inference every N frames (default: 1)"
-    echo "  --track              Enable tracking between frames"
-    echo "  --max-track-age=N    Max frames to keep track (default: 30)"
-    echo "  --iou-threshold=N    IoU threshold for tracking (default: 0.3)"
+    echo "  --track              Enable ByteTrack tracking"
+    echo "  --track-thresh=N     ByteTrack detection threshold (default: 0.25)"
+    echo "  --track-buffer=N     Frames to keep lost tracks (default: 30)"
+    echo "  --match-thresh=N     IoU threshold for matching (default: 0.8)"
     echo ""
     echo "Other:"
     echo "  --dry-run            Show generated script without submitting"
@@ -87,8 +89,9 @@ for arg in "$@"; do
         --confidence=*)    CONFIDENCE="${arg#*=}" ;;
         --frame-interval=*) FRAME_INTERVAL="${arg#*=}" ;;
         --track)           TRACK=true ;;
-        --max-track-age=*) MAX_TRACK_AGE="${arg#*=}" ;;
-        --iou-threshold=*) IOU_THRESHOLD="${arg#*=}" ;;
+        --track-thresh=*)  TRACK_THRESH="${arg#*=}" ;;
+        --track-buffer=*)  TRACK_BUFFER="${arg#*=}" ;;
+        --match-thresh=*)  MATCH_THRESH="${arg#*=}" ;;
         --dry-run)         DRY_RUN=true ;;
         --help|-h)         show_help ;;
         *)                 EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
@@ -198,7 +201,7 @@ SLURM_EOF
 # Build tracking arguments
 TRACK_ARGS=""
 if [ "$TRACK" = true ]; then
-    TRACK_ARGS="--track --max-track-age ${MAX_TRACK_AGE} --iou-threshold ${IOU_THRESHOLD}"
+    TRACK_ARGS="--track --track-thresh ${TRACK_THRESH} --track-buffer ${TRACK_BUFFER} --match-thresh ${MATCH_THRESH}"
 fi
 
 # Add the inference command

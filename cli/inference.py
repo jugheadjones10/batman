@@ -283,19 +283,25 @@ Examples:
     parser.add_argument(
         "--track",
         action="store_true",
-        help="Enable tracking between detection frames",
+        help="Enable ByteTrack tracking between frames",
     )
     parser.add_argument(
-        "--max-track-age",
+        "--track-thresh",
+        type=float,
+        default=0.25,
+        help="ByteTrack: detection threshold for tracking (default: 0.25)",
+    )
+    parser.add_argument(
+        "--track-buffer",
         type=int,
         default=30,
-        help="Max frames to keep track without detection (default: 30)",
+        help="ByteTrack: frames to keep lost tracks (default: 30)",
     )
     parser.add_argument(
-        "--iou-threshold",
+        "--match-thresh",
         type=float,
-        default=0.3,
-        help="IoU threshold for track matching (default: 0.3)",
+        default=0.8,
+        help="ByteTrack: IoU threshold for matching (default: 0.8)",
     )
     
     # Classes
@@ -317,8 +323,9 @@ Examples:
         device=args.device,
         frame_interval=args.frame_interval,
         use_tracking=args.track,
-        max_track_age=args.max_track_age,
-        iou_threshold=args.iou_threshold,
+        track_thresh=args.track_thresh,
+        track_buffer=args.track_buffer,
+        match_thresh=args.match_thresh,
         save_visualizations=not args.no_visualizations,
         save_json=not args.no_json,
     )
