@@ -193,15 +193,16 @@ def create_coco_split(
     if original_class_names is None:
         original_class_names = class_names
 
-    # Map original class index -> new class index (1-indexed for COCO)
+    # Map original class index -> new class index (0-indexed for RF-DETR compatibility)
+    # Note: Standard COCO uses 1-indexed, but RF-DETR expects 0-indexed categories
     class_id_map = {}
     for new_idx, name in enumerate(class_names):
         original_idx = original_class_names.index(name) if name in original_class_names else new_idx
-        class_id_map[original_idx] = new_idx + 1  # COCO is 1-indexed
+        class_id_map[original_idx] = new_idx  # 0-indexed for RF-DETR
 
-    # Create categories (COCO uses 1-indexed category IDs)
+    # Create categories (0-indexed for RF-DETR)
     for i, name in enumerate(class_names):
-        coco_data["categories"].append({"id": i + 1, "name": name, "supercategory": "object"})
+        coco_data["categories"].append({"id": i, "name": name, "supercategory": "object"})
 
     annotation_id = 1
 
