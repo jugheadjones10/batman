@@ -293,7 +293,7 @@ if [ "$PREPARE_ONLY" = true ]; then
 
 echo "Preparing dataset only..."
 echo "  Filter classes: ${FILTER_CLASSES:-all}"
-python3 finetune_rfdetr.py \\
+python3 -m cli.train \\
     --project ${PROJECT_DIR} \\
     --output-dataset ${OUTPUT_DATASET} \\
     --prepare-only \\
@@ -313,7 +313,15 @@ echo "  Batch Size:  ${BATCH_SIZE}"
 echo "  Image Size:  ${IMAGE_SIZE}"
 echo "  LR:          ${LR}"
 echo "  Patience:    ${PATIENCE}"
-echo "  Classes:     ${FILTER_CLASSES:-all}"
+echo ""
+
+# Display project classes
+echo "Project Classes:"
+PROJECT_CLASSES=\$(python3 -c "import json; c=json.load(open('${PROJECT_DIR}/project.json'))['classes']; print('  ' + '\\n  '.join(c))" 2>/dev/null || echo "  (unable to read)")
+echo "\$PROJECT_CLASSES"
+echo ""
+FILTER_DISPLAY="${FILTER_CLASSES:-all classes}"
+echo "Training on:   \$FILTER_DISPLAY"
 echo ""
 
 echo "Starting training..."
@@ -332,7 +340,7 @@ EOF
 # Use torchrun for multi-GPU, regular python for single-GPU
 echo "Using torchrun for multi-GPU training (\$NUM_GPUS GPUs)..."
 torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
-    finetune_rfdetr.py \\
+    -m cli.train \\
     --project ${PROJECT_DIR} \\
     --output-dataset ${OUTPUT_DATASET} \\
     --output-dir ${OUTPUT_DIR} \\
@@ -351,7 +359,7 @@ EOF
     else
         cat >> "$SLURM_SCRIPT" << EOF
 echo "Using single-GPU training..."
-python3 finetune_rfdetr.py \\
+python3 -m cli.train \\
     --project ${PROJECT_DIR} \\
     --output-dataset ${OUTPUT_DATASET} \\
     --output-dir ${OUTPUT_DIR} \\

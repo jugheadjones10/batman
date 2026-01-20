@@ -82,9 +82,7 @@ temp/
 *.tmp
 
 # Test videos and large media files
-test_vid_*.mp4
-test_vid_*.avi
-test_vid_*.mov
+*.mp4
 
 # SQLite databases
 *.db

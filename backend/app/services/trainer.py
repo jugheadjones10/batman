@@ -1,5 +1,7 @@
 """Model training service for YOLO and RF-DETR."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -11,8 +13,18 @@ from loguru import logger
 
 from backend.app.config import settings
 
+# Import core training logic
+from src.core.trainer import (
+    DatasetStats,
+    RFDETRTrainer,
+    TrainingConfig,
+    TrainingResult,
+    get_device,
+    measure_latency,
+    prepare_coco_dataset,
+)
+
 # Enable MPS fallback for unsupported PyTorch operations on Apple Silicon
-# This allows RF-DETR to train on Mac by falling back to CPU for specific ops
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 
@@ -43,7 +55,7 @@ class ModelTrainer:
         "large": 0.1,
     }
 
-    # Augmentation presets
+    # Augmentation presets (for YOLO)
     AUG_PRESETS = {
         "none": {
             "hsv_h": 0.0,
@@ -92,7 +104,6 @@ class ModelTrainer:
             "fliplr": 0.5,
             "mosaic": 1.0,
             "mixup": 0.3,
-            # Video-specific augmentations
             "blur": 0.01,
             "jpeg_quality": (70, 95),
         },
@@ -102,6 +113,42 @@ class ModelTrainer:
         self.project_path = project_path
         self.runs_dir = project_path / "runs"
         self.runs_dir.mkdir(exist_ok=True)
+
+    async def prepare_dataset(
+        self,
+        video_id: int = -1,
+        filter_classes: list[str] | None = None,
+        output_dir: Path | None = None,
+    ) -> DatasetStats:
+        """
+        Prepare COCO format dataset from project annotations.
+
+        Uses core.trainer.prepare_coco_dataset internally.
+
+        Args:
+            video_id: Video ID to process (-1 for all/imports)
+            filter_classes: Optional list of class names to include
+            output_dir: Output directory (default: project_path/exports/coco)
+
+        Returns:
+            DatasetStats with preparation results
+        """
+        if output_dir is None:
+            output_dir = self.project_path / "exports" / "coco"
+
+        loop = asyncio.get_event_loop()
+
+        def _prepare():
+            return prepare_coco_dataset(
+                project_dir=self.project_path,
+                output_dir=output_dir,
+                video_id=video_id,
+                filter_classes=filter_classes,
+            )
+
+        stats = await loop.run_in_executor(None, _prepare)
+        logger.info(f"Dataset prepared: {stats.train_images} train, {stats.val_images} val images")
+        return stats
 
     async def train(
         self,
@@ -116,7 +163,7 @@ class ModelTrainer:
 
         Args:
             run_name: Name for this training run
-            dataset_path: Path to YOLO-format dataset
+            dataset_path: Path to dataset (YOLO or COCO format)
             base_model: Model to fine-tune ('yolo11n', 'yolo11s', 'rfdetr-b', etc.)
             config: Training configuration
             callback: Optional callback for progress updates
@@ -183,7 +230,6 @@ class ModelTrainer:
 
         logger.info(f"Starting YOLO training: {train_args}")
 
-        # Run training in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
         start_time = time.time()
 
@@ -193,12 +239,10 @@ class ModelTrainer:
         results = await loop.run_in_executor(None, run_training)
 
         training_time = time.time() - start_time
-
-        # Get best weights path
         best_weights = run_dir / "train" / "weights" / "best.pt"
 
         # Measure latency
-        latency_ms = await self._measure_latency(best_weights, config.get("image_size", 640))
+        latency_ms = await self._measure_latency_yolo(best_weights, config.get("image_size", 640))
 
         return {
             "status": "completed",
@@ -221,98 +265,73 @@ class ModelTrainer:
         config: dict,
         callback: TrainingCallback | None = None,
     ) -> dict:
-        """Train RF-DETR model (COCO format dataset required)."""
-        # Import based on model variant
-        if base_model == "rfdetr-l":
-            from rfdetr import RFDETRLarge as RFDETRModel
-        elif base_model == "rfdetr-m":
-            from rfdetr import RFDETRMedium as RFDETRModel
-        elif base_model == "rfdetr-s":
-            from rfdetr import RFDETRSmall as RFDETRModel
-        elif base_model == "rfdetr-n":
-            from rfdetr import RFDETRNano as RFDETRModel
-        else:
-            from rfdetr import RFDETRBase as RFDETRModel
-
-        model = RFDETRModel()
-
-        # Get batch size and calculate grad accumulation for effective batch of 16
-        batch_size = config.get("batch_size", 4)
-        grad_accum = max(1, 16 // batch_size)
-
-        # Resolution must be divisible by 56 for RF-DETR
-        resolution = config.get("image_size", 560)
-        resolution = (resolution // 56) * 56  # Round down to nearest multiple of 56
-        if resolution < 280:
-            resolution = 280
-
-        # Training arguments per RF-DETR docs
-        train_args = {
-            "dataset_dir": str(dataset_path),
-            "epochs": config.get("epochs", 10),
-            "batch_size": batch_size,
-            "grad_accum_steps": grad_accum,
-            "lr": self.LR_PRESETS.get(config.get("lr_preset", "medium"), 1e-4),
-            "resolution": resolution,
-            "output_dir": str(run_dir),
-            "early_stopping": True,
-            "early_stopping_patience": config.get("early_stopping_patience", 5),
-            "tensorboard": True,  # Enable TensorBoard logging
+        """Train RF-DETR model using core trainer logic."""
+        # Map model variant to size
+        model_size_map = {
+            "rfdetr-l": "large",
+            "rfdetr-m": "medium",
+            "rfdetr-s": "small",
+            "rfdetr-n": "nano",
+            "rfdetr-b": "base",
         }
+        model_size = model_size_map.get(base_model, "base")
 
-        # Only add device if not mps (RF-DETR may not support MPS yet)
-        if settings.device != "mps":
-            train_args["device"] = settings.device
-        else:
-            logger.info("Using MPS with CPU fallback for unsupported operations")
+        # Create training config from dict
+        training_config = TrainingConfig(
+            epochs=config.get("epochs", 10),
+            batch_size=config.get("batch_size", 4),
+            image_size=config.get("image_size", 560),
+            lr=self.LR_PRESETS.get(config.get("lr_preset", "medium"), 1e-4),
+            device=settings.device,
+            patience=config.get("early_stopping_patience", 5),
+            grad_accum=max(1, 16 // config.get("batch_size", 4)),
+        )
 
-        logger.info(f"Starting RF-DETR training: {train_args}")
+        logger.info(f"Starting RF-DETR {model_size} training with config: {training_config}")
+
+        # Use core trainer
+        trainer = RFDETRTrainer(model_size=model_size)
 
         loop = asyncio.get_event_loop()
         start_time = time.time()
 
-        def run_training():
-            model.train(**train_args)
-            return model
+        def run_training() -> TrainingResult:
+            return trainer.train(
+                dataset_dir=dataset_path,
+                output_dir=run_dir,
+                config=training_config,
+            )
 
-        await loop.run_in_executor(None, run_training)
+        result = await loop.run_in_executor(None, run_training)
 
         training_time = time.time() - start_time
 
-        # Find best checkpoint (RF-DETR saves as checkpoint_best_total.pth)
-        checkpoint_path = run_dir / "checkpoint_best_total.pth"
-        if not checkpoint_path.exists():
-            # Try other possible names
-            for name in [
-                "checkpoint_best_ema.pth",
-                "checkpoint_best_regular.pth",
-                "checkpoint.pth",
-            ]:
-                alt_path = run_dir / name
-                if alt_path.exists():
-                    checkpoint_path = alt_path
-                    break
-
-        # Measure latency
-        latency_ms = await self._measure_latency(checkpoint_path, resolution, model_type="rfdetr")
+        # Measure latency using core function
+        try:
+            latency_ms = await loop.run_in_executor(
+                None,
+                lambda: measure_latency(result.checkpoint_path, training_config.image_size),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to measure latency: {e}")
+            latency_ms = 0.0
 
         return {
-            "status": "completed",
-            "checkpoint_path": str(checkpoint_path),
+            "status": result.status,
+            "checkpoint_path": str(result.checkpoint_path),
             "training_time_seconds": training_time,
             "latency_ms": latency_ms,
-            "metrics": {},  # RF-DETR metrics would be extracted from training logs
+            "metrics": result.metrics,
         }
 
-    async def _measure_latency(
+    async def _measure_latency_yolo(
         self,
         checkpoint_path: Path,
         image_size: int,
-        model_type: str = "yolo",
         warmup_runs: int = 5,
         test_runs: int = 20,
     ) -> float:
-        """Measure inference latency on a dummy image."""
+        """Measure YOLO inference latency."""
         import numpy as np
 
         try:
@@ -320,49 +339,24 @@ class ModelTrainer:
                 logger.warning(f"Checkpoint not found: {checkpoint_path}")
                 return 0.0
 
-            if model_type == "yolo":
-                from ultralytics import YOLO
+            from ultralytics import YOLO
 
-                model = YOLO(str(checkpoint_path))
+            model = YOLO(str(checkpoint_path))
+            dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
 
-                # Create dummy image
-                dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
+            # Warmup
+            for _ in range(warmup_runs):
+                model(dummy_img, verbose=False)
 
-                # Warmup
-                for _ in range(warmup_runs):
-                    model(dummy_img, verbose=False)
+            # Measure
+            times = []
+            for _ in range(test_runs):
+                start = time.perf_counter()
+                model(dummy_img, verbose=False)
+                times.append((time.perf_counter() - start) * 1000)
 
-                # Measure
-                times = []
-                for _ in range(test_runs):
-                    start = time.perf_counter()
-                    model(dummy_img, verbose=False)
-                    times.append((time.perf_counter() - start) * 1000)
-
-                return float(np.mean(times))
-
-            else:
-                # RF-DETR latency measurement
-                from rfdetr import RFDETRBase
-
-                model = RFDETRBase(pretrain_weights=str(checkpoint_path))
-
-                # Create dummy image
-                dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
-
-                # Warmup
-                for _ in range(warmup_runs):
-                    model.predict(dummy_img)
-
-                # Measure
-                times = []
-                for _ in range(test_runs):
-                    start = time.perf_counter()
-                    model.predict(dummy_img)
-                    times.append((time.perf_counter() - start) * 1000)
-
-                return float(np.mean(times))
+            return float(np.mean(times))
 
         except Exception as e:
-            logger.warning(f"Failed to measure latency: {e}")
+            logger.warning(f"Failed to measure YOLO latency: {e}")
             return 0.0

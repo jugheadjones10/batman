@@ -191,6 +191,7 @@ export default function ProjectPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })  // Refresh video annotation counts
       toast({ title: 'Classes merged', description: data.message, type: 'success' })
       setMergingClasses([])
     },
@@ -204,6 +205,7 @@ export default function ProjectPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })  // Refresh video annotation counts
       toast({
         title: 'Class deleted',
         description: `${data.annotations_deleted} annotations removed`,

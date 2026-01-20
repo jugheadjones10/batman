@@ -2,9 +2,11 @@
 """
 Import data from Roboflow or local COCO datasets into a Batman project.
 
+This CLI wraps the core import logic from src.core.importer.
+
 Usage:
     # Import from Roboflow
-    python import_data.py roboflow \\
+    python -m cli.importer roboflow \\
         --project data/projects/MyProject \\
         --api-key YOUR_API_KEY \\
         --workspace your-workspace \\
@@ -12,18 +14,21 @@ Usage:
         --version 1
 
     # Import from local COCO dataset
-    python import_data.py coco \\
+    python -m cli.importer coco \\
         --project data/projects/MyProject \\
         --coco-path /path/to/coco/dataset
 
     # Create a new project and import
-    python import_data.py roboflow \\
+    python -m cli.importer roboflow \\
         --project data/projects/NewProject \\
         --create \\
         --api-key YOUR_API_KEY \\
         --workspace your-workspace \\
         --rf-project your-project \\
         --version 1
+
+    # List all projects
+    python -m cli.importer list
 """
 
 from __future__ import annotations
@@ -33,11 +38,9 @@ import os
 import sys
 from pathlib import Path
 
-# Add project root to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from src.core.project import Project
+# Import core logic
 from src.core.importer import DataImporter
+from src.core.project import Project
 
 
 def print_progress(status: str, pct: int, msg: str) -> None:
@@ -115,7 +118,7 @@ def import_roboflow(args: argparse.Namespace) -> int:
     if stats.classes_added:
         print(f"  New classes added:   {', '.join(stats.classes_added)}")
     print()
-    print(f"Project now has:")
+    print("Project now has:")
     print(f"  Total classes: {len(project.classes)}")
     print(f"  Total frames:  {project.frame_count}")
     print(f"  Total annotations: {project.annotation_count}")
@@ -181,7 +184,7 @@ def import_coco(args: argparse.Namespace) -> int:
     if stats.classes_added:
         print(f"  New classes added:   {', '.join(stats.classes_added)}")
     print()
-    print(f"Project now has:")
+    print("Project now has:")
     print(f"  Total classes: {len(project.classes)}")
     print(f"  Total frames:  {project.frame_count}")
     print(f"  Total annotations: {project.annotation_count}")
@@ -227,19 +230,19 @@ def main() -> int:
         epilog="""
 Examples:
   # Import from Roboflow
-  python import_data.py roboflow --project data/projects/MyProject \\
+  python -m cli.importer roboflow --project data/projects/MyProject \\
       --api-key YOUR_KEY --workspace my-workspace --rf-project my-project --version 1
 
   # Import from local COCO dataset
-  python import_data.py coco --project data/projects/MyProject \\
+  python -m cli.importer coco --project data/projects/MyProject \\
       --coco-path /path/to/coco/dataset
 
   # Create new project and import
-  python import_data.py roboflow --project data/projects/NewProject --create \\
+  python -m cli.importer roboflow --project data/projects/NewProject --create \\
       --api-key YOUR_KEY --workspace my-workspace --rf-project my-project --version 1
 
   # List all projects
-  python import_data.py list
+  python -m cli.importer list
         """,
     )
 
@@ -248,8 +251,12 @@ Examples:
     # Roboflow subcommand
     rf_parser = subparsers.add_parser("roboflow", help="Import from Roboflow")
     rf_parser.add_argument("--project", type=str, required=True, help="Batman project path")
-    rf_parser.add_argument("--create", action="store_true", help="Create new project if it doesn't exist")
-    rf_parser.add_argument("--api-key", type=str, help="Roboflow API key (or set ROBOFLOW_API_KEY env var)")
+    rf_parser.add_argument(
+        "--create", action="store_true", help="Create new project if it doesn't exist"
+    )
+    rf_parser.add_argument(
+        "--api-key", type=str, help="Roboflow API key (or set ROBOFLOW_API_KEY env var)"
+    )
     rf_parser.add_argument("--workspace", type=str, required=True, help="Roboflow workspace name")
     rf_parser.add_argument("--rf-project", type=str, required=True, help="Roboflow project name")
     rf_parser.add_argument("--version", type=int, required=True, help="Dataset version number")
@@ -258,12 +265,18 @@ Examples:
     # COCO subcommand
     coco_parser = subparsers.add_parser("coco", help="Import from local COCO dataset")
     coco_parser.add_argument("--project", type=str, required=True, help="Batman project path")
-    coco_parser.add_argument("--create", action="store_true", help="Create new project if it doesn't exist")
-    coco_parser.add_argument("--coco-path", type=str, required=True, help="Path to COCO dataset directory")
+    coco_parser.add_argument(
+        "--create", action="store_true", help="Create new project if it doesn't exist"
+    )
+    coco_parser.add_argument(
+        "--coco-path", type=str, required=True, help="Path to COCO dataset directory"
+    )
 
     # List subcommand
     list_parser = subparsers.add_parser("list", help="List all projects")
-    list_parser.add_argument("--projects-dir", type=str, default="data/projects", help="Projects directory")
+    list_parser.add_argument(
+        "--projects-dir", type=str, default="data/projects", help="Projects directory"
+    )
 
     args = parser.parse_args()
 
