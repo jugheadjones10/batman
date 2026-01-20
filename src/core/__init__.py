@@ -1,6 +1,16 @@
 """Core logic shared between backend, frontend, and CLI tools."""
 
 from src.core.importer import DataImporter
+from src.core.inference import (
+    Detection,
+    FrameResult,
+    InferenceConfig,
+    InferenceStats,
+    RFDETRInference,
+    SimpleTracker,
+    draw_detections,
+    save_results_json,
+)
 from src.core.project import Project, ProjectConfig
 from src.core.trainer import (
     DatasetStats,
@@ -13,10 +23,18 @@ from src.core.trainer import (
 __all__ = [
     "DataImporter",
     "DatasetStats",
+    "Detection",
+    "FrameResult",
+    "InferenceConfig",
+    "InferenceStats",
     "Project",
     "ProjectConfig",
+    "RFDETRInference",
     "RFDETRTrainer",
+    "SimpleTracker",
     "TrainingConfig",
     "TrainingResult",
+    "draw_detections",
     "prepare_coco_dataset",
+    "save_results_json",
 ]
