@@ -38,6 +38,14 @@ class LocalCocoImportRequest(BaseModel):
     path: str  # Path to COCO directory
 
 
+class CocoZooImportRequest(BaseModel):
+    """Request to import from COCO dataset zoo via FiftyOne."""
+
+    classes: list[str]  # e.g., ["person", "car"]
+    split: str = "validation"  # "train", "validation", or "test"
+    max_samples: int | None = None  # None for all matching images
+
+
 class ImportResult(BaseModel):
     """Result of a dataset import."""
 
@@ -182,6 +190,138 @@ async def import_from_roboflow_stream(
     )
 
 
+@router.post("/coco-zoo", response_model=ImportResult)
+async def import_from_coco_zoo(
+    project_name: str,
+    request: CocoZooImportRequest,
+):
+    """
+    Import specific classes from COCO dataset using FiftyOne.
+
+    This downloads only the images that contain the specified classes,
+    not the entire COCO dataset.
+
+    Example:
+        POST /api/projects/MyProject/import/coco-zoo
+        {
+            "classes": ["person", "car"],
+            "split": "validation",
+            "max_samples": 500
+        }
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        # Load project using shared core
+        project = Project.load(project_path)
+        importer = DataImporter(project)
+
+        # Run sync import in thread pool
+        loop = asyncio.get_event_loop()
+        stats = await loop.run_in_executor(
+            _executor,
+            lambda: importer.import_coco_zoo(
+                classes=request.classes,
+                split=request.split,
+                max_samples=request.max_samples,
+            ),
+        )
+
+        return ImportResult(
+            images_imported=stats.images_imported,
+            annotations_imported=stats.annotations_imported,
+            classes_added=stats.classes_added,
+            splits_imported=stats.splits_imported,
+            message=f"Successfully imported {stats.images_imported} images with {stats.annotations_imported} annotations from COCO",
+        )
+    except ImportError as e:
+        logger.error(f"COCO Zoo import failed - missing dependency: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"COCO Zoo import failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/coco-zoo/stream")
+async def import_from_coco_zoo_stream(
+    project_name: str,
+    request: CocoZooImportRequest,
+):
+    """
+    Import from COCO dataset zoo with streaming progress updates.
+
+    Returns Server-Sent Events with progress information.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    async def generate_progress() -> AsyncGenerator[str, None]:
+        progress_updates: list[dict] = []
+        import_complete = False
+        import_error: str | None = None
+        final_stats = None
+
+        def on_progress(status: str, pct: int, msg: str):
+            progress_updates.append(
+                {"status": status, "progress": pct, "message": msg}
+            )
+
+        def run_import():
+            nonlocal import_complete, import_error, final_stats
+            try:
+                project = Project.load(project_path)
+                importer = DataImporter(project)
+                stats = importer.import_coco_zoo(
+                    classes=request.classes,
+                    split=request.split,
+                    max_samples=request.max_samples,
+                    on_progress=on_progress,
+                )
+                final_stats = stats
+                import_complete = True
+            except Exception as e:
+                import_error = str(e)
+                logger.error(f"COCO Zoo import failed: {e}")
+
+        # Start import in background thread
+        loop = asyncio.get_event_loop()
+        import_task = loop.run_in_executor(_executor, run_import)
+
+        # Stream progress updates
+        last_sent = 0
+        while not import_complete and not import_error:
+            await asyncio.sleep(0.1)
+
+            # Send any new progress updates
+            while last_sent < len(progress_updates):
+                yield f"data: {json.dumps(progress_updates[last_sent])}\n\n"
+                last_sent += 1
+
+        # Wait for task to complete
+        await import_task
+
+        # Send final status
+        if import_error:
+            yield f"data: {json.dumps({'status': 'error', 'progress': 100, 'message': import_error})}\n\n"
+        elif final_stats:
+            yield f"data: {json.dumps({'status': 'complete', 'progress': 100, 'message': f'Imported {final_stats.images_imported} images', 'images_imported': final_stats.images_imported, 'annotations_imported': final_stats.annotations_imported, 'classes_added': final_stats.classes_added, 'splits_imported': final_stats.splits_imported})}\n\n"
+
+    return StreamingResponse(
+        generate_progress(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/local-coco", response_model=ImportResult)
 async def import_from_local_coco(
     project_name: str,
@@ -289,6 +429,7 @@ async def list_imported_datasets(project_name: str):
     source_map = {
         DataImporter.ROBOFLOW_VIDEO_ID: "roboflow",
         DataImporter.LOCAL_COCO_VIDEO_ID: "local_coco",
+        DataImporter.COCO_ZOO_VIDEO_ID: "coco_zoo",
     }
 
     for video_dir in frames_dir.iterdir():

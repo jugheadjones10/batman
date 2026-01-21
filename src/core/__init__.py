@@ -1,6 +1,6 @@
 """Core logic shared between backend, frontend, and CLI tools."""
 
-from src.core.importer import DataImporter
+from src.core.importer import COCO_CLASSES, DataImporter
 from src.core.inference import (
     Detection,
     FrameResult,
@@ -21,6 +21,7 @@ from src.core.trainer import (
 )
 
 __all__ = [
+    "COCO_CLASSES",
     "DataImporter",
     "DatasetStats",
     "Detection",

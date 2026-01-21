@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Import data from Roboflow or local COCO datasets into a Batman project.
+Import data from Roboflow or COCO Zoo datasets into a Batman project.
 
 This CLI wraps the core import logic from src.core.importer.
 
@@ -13,10 +13,12 @@ Usage:
         --rf-project your-project \\
         --version 1
 
-    # Import from local COCO dataset
+    # Import from COCO Zoo via FiftyOne (specific classes)
     python -m cli.importer coco \\
         --project data/projects/MyProject \\
-        --coco-path /path/to/coco/dataset
+        --classes person car \\
+        --split validation \\
+        --max-samples 500
 
     # Create a new project and import
     python -m cli.importer roboflow \\
@@ -127,14 +129,9 @@ def import_roboflow(args: argparse.Namespace) -> int:
 
 
 def import_coco(args: argparse.Namespace) -> int:
-    """Import from local COCO dataset."""
+    """Import from COCO Zoo via FiftyOne."""
     # Get or create project
     project_path = Path(args.project)
-    coco_path = Path(args.coco_path)
-
-    if not coco_path.exists():
-        print(f"Error: COCO dataset not found: {coco_path}")
-        return 1
 
     if args.create:
         if project_path.exists():
@@ -144,7 +141,7 @@ def import_coco(args: argparse.Namespace) -> int:
         project = Project.create(
             project_path=project_path,
             name=project_path.name,
-            description=f"Imported from local COCO: {coco_path}",
+            description=f"Imported from COCO Zoo: {', '.join(args.classes)}",
         )
     else:
         if not project_path.exists():
@@ -159,14 +156,19 @@ def import_coco(args: argparse.Namespace) -> int:
     print()
 
     # Import
-    print(f"Importing from: {coco_path}")
+    print("Importing from COCO Zoo via FiftyOne")
+    print(f"  Classes: {', '.join(args.classes)}")
+    print(f"  Split: {args.split}")
+    print(f"  Max samples: {args.max_samples or 'all'}")
     print()
 
     importer = DataImporter(project)
 
     try:
-        stats = importer.import_local_coco(
-            coco_path=coco_path,
+        stats = importer.import_coco_zoo(
+            classes=args.classes,
+            split=args.split,
+            max_samples=args.max_samples,
             on_progress=print_progress,
         )
     except Exception as e:
@@ -233,13 +235,17 @@ Examples:
   python -m cli.importer roboflow --project data/projects/MyProject \\
       --api-key YOUR_KEY --workspace my-workspace --rf-project my-project --version 1
 
-  # Import from local COCO dataset
+  # Import person class from COCO Zoo via FiftyOne
   python -m cli.importer coco --project data/projects/MyProject \\
-      --coco-path /path/to/coco/dataset
+      --classes person --split validation --max-samples 500
+
+  # Import multiple classes from COCO Zoo
+  python -m cli.importer coco --project data/projects/MyProject \\
+      --classes person car dog --split train
 
   # Create new project and import
-  python -m cli.importer roboflow --project data/projects/NewProject --create \\
-      --api-key YOUR_KEY --workspace my-workspace --rf-project my-project --version 1
+  python -m cli.importer coco --project data/projects/NewProject --create \\
+      --classes person --split validation --max-samples 1000
 
   # List all projects
   python -m cli.importer list
@@ -260,16 +266,28 @@ Examples:
     rf_parser.add_argument("--workspace", type=str, required=True, help="Roboflow workspace name")
     rf_parser.add_argument("--rf-project", type=str, required=True, help="Roboflow project name")
     rf_parser.add_argument("--version", type=int, required=True, help="Dataset version number")
-    rf_parser.add_argument("--format", type=str, default="coco", help="Download format (default: coco)")
+    rf_parser.add_argument(
+        "--format", type=str, default="coco", help="Download format (default: coco)"
+    )
 
     # COCO subcommand
-    coco_parser = subparsers.add_parser("coco", help="Import from local COCO dataset")
+    coco_parser = subparsers.add_parser("coco", help="Import from COCO Zoo via FiftyOne")
     coco_parser.add_argument("--project", type=str, required=True, help="Batman project path")
     coco_parser.add_argument(
         "--create", action="store_true", help="Create new project if it doesn't exist"
     )
     coco_parser.add_argument(
-        "--coco-path", type=str, required=True, help="Path to COCO dataset directory"
+        "--classes", type=str, nargs="+", required=True,
+        help="COCO class names to import (e.g., person car dog)"
+    )
+    coco_parser.add_argument(
+        "--split", type=str, default="validation",
+        choices=["train", "validation", "test"],
+        help="Dataset split to import (default: validation)"
+    )
+    coco_parser.add_argument(
+        "--max-samples", type=int, default=None,
+        help="Maximum number of samples to import (default: all)"
     )
 
     # List subcommand
