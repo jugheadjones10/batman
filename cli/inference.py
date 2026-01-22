@@ -3,28 +3,25 @@
 Run RF-DETR inference on images or videos.
 
 Usage:
-    # Single image
+    # Using run name + project for class names
+    python -m cli.inference --run rfdetr_h200_20260120_105925 \\
+        --project data/projects/CraneHook --input video.mp4
+
+    # Using the latest run
+    python -m cli.inference --latest --project data/projects/CraneHook --input video.mp4
+
+    # Using explicit checkpoint path
     python -m cli.inference --checkpoint runs/my_run/best.pth --input image.jpg
 
-    # Multiple images
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input images/*.jpg
-
-    # Video (all frames, recommended for best quality)
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4
-
     # Video with frame skipping + tracking + Kalman prediction (smooth interpolation)
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 \\
-        --frame-interval 3 --track
-
-    # Video with tracking but no Kalman prediction (static boxes between keyframes)
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 \\
-        --frame-interval 3 --track --no-kalman
+    python -m cli.inference --run my_run -p data/projects/MyProject \\
+        --input video.mp4 --frame-interval 3 --track
 
     # Skip optimization (faster startup, slower inference)
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --no-optimize
+    python -m cli.inference --run my_run --input video.mp4 --no-optimize
 
     # Custom output directory
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --output results/
+    python -m cli.inference --run my_run --input video.mp4 --output results/
 """
 
 from __future__ import annotations
@@ -49,6 +46,75 @@ from src.core.inference import (
     draw_detections,
     save_results_json,
 )
+
+
+RUNS_DIR = Path("runs")
+
+
+def find_checkpoint_in_run(run_dir: Path) -> Path | None:
+    """Find the best checkpoint in a run directory."""
+    # Common checkpoint names in order of preference
+    checkpoint_names = [
+        "checkpoint_best_total.pth",
+        "best.pth",
+        "checkpoint_best.pth",
+        "checkpoint_final.pth",
+        "final.pth",
+    ]
+
+    for name in checkpoint_names:
+        checkpoint = run_dir / name
+        if checkpoint.exists():
+            return checkpoint
+
+    # Fallback: find any .pth file
+    pth_files = list(run_dir.glob("*.pth"))
+    if pth_files:
+        # Sort by modification time, newest first
+        pth_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return pth_files[0]
+
+    return None
+
+
+def resolve_checkpoint(args) -> Path:
+    """Resolve checkpoint path from args (--checkpoint, --run, or --latest)."""
+    if args.checkpoint:
+        return args.checkpoint
+
+    if args.latest:
+        # Find the most recent run directory
+        if not RUNS_DIR.exists():
+            logger.error(f"Runs directory not found: {RUNS_DIR}")
+            sys.exit(1)
+
+        run_dirs = [d for d in RUNS_DIR.iterdir() if d.is_dir()]
+        if not run_dirs:
+            logger.error(f"No runs found in {RUNS_DIR}")
+            sys.exit(1)
+
+        # Sort by modification time, newest first
+        run_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        run_dir = run_dirs[0]
+        logger.info(f"Using latest run: {run_dir.name}")
+
+    elif args.run:
+        run_dir = RUNS_DIR / args.run
+        if not run_dir.exists():
+            logger.error(f"Run not found: {run_dir}")
+            logger.info("Available runs:")
+            if RUNS_DIR.exists():
+                for d in sorted(RUNS_DIR.iterdir()):
+                    if d.is_dir():
+                        logger.info(f"  - {d.name}")
+            sys.exit(1)
+
+    checkpoint = find_checkpoint_in_run(run_dir)
+    if checkpoint is None:
+        logger.error(f"No checkpoint found in {run_dir}")
+        sys.exit(1)
+
+    return checkpoint
 
 
 def is_video_file(path: Path) -> bool:
@@ -210,34 +276,49 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single image
-  python -m cli.inference --checkpoint runs/run1/best.pth --input image.jpg
+  # Use a run + project for class names
+  python -m cli.inference --run rfdetr_h200_20260120_105925 \\
+      --project data/projects/CraneHook --input video.mp4
 
-  # Video with tracking + Kalman interpolation (best for frame skipping)
-  python -m cli.inference --checkpoint runs/run1/best.pth --input video.mp4 \\
-      --frame-interval 3 --track
+  # Use the latest run
+  python -m cli.inference --latest -p data/projects/CraneHook --input video.mp4
 
-  # Video without optimization (faster startup)
-  python -m cli.inference --checkpoint runs/run1/best.pth --input video.mp4 --no-optimize
+  # Video with tracking + Kalman interpolation
+  python -m cli.inference --run my_run -p data/projects/MyProject \\
+      --input video.mp4 --frame-interval 3 --track
 
-  # Batch process images
-  python -m cli.inference --checkpoint runs/run1/best.pth --input images/*.jpg
+  # Explicit checkpoint + classes
+  python -m cli.inference -c runs/run1/best.pth --classes crane_hook --input image.jpg
 
 Notes:
+  - Use --run <name> to auto-find checkpoint in runs/<name>/
+  - Use --project to load class names from a Batman project
+  - Use --latest to use the most recent run
   - Model optimization (enabled by default) may take a few seconds at startup
-    but improves inference speed
   - When using --frame-interval > 1 with --track, Kalman prediction smoothly
     interpolates bounding boxes between keyframes (disable with --no-kalman)
         """,
     )
     
-    # Required
-    parser.add_argument(
+    # Model checkpoint (one of these required)
+    checkpoint_group = parser.add_mutually_exclusive_group(required=True)
+    checkpoint_group.add_argument(
         "--checkpoint", "-c",
         type=Path,
-        required=True,
         help="Path to trained model checkpoint",
     )
+    checkpoint_group.add_argument(
+        "--run", "-r",
+        type=str,
+        help="Run name (looks for checkpoint in runs/<name>/)",
+    )
+    checkpoint_group.add_argument(
+        "--latest",
+        action="store_true",
+        help="Use the most recent run in runs/",
+    )
+
+    # Input
     parser.add_argument(
         "--input", "-i",
         type=Path,
@@ -335,10 +416,15 @@ Notes:
     
     # Classes
     parser.add_argument(
+        "--project", "-p",
+        type=Path,
+        help="Load class names from a Batman project (e.g., data/projects/MyProject)",
+    )
+    parser.add_argument(
         "--classes",
         type=str,
         nargs="+",
-        help="Override class names",
+        help="Override class names (alternative to --project)",
     )
     
     args = parser.parse_args()
@@ -362,11 +448,28 @@ Notes:
         save_json=not args.no_json,
     )
     
+    # Resolve checkpoint path
+    checkpoint = resolve_checkpoint(args)
+
+    # Resolve class names
+    class_names = None
+    if args.classes:
+        class_names = args.classes
+    elif args.project:
+        from src.core import Project
+
+        if not args.project.exists():
+            logger.error(f"Project not found: {args.project}")
+            sys.exit(1)
+        project = Project.load(args.project)
+        class_names = project.classes
+        logger.info(f"Loaded {len(class_names)} classes from project: {project.name}")
+
     # Initialize engine
-    logger.info(f"Loading model from {args.checkpoint}")
+    logger.info(f"Loading model from {checkpoint}")
     engine = RFDETRInference(
-        checkpoint=args.checkpoint,
-        class_names=args.classes,
+        checkpoint=checkpoint,
+        class_names=class_names,
         model_size=args.model,
     )
     engine.load_model(
