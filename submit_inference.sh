@@ -4,9 +4,10 @@
 #===============================================================================
 #
 # Usage:
-#   ./submit_inference.sh --checkpoint runs/my_run/best.pth --input video.mp4
+#   ./submit_inference.sh --run rfdetr_h200_20260120_105925 --project data/projects/CraneHook --input video.mp4
+#   ./submit_inference.sh --latest --project data/projects/CraneHook --input video.mp4
 #   ./submit_inference.sh --checkpoint runs/my_run/best.pth --input images/*.jpg
-#   ./submit_inference.sh --checkpoint runs/my_run/best.pth --input video.mp4 --frame-interval 5 --track
+#   ./submit_inference.sh --run my_run -p data/projects/MyProject --input video.mp4 --frame-interval 5 --track
 #
 # GPU Options:
 #   --gpu=TYPE    GPU type (h200, h100-96, h100-47, a100-80, a100-40, nv)
@@ -23,16 +24,22 @@ GPU_TYPE="a100-40"
 PARTITION=""
 TIME="04:00:00"
 CHECKPOINT=""
+RUN=""
+LATEST=false
+PROJECT=""
 INPUT_FILES=""
 OUTPUT_DIR=""
 MODEL="base"
 CONFIDENCE=0.5
 FRAME_INTERVAL=1
 TRACK=false
+NO_KALMAN=false
+NO_OPTIMIZE=false
 TRACK_THRESH=0.25
 TRACK_BUFFER=30
 MATCH_THRESH=0.8
 DRY_RUN=false
+CLASSES=""
 EXTRA_ARGS=""
 
 #-------------------------------------------------------------------------------
@@ -41,8 +48,16 @@ EXTRA_ARGS=""
 show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
+    echo "Model Selection (one required):"
+    echo "  --run=NAME           Run name (auto-finds checkpoint in runs/<name>/)"
+    echo "  --latest             Use the most recent run in runs/"
+    echo "  --checkpoint=PATH    Explicit path to model checkpoint"
+    echo ""
+    echo "Class Names (recommended):"
+    echo "  --project=PATH, -p   Load class names from a Batman project"
+    echo "  --classes=NAMES      Manually specify class names (space-separated)"
+    echo ""
     echo "Required:"
-    echo "  --checkpoint=PATH    Path to trained model checkpoint"
     echo "  --input=FILES        Input image(s) or video file(s)"
     echo ""
     echo "GPU Options:"
@@ -50,13 +65,15 @@ show_help() {
     echo "  --time=HH:MM:SS      Time limit (default: 04:00:00)"
     echo ""
     echo "Inference Options:"
-    echo "  --output=PATH        Output directory (default: inference_results)"
+    echo "  --output=PATH        Output directory (default: inference_results/<timestamp>)"
     echo "  --model=SIZE         Model size: base, large (default: base)"
     echo "  --confidence=N       Confidence threshold (default: 0.5)"
+    echo "  --no-optimize        Skip model optimization (faster startup)"
     echo ""
     echo "Video Options:"
     echo "  --frame-interval=N   Run inference every N frames (default: 1)"
     echo "  --track              Enable ByteTrack tracking"
+    echo "  --no-kalman          Disable Kalman prediction on non-keyframes"
     echo "  --track-thresh=N     ByteTrack detection threshold (default: 0.25)"
     echo "  --track-buffer=N     Frames to keep lost tracks (default: 30)"
     echo "  --match-thresh=N     IoU threshold for matching (default: 0.8)"
@@ -66,14 +83,14 @@ show_help() {
     echo "  --help               Show this help"
     echo ""
     echo "Examples:"
-    echo "  # Single video"
-    echo "  $0 --checkpoint runs/run1/best.pth --input video.mp4"
+    echo "  # Use run name + project for classes"
+    echo "  $0 --run rfdetr_h200_20260120_105925 --project data/projects/CraneHook --input video.mp4"
     echo ""
-    echo "  # Video with tracking, every 5 frames"
-    echo "  $0 --checkpoint runs/run1/best.pth --input video.mp4 --frame-interval 5 --track"
+    echo "  # Use latest run with tracking"
+    echo "  $0 --latest -p data/projects/CraneHook --input video.mp4 --frame-interval 5 --track"
     echo ""
-    echo "  # Batch images"
-    echo "  $0 --checkpoint runs/run1/best.pth --input 'images/*.jpg'"
+    echo "  # Explicit checkpoint"
+    echo "  $0 --checkpoint runs/run1/best.pth --classes crane_hook --input video.mp4"
     exit 0
 }
 
@@ -83,24 +100,31 @@ for arg in "$@"; do
         --partition=*)     PARTITION="${arg#*=}" ;;
         --time=*)          TIME="${arg#*=}" ;;
         --checkpoint=*)    CHECKPOINT="${arg#*=}" ;;
+        --run=*)           RUN="${arg#*=}" ;;
+        --latest)          LATEST=true ;;
+        --project=*|-p=*)  PROJECT="${arg#*=}" ;;
+        -p)                shift; PROJECT="$1" ;;
         --input=*)         INPUT_FILES="${arg#*=}" ;;
         --output=*)        OUTPUT_DIR="${arg#*=}" ;;
         --model=*)         MODEL="${arg#*=}" ;;
         --confidence=*)    CONFIDENCE="${arg#*=}" ;;
         --frame-interval=*) FRAME_INTERVAL="${arg#*=}" ;;
         --track)           TRACK=true ;;
+        --no-kalman)       NO_KALMAN=true ;;
+        --no-optimize)     NO_OPTIMIZE=true ;;
         --track-thresh=*)  TRACK_THRESH="${arg#*=}" ;;
         --track-buffer=*)  TRACK_BUFFER="${arg#*=}" ;;
         --match-thresh=*)  MATCH_THRESH="${arg#*=}" ;;
+        --classes=*)       CLASSES="${arg#*=}" ;;
         --dry-run)         DRY_RUN=true ;;
         --help|-h)         show_help ;;
         *)                 EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
 
-# Validate required arguments
-if [ -z "$CHECKPOINT" ]; then
-    echo "Error: --checkpoint is required"
+# Validate: must have one of --checkpoint, --run, or --latest
+if [ -z "$CHECKPOINT" ] && [ -z "$RUN" ] && [ "$LATEST" = false ]; then
+    echo "Error: Must specify one of --checkpoint, --run, or --latest"
     exit 1
 fi
 
@@ -150,6 +174,28 @@ case $GPU_TYPE in
 esac
 
 #-------------------------------------------------------------------------------
+# Build Model Selection Argument
+#-------------------------------------------------------------------------------
+MODEL_ARG=""
+if [ -n "$CHECKPOINT" ]; then
+    MODEL_ARG="--checkpoint ${CHECKPOINT}"
+elif [ -n "$RUN" ]; then
+    MODEL_ARG="--run ${RUN}"
+elif [ "$LATEST" = true ]; then
+    MODEL_ARG="--latest"
+fi
+
+#-------------------------------------------------------------------------------
+# Build Class Names Argument
+#-------------------------------------------------------------------------------
+CLASS_ARG=""
+if [ -n "$PROJECT" ]; then
+    CLASS_ARG="--project ${PROJECT}"
+elif [ -n "$CLASSES" ]; then
+    CLASS_ARG="--classes ${CLASSES}"
+fi
+
+#-------------------------------------------------------------------------------
 # Create SLURM Script
 #-------------------------------------------------------------------------------
 mkdir -p logs
@@ -182,18 +228,25 @@ cd ~/batman
 # Activate virtual environment
 source .venv/bin/activate
 
+# Prevent OpenBLAS threading issues
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+
 # Show GPU info
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
 echo ""
 echo "Inference Configuration:"
-echo "  Checkpoint:     ${CHECKPOINT}"
+echo "  Model:          ${MODEL_ARG}"
+echo "  Project:        ${PROJECT:-none}"
 echo "  Input:          ${INPUT_FILES}"
 echo "  Output:         ${OUTPUT_DIR}"
-echo "  Model:          RF-DETR ${MODEL}"
+echo "  Model size:     RF-DETR ${MODEL}"
 echo "  Confidence:     ${CONFIDENCE}"
 echo "  Frame interval: ${FRAME_INTERVAL}"
 echo "  Tracking:       ${TRACK}"
+echo "  Kalman:         $([ "$NO_KALMAN" = true ] && echo "disabled" || echo "enabled")"
+echo "  Optimization:   $([ "$NO_OPTIMIZE" = true ] && echo "disabled" || echo "enabled")"
 echo ""
 
 SLURM_EOF
@@ -204,18 +257,29 @@ if [ "$TRACK" = true ]; then
     TRACK_ARGS="--track --track-thresh ${TRACK_THRESH} --track-buffer ${TRACK_BUFFER} --match-thresh ${MATCH_THRESH}"
 fi
 
+# Build optional flags
+OPT_FLAGS=""
+if [ "$NO_KALMAN" = true ]; then
+    OPT_FLAGS="$OPT_FLAGS --no-kalman"
+fi
+if [ "$NO_OPTIMIZE" = true ]; then
+    OPT_FLAGS="$OPT_FLAGS --no-optimize"
+fi
+
 # Add the inference command
 cat >> "$SLURM_SCRIPT" << EOF
 echo "Starting inference..."
 
 python3 -m cli.inference \\
-    --checkpoint ${CHECKPOINT} \\
+    ${MODEL_ARG} \\
+    ${CLASS_ARG} \\
     --input ${INPUT_FILES} \\
     --output ${OUTPUT_DIR} \\
     --model ${MODEL} \\
     --confidence ${CONFIDENCE} \\
     --frame-interval ${FRAME_INTERVAL} \\
     ${TRACK_ARGS} \\
+    ${OPT_FLAGS} \\
     --device cuda \\
     ${EXTRA_ARGS}
 
@@ -236,7 +300,8 @@ echo "============================================================"
 echo "GPU:          ${GPU_TYPE}"
 echo "Partition:    ${PARTITION}"
 echo "Time limit:   ${TIME}"
-echo "Checkpoint:   ${CHECKPOINT}"
+echo "Model:        ${MODEL_ARG}"
+echo "Project:      ${PROJECT:-none}"
 echo "Input:        ${INPUT_FILES}"
 echo "Output:       ${OUTPUT_DIR}"
 echo "Frame interval: ${FRAME_INTERVAL}"
