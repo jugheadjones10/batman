@@ -94,31 +94,45 @@ show_help() {
     exit 0
 }
 
-for arg in "$@"; do
-    case $arg in
-        --gpu=*)           GPU_TYPE="${arg#*=}" ;;
-        --partition=*)     PARTITION="${arg#*=}" ;;
-        --time=*)          TIME="${arg#*=}" ;;
-        --checkpoint=*)    CHECKPOINT="${arg#*=}" ;;
-        --run=*)           RUN="${arg#*=}" ;;
-        --latest)          LATEST=true ;;
-        --project=*|-p=*)  PROJECT="${arg#*=}" ;;
-        -p)                shift; PROJECT="$1" ;;
-        --input=*)         INPUT_FILES="${arg#*=}" ;;
-        --output=*)        OUTPUT_DIR="${arg#*=}" ;;
-        --model=*)         MODEL="${arg#*=}" ;;
-        --confidence=*)    CONFIDENCE="${arg#*=}" ;;
-        --frame-interval=*) FRAME_INTERVAL="${arg#*=}" ;;
-        --track)           TRACK=true ;;
-        --no-kalman)       NO_KALMAN=true ;;
-        --no-optimize)     NO_OPTIMIZE=true ;;
-        --track-thresh=*)  TRACK_THRESH="${arg#*=}" ;;
-        --track-buffer=*)  TRACK_BUFFER="${arg#*=}" ;;
-        --match-thresh=*)  MATCH_THRESH="${arg#*=}" ;;
-        --classes=*)       CLASSES="${arg#*=}" ;;
-        --dry-run)         DRY_RUN=true ;;
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --gpu=*)           GPU_TYPE="${1#*=}"; shift ;;
+        --gpu)             GPU_TYPE="$2"; shift 2 ;;
+        --partition=*)     PARTITION="${1#*=}"; shift ;;
+        --partition)       PARTITION="$2"; shift 2 ;;
+        --time=*)          TIME="${1#*=}"; shift ;;
+        --time)            TIME="$2"; shift 2 ;;
+        --checkpoint=*|-c=*) CHECKPOINT="${1#*=}"; shift ;;
+        --checkpoint|-c)   CHECKPOINT="$2"; shift 2 ;;
+        --run=*|-r=*)      RUN="${1#*=}"; shift ;;
+        --run|-r)          RUN="$2"; shift 2 ;;
+        --latest)          LATEST=true; shift ;;
+        --project=*|-p=*)  PROJECT="${1#*=}"; shift ;;
+        --project|-p)      PROJECT="$2"; shift 2 ;;
+        --input=*|-i=*)    INPUT_FILES="${1#*=}"; shift ;;
+        --input|-i)        INPUT_FILES="$2"; shift 2 ;;
+        --output=*|-o=*)   OUTPUT_DIR="${1#*=}"; shift ;;
+        --output|-o)       OUTPUT_DIR="$2"; shift 2 ;;
+        --model=*)         MODEL="${1#*=}"; shift ;;
+        --model)           MODEL="$2"; shift 2 ;;
+        --confidence=*|-t=*) CONFIDENCE="${1#*=}"; shift ;;
+        --confidence|-t)   CONFIDENCE="$2"; shift 2 ;;
+        --frame-interval=*|-n=*) FRAME_INTERVAL="${1#*=}"; shift ;;
+        --frame-interval|-n) FRAME_INTERVAL="$2"; shift 2 ;;
+        --track)           TRACK=true; shift ;;
+        --no-kalman)       NO_KALMAN=true; shift ;;
+        --no-optimize)     NO_OPTIMIZE=true; shift ;;
+        --track-thresh=*)  TRACK_THRESH="${1#*=}"; shift ;;
+        --track-thresh)    TRACK_THRESH="$2"; shift 2 ;;
+        --track-buffer=*)  TRACK_BUFFER="${1#*=}"; shift ;;
+        --track-buffer)    TRACK_BUFFER="$2"; shift 2 ;;
+        --match-thresh=*)  MATCH_THRESH="${1#*=}"; shift ;;
+        --match-thresh)    MATCH_THRESH="$2"; shift 2 ;;
+        --classes=*)       CLASSES="${1#*=}"; shift ;;
+        --classes)         CLASSES="$2"; shift 2 ;;
+        --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         show_help ;;
-        *)                 EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
+        *)                 EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
 
