@@ -419,117 +419,41 @@ class ClassMergeRequest(PydanticBaseModel):
 @router.post("/{project_name}/classes/rename")
 async def rename_class(project_name: str, request: ClassRenameRequest):
     """Rename a class."""
+    from src.core import ClassManager, Project
+
     project_path = get_project_path(project_name)
 
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    config = load_project_config(project_path)
-    classes = config.get("classes", [])
-    class_sources = config.get("class_sources", {})
-    
-    if request.old_name not in classes:
-        raise HTTPException(status_code=404, detail=f"Class '{request.old_name}' not found")
-    
-    if request.new_name in classes and request.new_name != request.old_name:
-        raise HTTPException(status_code=400, detail=f"Class '{request.new_name}' already exists")
-    
-    # Update class name
-    idx = classes.index(request.old_name)
-    classes[idx] = request.new_name
-    
-    # Update source tracking
-    if request.old_name in class_sources:
-        class_sources[request.new_name] = class_sources.pop(request.old_name)
-    
-    config["classes"] = classes
-    config["class_sources"] = class_sources
-    config["updated_at"] = datetime.utcnow().isoformat()
-    save_project_config(project_path, config)
-    
-    return {"message": f"Renamed '{request.old_name}' to '{request.new_name}'"}
+    try:
+        project = Project.load(project_path)
+        manager = ClassManager(project)
+        result = manager.rename_class(request.old_name, request.new_name)
+        return {"message": result.message}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/{project_name}/classes/merge")
 async def merge_classes(project_name: str, request: ClassMergeRequest):
     """Merge multiple classes into one."""
+    from src.core import ClassManager, Project
+
     project_path = get_project_path(project_name)
 
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    config = load_project_config(project_path)
-    classes = config.get("classes", [])
-    class_sources = config.get("class_sources", {})
-    
-    # Validate
-    for cls in request.source_classes:
-        if cls not in classes:
-            raise HTTPException(status_code=404, detail=f"Class '{cls}' not found")
-    
-    if request.target_class not in classes:
-        raise HTTPException(status_code=404, detail=f"Target class '{request.target_class}' not found")
-    
-    # Get class IDs
-    target_id = classes.index(request.target_class)
-    source_ids = [classes.index(cls) for cls in request.source_classes if cls != request.target_class]
-    
-    if not source_ids:
-        return {"message": "No classes to merge", "annotations_updated": 0}
-    
-    # Update annotations
-    annotations_path = project_path / "labels" / "current" / "annotations.json"
-    updated_count = 0
-    
-    if annotations_path.exists():
-        with open(annotations_path) as f:
-            annotations = json.load(f)
-        
-        for ann_id, ann in annotations.items():
-            if ann.get("class_label_id") in source_ids:
-                annotations[ann_id]["class_label_id"] = target_id
-                updated_count += 1
-        
-        with open(annotations_path, "w") as f:
-            json.dump(annotations, f, indent=2)
-    
-    # Remove source classes from list
-    new_classes = [cls for cls in classes if cls not in request.source_classes or cls == request.target_class]
-    
-    # We need to remap class IDs in annotations since we're removing classes
-    # Build old_id -> new_id mapping
-    old_to_new = {}
-    for old_id, old_name in enumerate(classes):
-        if old_name in new_classes:
-            new_id = new_classes.index(old_name)
-            old_to_new[old_id] = new_id
-    
-    # Update all annotations with new class IDs
-    if annotations_path.exists():
-        with open(annotations_path) as f:
-            annotations = json.load(f)
-        
-        for ann_id, ann in annotations.items():
-            old_class_id = ann.get("class_label_id", 0)
-            if old_class_id in old_to_new:
-                annotations[ann_id]["class_label_id"] = old_to_new[old_class_id]
-        
-        with open(annotations_path, "w") as f:
-            json.dump(annotations, f, indent=2)
-    
-    # Update class sources
-    for cls in request.source_classes:
-        if cls in class_sources and cls != request.target_class:
-            del class_sources[cls]
-    
-    config["classes"] = new_classes
-    config["class_sources"] = class_sources
-    config["updated_at"] = datetime.utcnow().isoformat()
-    save_project_config(project_path, config)
-    
-    return {
-        "message": f"Merged {len(source_ids)} classes into '{request.target_class}'",
-        "annotations_updated": updated_count,
-        "classes_removed": request.source_classes,
-    }
+    try:
+        project = Project.load(project_path)
+        manager = ClassManager(project)
+        result = manager.merge_classes(request.source_classes, request.target_class)
+        return {
+            "message": result.message,
+            "annotations_updated": result.annotations_updated,
+            "classes_removed": result.classes_removed,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 

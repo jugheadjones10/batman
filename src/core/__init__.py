@@ -1,5 +1,6 @@
 """Core logic shared between backend, frontend, and CLI tools."""
 
+from src.core.classes import ClassManager, MergeResult, RenameResult
 from src.core.importer import COCO_CLASSES, DataImporter
 from src.core.inference import (
     Detection,
@@ -21,6 +22,7 @@ from src.core.trainer import (
 )
 
 __all__ = [
+    "ClassManager",
     "COCO_CLASSES",
     "DataImporter",
     "DatasetStats",
@@ -28,8 +30,10 @@ __all__ = [
     "FrameResult",
     "InferenceConfig",
     "InferenceStats",
+    "MergeResult",
     "Project",
     "ProjectConfig",
+    "RenameResult",
     "RFDETRInference",
     "RFDETRTrainer",
     "TrainingConfig",

@@ -9,14 +9,19 @@ Usage:
     # Multiple images
     python -m cli.inference --checkpoint runs/my_run/best.pth --input images/*.jpg
 
-    # Video (all frames)
+    # Video (all frames, recommended for best quality)
     python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4
 
-    # Video with frame skipping (inference every 5 frames)
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --frame-interval 5
+    # Video with frame skipping + tracking + Kalman prediction (smooth interpolation)
+    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 \\
+        --frame-interval 3 --track
 
-    # Video with tracking
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --frame-interval 5 --track
+    # Video with tracking but no Kalman prediction (static boxes between keyframes)
+    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 \\
+        --frame-interval 3 --track --no-kalman
+
+    # Skip optimization (faster startup, slower inference)
+    python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --no-optimize
 
     # Custom output directory
     python -m cli.inference --checkpoint runs/my_run/best.pth --input video.mp4 --output results/
@@ -191,6 +196,7 @@ def process_video(
                 "resolution": f"{width}x{height}",
                 "frame_interval": config.frame_interval,
                 "tracking": config.use_tracking,
+                "kalman_prediction": config.use_kalman_prediction,
             },
         )
         logger.info(f"  Results JSON: {json_path}")
@@ -207,15 +213,21 @@ Examples:
   # Single image
   python -m cli.inference --checkpoint runs/run1/best.pth --input image.jpg
 
-  # Video with tracking
-  python -m cli.inference --checkpoint runs/run1/best.pth --input video.mp4 --track
-
-  # Video, inference every 5 frames with tracking
+  # Video with tracking + Kalman interpolation (best for frame skipping)
   python -m cli.inference --checkpoint runs/run1/best.pth --input video.mp4 \\
-      --frame-interval 5 --track
+      --frame-interval 3 --track
+
+  # Video without optimization (faster startup)
+  python -m cli.inference --checkpoint runs/run1/best.pth --input video.mp4 --no-optimize
 
   # Batch process images
   python -m cli.inference --checkpoint runs/run1/best.pth --input images/*.jpg
+
+Notes:
+  - Model optimization (enabled by default) may take a few seconds at startup
+    but improves inference speed
+  - When using --frame-interval > 1 with --track, Kalman prediction smoothly
+    interpolates bounding boxes between keyframes (disable with --no-kalman)
         """,
     )
     
@@ -273,6 +285,18 @@ Examples:
         help="Confidence threshold (default: 0.5)",
     )
     
+    # Optimization
+    parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        help="Don't optimize model for inference (skip optimize_for_inference())",
+    )
+    parser.add_argument(
+        "--optimize-compile",
+        action="store_true",
+        help="Use JIT compilation for optimization (may fail on some systems)",
+    )
+
     # Video options
     parser.add_argument(
         "--frame-interval", "-n",
@@ -284,6 +308,11 @@ Examples:
         "--track",
         action="store_true",
         help="Enable ByteTrack tracking between frames",
+    )
+    parser.add_argument(
+        "--no-kalman",
+        action="store_true",
+        help="Disable Kalman prediction on non-keyframes (only with --track)",
     )
     parser.add_argument(
         "--track-thresh",
@@ -321,8 +350,11 @@ Examples:
     config = InferenceConfig(
         confidence_threshold=args.confidence,
         device=args.device,
+        optimize=not args.no_optimize,
+        optimize_compile=args.optimize_compile,
         frame_interval=args.frame_interval,
         use_tracking=args.track,
+        use_kalman_prediction=not args.no_kalman,
         track_thresh=args.track_thresh,
         track_buffer=args.track_buffer,
         match_thresh=args.match_thresh,
@@ -337,7 +369,11 @@ Examples:
         class_names=args.classes,
         model_size=args.model,
     )
-    engine.load_model(config.device)
+    engine.load_model(
+        device=config.device,
+        optimize=config.optimize,
+        optimize_compile=config.optimize_compile,
+    )
     
     logger.info(f"Classes: {engine.class_names}")
     

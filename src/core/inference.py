@@ -50,9 +50,13 @@ class InferenceConfig:
     confidence_threshold: float = 0.5
     nms_threshold: float = 0.5
     device: str = "auto"
+    # Optimization settings
+    optimize: bool = True  # Call optimize_for_inference() on model load
+    optimize_compile: bool = False  # Use JIT compilation (may fail on some systems)
     # Video settings
     frame_interval: int = 1  # Run inference every N frames
     use_tracking: bool = False  # Track objects between keyframes
+    use_kalman_prediction: bool = True  # Use Kalman filter to predict positions on non-keyframes
     # ByteTrack settings
     track_thresh: float = 0.25  # Detection threshold for tracking
     track_buffer: int = 30  # Frames to keep lost tracks
@@ -139,14 +143,71 @@ class RFDETRInference:
         logger.warning(f"class_info.json not found at {info_path}, using generic class names")
         return [f"class_{i}" for i in range(100)]
 
-    def load_model(self, device: str = "auto") -> None:
-        """Load the model onto the specified device."""
+    def _predict_tracks_kalman(
+        self,
+        tracker,
+        track_metadata: dict[int, dict],
+    ) -> list[Detection]:
+        """
+        Use Kalman filter to predict track positions for non-keyframes.
+
+        This advances each track's Kalman filter state and returns predicted
+        bounding boxes, providing smooth motion interpolation between keyframes.
+
+        Args:
+            tracker: ByteTrack tracker instance
+            track_metadata: Dict mapping track_id to {class_id, class_name, confidence}
+
+        Returns:
+            List of Detection objects with predicted positions
+        """
+        detections = []
+
+        # Get all active tracks (tracked + lost but not yet removed)
+        all_tracks = list(tracker.tracked_tracks) + list(tracker.lost_tracks)
+
+        for track in all_tracks:
+            # Advance Kalman filter state (predict next position)
+            track.predict()
+
+            # Get predicted bounding box (tlbr = top-left, bottom-right = x1,y1,x2,y2)
+            bbox = track.tlbr
+
+            # Get track metadata (class info, confidence from last detection)
+            track_id = track.external_track_id
+            meta = track_metadata.get(track_id, {})
+
+            detections.append(
+                Detection(
+                    bbox=tuple(bbox.tolist()),
+                    class_id=meta.get("class_id", 0),
+                    class_name=meta.get("class_name", "unknown"),
+                    confidence=meta.get("confidence", 0.0),
+                    track_id=track_id,
+                )
+            )
+
+        return detections
+
+    def load_model(
+        self,
+        device: str = "auto",
+        optimize: bool = True,
+        optimize_compile: bool = False,
+    ) -> None:
+        """
+        Load the model onto the specified device.
+
+        Args:
+            device: Device to load model on ('auto', 'cuda', 'mps', 'cpu')
+            optimize: Whether to call optimize_for_inference()
+            optimize_compile: Whether to use JIT compilation (may fail on some systems)
+        """
+        import torch
         from rfdetr import RFDETRBase, RFDETRLarge
 
         # Determine device
         if device == "auto":
-            import torch
-
             if torch.cuda.is_available():
                 device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -160,6 +221,16 @@ class RFDETRInference:
         # Load model
         ModelClass = RFDETRLarge if self.model_size == "large" else RFDETRBase
         self.model = ModelClass(pretrain_weights=str(self.checkpoint))
+
+        # Optimize for inference if requested
+        if optimize:
+            logger.info("Optimizing model for inference...")
+            try:
+                self.model.optimize_for_inference(compile=optimize_compile)
+                logger.info("Model optimization complete")
+            except Exception as e:
+                logger.warning(f"Model optimization failed (non-fatal): {e}")
+                logger.warning("Continuing with non-optimized model")
 
         logger.info(f"Model loaded: RF-DETR {self.model_size}")
 
@@ -178,11 +249,15 @@ class RFDETRInference:
         Returns:
             List of Detection objects
         """
-        if self.model is None:
-            self.load_model(config.device if config else "auto")
-
         if config is None:
             config = InferenceConfig()
+
+        if self.model is None:
+            self.load_model(
+                device=config.device,
+                optimize=config.optimize,
+                optimize_compile=config.optimize_compile,
+            )
 
         # Load image if path
         if isinstance(image, (str, Path)):
@@ -239,11 +314,15 @@ class RFDETRInference:
         import cv2
         import supervision as sv
 
-        if self.model is None:
-            self.load_model(config.device if config else "auto")
-
         if config is None:
             config = InferenceConfig()
+
+        if self.model is None:
+            self.load_model(
+                device=config.device,
+                optimize=config.optimize,
+                optimize_compile=config.optimize_compile,
+            )
 
         video_path = Path(video_path)
         cap = cv2.VideoCapture(str(video_path))
@@ -257,10 +336,13 @@ class RFDETRInference:
         logger.info(f"Processing video: {video_path.name}")
         logger.info(f"  Frames: {total_frames}, FPS: {fps:.2f}")
         logger.info(f"  Frame interval: {config.frame_interval}, Tracking: {config.use_tracking}")
+        if config.use_tracking and config.frame_interval > 1:
+            logger.info(f"  Kalman prediction: {config.use_kalman_prediction}")
 
         # Initialize ByteTrack tracker if needed
         tracker = None
-        last_tracked_detections = None  # Store last tracked result for non-keyframes
+        # Store track metadata for Kalman prediction on non-keyframes
+        track_metadata: dict[int, dict] = {}  # track_id -> {class_id, class_name, confidence}
 
         if config.use_tracking:
             tracker = sv.ByteTrack(
@@ -335,15 +417,22 @@ class RFDETRInference:
                             )
                         )
 
-                    # Store for non-keyframes
-                    last_tracked_detections = detections
+                        # Store metadata for Kalman prediction on non-keyframes
+                        if track_id is not None:
+                            track_metadata[track_id] = {
+                                "class_id": class_id,
+                                "class_name": class_name,
+                                "confidence": float(tracked.confidence[i]),
+                            }
+                elif tracker:
+                    # No detections but tracker exists - still need to update tracker state
+                    detections = []
                 else:
                     detections = raw_detections
-                    last_tracked_detections = detections
             else:
-                # For non-keyframes, use last tracked detections (tracks persist)
-                if tracker and last_tracked_detections:
-                    detections = last_tracked_detections
+                # Non-keyframe: use Kalman prediction if enabled
+                if tracker and config.use_kalman_prediction:
+                    detections = self._predict_tracks_kalman(tracker, track_metadata)
                 else:
                     detections = []
                 inference_time = 0
