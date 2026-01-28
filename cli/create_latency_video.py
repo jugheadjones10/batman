@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -155,6 +156,7 @@ def create_latency_video(
     logger.info("  Processing frames...")
     
     last_completed_idx = None
+    prev_completed_idx = None  # Track previous value to detect changes
     last_annotated_frame = None
     frames_written = 0
     
@@ -196,12 +198,12 @@ def create_latency_video(
         # Load and write the appropriate frame
         if last_completed_idx is not None:
             # Load annotated frame if we haven't already or if it changed
-            need_load = (last_annotated_frame is None or 
-                        (frames_written > 0 and last_completed_idx != last_completed_idx))
+            need_load = last_annotated_frame is None or last_completed_idx != prev_completed_idx
             if need_load:
                 frame_path = frames_dir / f"frame_{last_completed_idx:05d}.jpg"
                 if frame_path.exists():
                     last_annotated_frame = cv2.imread(str(frame_path))
+                    prev_completed_idx = last_completed_idx  # Update previous value after successful load
                 else:
                     logger.warning(f"Frame not found: {frame_path}")
                     # Create "no data" frame
