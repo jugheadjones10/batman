@@ -255,8 +255,11 @@ echo "Start Time: \$(date)"
 echo "============================================================"
 echo ""
 
+# Navigate to project directory
+cd ~/batman
+
 # Activate virtual environment
-source venv/bin/activate
+source .venv/bin/activate
 
 # Record start time
 START_TIME=\$(date +%s)
