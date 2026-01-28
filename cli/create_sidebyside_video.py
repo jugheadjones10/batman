@@ -121,9 +121,27 @@ def create_sidebyside_video(
     metrics = results["metrics"]
     video_info = results["video_info"]
     per_frame_results = results.get("per_frame_results", [])
+    
+    # Calculate actual end-to-end delays (accounting for queuing)
+    fps = video_info["fps"]
+    inference_available_at = 0.0
+    frame_delays = {}
+    
+    for frame_result in per_frame_results:
+        frame_idx = frame_result["frame_idx"]
+        inference_time_ms = frame_result["inference_time_ms"]
+        inference_time_s = inference_time_ms / 1000.0
+        
+        arrival_time = frame_idx / fps
+        inference_start_time = max(arrival_time, inference_available_at)
+        completion_time = inference_start_time + inference_time_s
+        inference_available_at = completion_time
+        
+        delay = completion_time - arrival_time
+        frame_delays[frame_idx] = delay * 1000.0  # Convert to ms
 
-    logger.info(f"  Mean latency: {metrics['mean_ms']:.2f}ms")
-    logger.info(f"  P99 latency: {metrics['p99_ms']:.2f}ms")
+    logger.info(f"  Mean inference time: {metrics['mean_ms']:.2f}ms")
+    logger.info(f"  P99 inference time: {metrics['p99_ms']:.2f}ms")
 
     # Open both videos
     cap_original = cv2.VideoCapture(str(original_video_path))
@@ -162,9 +180,6 @@ def create_sidebyside_video(
     logger.info("  Processing frames...")
     
     frame_idx = 0
-    
-    # Create a lookup for per-frame latency
-    latency_lookup = {r["frame_idx"]: r["inference_time_ms"] for r in per_frame_results}
 
     while frame_idx < total_frames:
         # Read from both videos
@@ -215,13 +230,15 @@ def create_sidebyside_video(
             thickness=1,
         )
 
-        # Bottom-center: Current frame latency (if available)
-        if frame_idx < len(per_frame_results):
-            current_latency = latency_lookup.get(frame_idx, 0)
-            latency_text = f"Current Latency: {current_latency:.1f}ms"
-            latency_color = (100, 255, 100) if current_latency < 33.33 else (100, 100, 255)
+        # Bottom-center: Current frame delay (end-to-end, not just inference time)
+        if frame_idx in frame_delays:
+            current_delay = frame_delays[frame_idx]
+            latency_text = f"End-to-End Delay: {current_delay:.1f}ms"
+            # Green if real-time capable for this FPS, red otherwise
+            frame_interval_ms = 1000.0 / video_info["fps"]
+            latency_color = (100, 255, 100) if current_delay < frame_interval_ms else (100, 100, 255)
         else:
-            latency_text = "Avg Latency: {:.1f}ms".format(metrics['mean_ms'])
+            latency_text = "Avg Inference: {:.1f}ms".format(metrics['mean_ms'])
             latency_color = (200, 200, 200)
         
         sidebyside = add_text_overlay(

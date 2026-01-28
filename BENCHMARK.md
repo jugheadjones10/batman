@@ -191,7 +191,32 @@ Creates a side-by-side comparison video showing real-time vs. delayed output:
   - `sidebyside_latency.mp4`: Side-by-side comparison video
   - `frames/`: Directory with annotated frames (used for video generation)
 
+**Important**: The `--runs` parameter determines how many frames are benchmarked. For a complete visualization, set `--runs` to match your video's frame count:
+
+```bash
+# Check video frame count
+ffprobe -v error -select_streams v:0 -count_packets \
+    -show_entries stream=nb_read_packets -of csv=p=0 crane_hook_1_short.mp4
+
+# If video has 263 frames, use --runs 263
+./submit_benchmark.sh --run my_run --gpus h200 \
+    --create-latency-video --runs 263
+```
+
+If you benchmark fewer frames than the video length, the latency video will only show the benchmarked portion and display "No inference data" for remaining frames.
+
 This feature helps you understand the practical impact of inference latency by showing exactly how the output would lag behind a live feed.
+
+**Understanding End-to-End Delay vs. Inference Time**:
+- **Inference time**: How long it takes to process one frame (~38ms in the example)
+- **End-to-end delay**: How long after a frame arrives until its result appears
+- When inference is slower than the frame rate (38ms inference vs 33ms frame interval at 30 FPS), frames queue up:
+  - Frame 0: arrives at 0.000s, completes at 0.038s → delay = 38ms
+  - Frame 1: arrives at 0.033s, but waits for frame 0, completes at 0.076s → delay = 43ms
+  - Frame 2: arrives at 0.066s, waits, completes at 0.114s → delay = 48ms
+  - Delays keep increasing! This is realistic behavior for live inference.
+
+The visualization accurately simulates this sequential processing and queuing behavior.
 
 ## Understanding Results
 

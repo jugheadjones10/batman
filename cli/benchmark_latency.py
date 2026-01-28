@@ -183,8 +183,21 @@ def benchmark_latency(
     # Prepare test data
     video_info = None
     if video_path:
-        # Load video frames
-        frames, video_info = load_video_frames(video_path, max_frames=test_runs + warmup_runs)
+        # For latency visualization, load all frames; otherwise respect test_runs limit
+        if save_frames:
+            # Load all frames for complete visualization
+            frames, video_info = load_video_frames(video_path, max_frames=None)
+            total_video_frames = len(frames)
+            
+            # Adjust test_runs to match video if not explicitly set higher
+            if test_runs + warmup_runs < total_video_frames:
+                logger.info(f"Video has {total_video_frames} frames, adjusting test_runs to benchmark entire video")
+                warmup_runs = min(warmup_runs, total_video_frames // 10)  # Keep warmup reasonable
+                test_runs = total_video_frames - warmup_runs
+        else:
+            # Load only what we need for benchmarking
+            frames, video_info = load_video_frames(video_path, max_frames=test_runs + warmup_runs)
+            
         if len(frames) < warmup_runs + test_runs:
             logger.warning(
                 f"Video has only {len(frames)} frames, adjusting warmup={min(warmup_runs, len(frames)//2)}, "
