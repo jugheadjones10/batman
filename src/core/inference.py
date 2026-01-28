@@ -206,6 +206,8 @@ class RFDETRInference:
         import torch
         from rfdetr import RFDETRBase, RFDETRLarge
 
+        load_start = time.time()
+
         # Determine device
         if device == "auto":
             if torch.cuda.is_available():
@@ -219,20 +221,26 @@ class RFDETRInference:
         logger.info(f"Loading model on {device}")
 
         # Load model
+        weights_start = time.time()
         ModelClass = RFDETRLarge if self.model_size == "large" else RFDETRBase
         self.model = ModelClass(pretrain_weights=str(self.checkpoint))
+        weights_time = time.time() - weights_start
+        logger.info(f"Loaded pretrained weights in {weights_time:.2f}s")
 
         # Optimize for inference if requested
         if optimize:
             logger.info("Optimizing model for inference...")
+            opt_start = time.time()
             try:
                 self.model.optimize_for_inference(compile=optimize_compile)
-                logger.info("Model optimization complete")
+                opt_time = time.time() - opt_start
+                logger.info(f"Model optimization complete in {opt_time:.2f}s")
             except Exception as e:
                 logger.warning(f"Model optimization failed (non-fatal): {e}")
                 logger.warning("Continuing with non-optimized model")
 
-        logger.info(f"Model loaded: RF-DETR {self.model_size}")
+        total_load_time = time.time() - load_start
+        logger.info(f"Model loaded: RF-DETR {self.model_size} (total: {total_load_time:.2f}s)")
 
     def predict_image(
         self,
@@ -457,6 +465,15 @@ class RFDETRInference:
 
         total_time = time.time() - start_time
         avg_inference = np.mean(stats["inference_times"]) if stats["inference_times"] else 0
+        total_inference = sum(stats["inference_times"]) if stats["inference_times"] else 0
+
+        logger.info(f"Video processing complete:")
+        logger.info(f"  Total frames: {stats['total_frames']}")
+        logger.info(f"  Keyframes (inference): {stats['keyframes']}")
+        logger.info(f"  Avg inference time per keyframe: {avg_inference:.1f}ms")
+        logger.info(f"  Total inference time: {total_inference/1000:.2f}s")
+        logger.info(f"  Total processing time: {total_time:.2f}s")
+        logger.info(f"  Processing FPS: {stats['total_frames'] / total_time:.1f}")
 
         return InferenceStats(
             total_frames=stats["total_frames"],

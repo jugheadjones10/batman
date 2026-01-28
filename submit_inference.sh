@@ -226,6 +226,9 @@ cat > "$SLURM_SCRIPT" << SLURM_EOF
 #SBATCH --output=logs/slurm_%j_inference.out
 #SBATCH --error=logs/slurm_%j_inference.err
 
+# Start total timer
+TOTAL_START=\$(date +%s)
+
 echo "============================================================"
 echo "RF-DETR Inference Job"
 echo "============================================================"
@@ -283,6 +286,10 @@ fi
 # Add the inference command
 cat >> "$SLURM_SCRIPT" << EOF
 echo "Starting inference..."
+echo ""
+
+# Start inference timer
+INFERENCE_START=\$(date +%s)
 
 python3 -m cli.inference \\
     ${MODEL_ARG} \\
@@ -297,8 +304,26 @@ python3 -m cli.inference \\
     --device cuda \\
     ${EXTRA_ARGS}
 
+# End inference timer
+INFERENCE_END=\$(date +%s)
+INFERENCE_ELAPSED=\$((INFERENCE_END - INFERENCE_START))
+
+# End total timer
+TOTAL_END=\$(date +%s)
+TOTAL_ELAPSED=\$((TOTAL_END - TOTAL_START))
+
+# Calculate setup time
+SETUP_ELAPSED=\$((INFERENCE_START - TOTAL_START))
+
 echo ""
 echo "============================================================"
+echo "Timing Summary"
+echo "============================================================"
+echo "Setup time (env + model load): \${SETUP_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((SETUP_ELAPSED/3600)) \$((SETUP_ELAPSED%3600/60)) \$((SETUP_ELAPSED%60))))"
+echo "Inference time:                \${INFERENCE_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((INFERENCE_ELAPSED/3600)) \$((INFERENCE_ELAPSED%3600/60)) \$((INFERENCE_ELAPSED%60))))"
+echo "Total time:                    \${TOTAL_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((TOTAL_ELAPSED/3600)) \$((TOTAL_ELAPSED%3600/60)) \$((TOTAL_ELAPSED%60))))"
+echo "============================================================"
+echo ""
 echo "Inference complete!"
 echo "Results saved to: ${OUTPUT_DIR}"
 echo "Finished: \$(date)"
