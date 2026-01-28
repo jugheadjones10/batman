@@ -79,6 +79,14 @@ def format_comparison_table(results: dict[str, dict]) -> str:
     lines.append("=" * 120)
     lines.append("GPU LATENCY COMPARISON")
     lines.append("=" * 120)
+
+    # Show benchmark mode info from first result
+    first_result = next(iter(results.values()))
+    benchmark_mode = first_result.get("benchmark_mode", "unknown")
+    lines.append(f"Benchmark Mode: {benchmark_mode}")
+    if "video_info" in first_result:
+        vi = first_result["video_info"]
+        lines.append(f"Video: {Path(vi['path']).name} ({vi['width']}x{vi['height']} @ {vi['fps']:.1f} FPS)")
     lines.append("")
 
     # Table header

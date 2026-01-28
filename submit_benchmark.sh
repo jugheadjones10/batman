@@ -23,6 +23,8 @@ RUNS=100
 NO_OPTIMIZE=false
 GPU_TYPES=""
 TIME="00:30:00"
+VIDEO="crane_hook_1_short.mp4"  # Default video for realistic benchmark
+NO_VIDEO=false
 
 #-------------------------------------------------------------------------------
 # Parse Arguments
@@ -69,6 +71,14 @@ while [[ $# -gt 0 ]]; do
             TIME="$2"
             shift 2
             ;;
+        --video)
+            VIDEO="$2"
+            shift 2
+            ;;
+        --no-video)
+            NO_VIDEO=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -87,6 +97,8 @@ while [[ $# -gt 0 ]]; do
             echo "Benchmark Configuration:"
             echo "  --warmup N          Number of warmup runs (default: 10)"
             echo "  --runs N            Number of benchmark runs (default: 100)"
+            echo "  --video FILE        Video file for realistic benchmark (default: crane_hook_1_short.mp4)"
+            echo "  --no-video          Use synthetic dummy images instead of video"
             echo ""
             echo "GPU Selection (required):"
             echo "  --gpus TYPES        Comma-separated GPU types or 'all'"
@@ -170,6 +182,15 @@ if [ "$NO_OPTIMIZE" = true ]; then
     OPTIONAL_ARGS="${OPTIONAL_ARGS} --no-optimize"
 fi
 
+# Video benchmark (default) or synthetic
+if [ "$NO_VIDEO" = true ]; then
+    VIDEO_ARG=""
+    BENCHMARK_TYPE="synthetic"
+else
+    VIDEO_ARG="--video ${VIDEO}"
+    BENCHMARK_TYPE="video (${VIDEO})"
+fi
+
 #-------------------------------------------------------------------------------
 # Create Output Directory with Timestamp
 #-------------------------------------------------------------------------------
@@ -184,7 +205,7 @@ echo "============================================================"
 echo "Output directory: ${OUTPUT_DIR}"
 echo "GPU types: ${GPU_ARRAY[*]}"
 echo "Model: ${MODEL}"
-echo "Image size: ${IMAGE_SIZE}"
+echo "Benchmark type: ${BENCHMARK_TYPE}"
 echo "Warmup runs: ${WARMUP}"
 echo "Test runs: ${RUNS}"
 echo "============================================================"
@@ -266,7 +287,7 @@ START_TIME=\$(date +%s)
 
 # Run benchmark
 echo "Running benchmark..."
-python3 -m cli.benchmark_latency ${MODEL_ARG} ${OPTIONAL_ARGS} \\
+python3 -m cli.benchmark_latency ${MODEL_ARG} ${OPTIONAL_ARGS} ${VIDEO_ARG} \\
     --output ${OUTPUT_DIR}/${GPU_TYPE}
 
 # Record end time
@@ -326,11 +347,23 @@ for i in "${!JOB_IDS[@]}"; do
     echo "  tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.err  # ${GPU}"
 done
 echo ""
-echo "  # Monitor all logs at once (stdout + stderr)"
-echo "  tail -f logs/slurm_*_benchmark_*.out logs/slurm_*_benchmark_*.err"
+echo "  # Monitor all stdout for this run"
+# Build list of log files for current run
+CURRENT_OUT_LOGS=""
+CURRENT_ERR_LOGS=""
+for i in "${!JOB_IDS[@]}"; do
+    JOB_ID="${JOB_IDS[$i]}"
+    GPU="${GPU_ARRAY[$i]}"
+    CURRENT_OUT_LOGS="${CURRENT_OUT_LOGS} logs/slurm_${JOB_ID}_benchmark_${GPU}.out"
+    CURRENT_ERR_LOGS="${CURRENT_ERR_LOGS} logs/slurm_${JOB_ID}_benchmark_${GPU}.err"
+done
+echo "  tail -f${CURRENT_OUT_LOGS}"
 echo ""
-echo "  # Monitor all stdout only"
-echo "  tail -f logs/slurm_*_benchmark_*.out"
+echo "  # Monitor all stderr for this run (errors)"
+echo "  tail -f${CURRENT_ERR_LOGS}"
+echo ""
+echo "  # Monitor all logs for this run (stdout + stderr)"
+echo "  tail -f${CURRENT_OUT_LOGS}${CURRENT_ERR_LOGS}"
 echo ""
 echo "  # Cancel all jobs if needed"
 echo "  scancel ${JOB_IDS[*]}"
@@ -349,7 +382,7 @@ Job IDs: ${JOB_IDS[*]}
 
 Model Selection: ${MODEL_ARG}
 Model Size: ${MODEL}
-Image Size: ${IMAGE_SIZE}
+Benchmark Type: ${BENCHMARK_TYPE}
 Warmup Runs: ${WARMUP}
 Test Runs: ${RUNS}
 
@@ -358,14 +391,14 @@ Monitoring Commands
 # Check job status
 squeue -j $(IFS=,; echo "${JOB_IDS[*]}")
 
-# Monitor all logs (stdout + stderr)
-tail -f logs/slurm_*_benchmark_*.out logs/slurm_*_benchmark_*.err
+# Monitor all stdout for this run
+tail -f${CURRENT_OUT_LOGS}
 
-# Monitor stdout only
-tail -f logs/slurm_*_benchmark_*.out
+# Monitor all stderr for this run (errors)
+tail -f${CURRENT_ERR_LOGS}
 
-# Monitor stderr only (errors)
-tail -f logs/slurm_*_benchmark_*.err
+# Monitor all logs for this run (stdout + stderr)
+tail -f${CURRENT_OUT_LOGS}${CURRENT_ERR_LOGS}
 
 # Individual stdout logs:
 EOF
@@ -385,10 +418,18 @@ for i in "${!JOB_IDS[@]}"; do
     echo "tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.err  # ${GPU} stderr" >> "${OUTPUT_DIR}/job_info.txt"
 done
 
+# Save log file lists for monitor.sh
+echo "${CURRENT_OUT_LOGS}" > "${OUTPUT_DIR}/.out_logs"
+echo "${CURRENT_ERR_LOGS}" > "${OUTPUT_DIR}/.err_logs"
+
 # Create a helper script for monitoring
 cat > "${OUTPUT_DIR}/monitor.sh" << 'MONITOR_EOF'
 #!/bin/bash
 # Quick monitoring helper for this benchmark suite
+
+# Read log file lists for this specific run
+OUT_LOGS=$(cat .out_logs 2>/dev/null | sed 's|^|../../|g; s| | ../../|g')
+ERR_LOGS=$(cat .err_logs 2>/dev/null | sed 's|^|../../|g; s| | ../../|g')
 
 case "${1:-status}" in
     status)
@@ -396,16 +437,16 @@ case "${1:-status}" in
         squeue -j $(cat job_info.txt | grep "Job IDs:" | cut -d: -f2 | tr ' ' ',') 2>/dev/null || echo "No jobs running"
         ;;
     logs|out)
-        echo "Tailing stdout logs (Ctrl+C to exit)..."
-        tail -f ../../logs/slurm_*_benchmark_*.out
+        echo "Tailing stdout logs for this run (Ctrl+C to exit)..."
+        eval "tail -f $OUT_LOGS"
         ;;
     err|errors)
-        echo "Tailing stderr logs (Ctrl+C to exit)..."
-        tail -f ../../logs/slurm_*_benchmark_*.err
+        echo "Tailing stderr logs for this run (Ctrl+C to exit)..."
+        eval "tail -f $ERR_LOGS"
         ;;
     all)
-        echo "Tailing all logs - stdout + stderr (Ctrl+C to exit)..."
-        tail -f ../../logs/slurm_*_benchmark_*.out ../../logs/slurm_*_benchmark_*.err
+        echo "Tailing all logs for this run - stdout + stderr (Ctrl+C to exit)..."
+        eval "tail -f $OUT_LOGS $ERR_LOGS"
         ;;
     results)
         echo "Checking for completed results..."
@@ -429,7 +470,7 @@ case "${1:-status}" in
         echo ""
         echo "Commands:"
         echo "  status   - Check job status (default)"
-        echo "  logs     - Tail stdout logs"
+        echo "  logs     - Tail stdout logs for this run"
         echo "  out      - Tail stdout logs (alias)"
         echo "  err      - Tail stderr logs (errors)"
         echo "  all      - Tail both stdout + stderr"

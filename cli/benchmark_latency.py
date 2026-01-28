@@ -6,15 +6,16 @@ Measures comprehensive latency metrics including percentiles, throughput,
 and real-time capability for video inference.
 
 Usage:
-    # Benchmark with checkpoint
-    python -m cli.benchmark_latency --checkpoint runs/my_run/best.pth
-
-    # Benchmark with run name
+    # Benchmark with dummy images (synthetic)
     python -m cli.benchmark_latency --run rfdetr_h200_20260120_105925
+
+    # Benchmark with real video frames (realistic)
+    python -m cli.benchmark_latency --run rfdetr_h200_20260120_105925 \\
+        --video crane_hook_1_short.mp4
 
     # Benchmark with specific parameters
     python -m cli.benchmark_latency --run my_run --warmup 10 --runs 100 \\
-        --image-size 640 --model base --output benchmark_results/
+        --video crane_hook_1_short.mp4 --output benchmark_results/
 """
 
 from __future__ import annotations
@@ -27,13 +28,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 from loguru import logger
+from PIL import Image
 
 from src.core.inference import RFDETRInference
 
 
 RUNS_DIR = Path("runs")
+DEFAULT_VIDEO = "crane_hook_1_short.mp4"
 
 
 def find_checkpoint_in_run(run_dir: Path) -> Path | None:
@@ -94,6 +98,48 @@ def get_gpu_info() -> dict:
         return {"available": False, "name": "CPU", "device": "cpu"}
 
 
+def load_video_frames(video_path: Path, max_frames: int | None = None) -> list[np.ndarray]:
+    """
+    Load frames from a video file.
+
+    Args:
+        video_path: Path to video file
+        max_frames: Maximum number of frames to load (None = all)
+
+    Returns:
+        List of frames as numpy arrays (RGB)
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {video_path}")
+
+    frames = []
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    logger.info(f"Video: {video_path.name}")
+    logger.info(f"  Resolution: {width}x{height}")
+    logger.info(f"  FPS: {fps:.1f}")
+    logger.info(f"  Total frames: {total_frames}")
+
+    frames_to_load = min(max_frames, total_frames) if max_frames else total_frames
+
+    while len(frames) < frames_to_load:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # Convert BGR to RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(frame_rgb)
+
+    cap.release()
+    logger.info(f"  Loaded: {len(frames)} frames")
+
+    return frames, {"fps": fps, "width": width, "height": height, "total_frames": total_frames}
+
+
 def benchmark_latency(
     checkpoint_path: Path,
     model_size: str = "base",
@@ -101,6 +147,7 @@ def benchmark_latency(
     warmup_runs: int = 10,
     test_runs: int = 100,
     optimize: bool = True,
+    video_path: Path | None = None,
 ) -> dict:
     """
     Benchmark inference latency with comprehensive metrics.
@@ -108,10 +155,11 @@ def benchmark_latency(
     Args:
         checkpoint_path: Path to model checkpoint
         model_size: Model size (base or large)
-        image_size: Image size for inference
+        image_size: Image size for inference (used for dummy images)
         warmup_runs: Number of warmup runs
         test_runs: Number of test runs
         optimize: Whether to optimize model for inference
+        video_path: Path to video file (None = use dummy images)
 
     Returns:
         Dictionary with benchmark results
@@ -124,17 +172,35 @@ def benchmark_latency(
     # Load model onto device with optimization
     engine.load_model(optimize=optimize)
 
-    # Create dummy image
-    dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
-
     # Get GPU info
     gpu_info = get_gpu_info()
     logger.info(f"GPU: {gpu_info['name']}")
 
+    # Prepare test data
+    video_info = None
+    if video_path:
+        # Load video frames
+        frames, video_info = load_video_frames(video_path, max_frames=test_runs + warmup_runs)
+        if len(frames) < warmup_runs + test_runs:
+            logger.warning(
+                f"Video has only {len(frames)} frames, adjusting warmup={min(warmup_runs, len(frames)//2)}, "
+                f"runs={len(frames) - min(warmup_runs, len(frames)//2)}"
+            )
+            warmup_runs = min(warmup_runs, len(frames) // 2)
+            test_runs = len(frames) - warmup_runs
+        benchmark_mode = "video"
+        test_images = frames
+    else:
+        # Create dummy images
+        benchmark_mode = "synthetic"
+        dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
+        test_images = [dummy_img] * (warmup_runs + test_runs)
+
     # Warmup phase
     logger.info(f"Warming up with {warmup_runs} runs...")
     for i in range(warmup_runs):
-        _ = engine.model.predict(dummy_img)
+        img = test_images[i % len(test_images)]
+        _ = engine.model.predict(img)
         if (i + 1) % 5 == 0:
             logger.info(f"  Warmup: {i + 1}/{warmup_runs}")
 
@@ -143,8 +209,10 @@ def benchmark_latency(
     times = []
 
     for i in range(test_runs):
+        img = test_images[(warmup_runs + i) % len(test_images)]
+
         start = time.perf_counter()
-        _ = engine.model.predict(dummy_img)
+        _ = engine.model.predict(img)
         elapsed = (time.perf_counter() - start) * 1000  # Convert to ms
         times.append(elapsed)
 
@@ -166,12 +234,19 @@ def benchmark_latency(
     realtime_30fps = p99_ms < 33.33  # 30 FPS = 33.33ms per frame
     realtime_60fps = p99_ms < 16.67  # 60 FPS = 16.67ms per frame
 
+    # Check against video's native FPS if available
+    realtime_native = None
+    if video_info:
+        native_fps = video_info["fps"]
+        native_frame_time = 1000.0 / native_fps if native_fps > 0 else 33.33
+        realtime_native = p99_ms < native_frame_time
+
     results = {
         "timestamp": datetime.now().isoformat(),
         "hostname": socket.gethostname(),
         "checkpoint": str(checkpoint_path),
         "model_size": model_size,
-        "image_size": image_size,
+        "benchmark_mode": benchmark_mode,
         "optimized": optimize,
         "gpu_info": gpu_info,
         "benchmark_config": {
@@ -194,6 +269,20 @@ def benchmark_latency(
         },
     }
 
+    # Add video-specific info
+    if video_info:
+        results["video_info"] = {
+            "path": str(video_path),
+            "width": video_info["width"],
+            "height": video_info["height"],
+            "fps": video_info["fps"],
+            "total_frames": video_info["total_frames"],
+        }
+        results["realtime_capable"]["native_fps"] = realtime_native
+        results["realtime_capable"]["native_fps_value"] = video_info["fps"]
+    else:
+        results["image_size"] = image_size
+
     return results
 
 
@@ -208,8 +297,16 @@ def print_results(results: dict) -> None:
         logger.info(f"GPU Memory: {results['gpu_info']['memory_gb']} GB")
 
     logger.info(f"\nModel: {results['model_size']}")
-    logger.info(f"Image Size: {results['image_size']}")
+    logger.info(f"Benchmark Mode: {results['benchmark_mode']}")
     logger.info(f"Optimized: {results['optimized']}")
+
+    if "video_info" in results:
+        vi = results["video_info"]
+        logger.info(f"\nVideo: {Path(vi['path']).name}")
+        logger.info(f"  Resolution: {vi['width']}x{vi['height']}")
+        logger.info(f"  Native FPS: {vi['fps']:.1f}")
+    else:
+        logger.info(f"Image Size: {results.get('image_size', 'N/A')}")
 
     logger.info(f"\nBenchmark Config:")
     logger.info(f"  Warmup runs: {results['benchmark_config']['warmup_runs']}")
@@ -232,6 +329,14 @@ def print_results(results: dict) -> None:
     logger.info(f"\nReal-time Capability:")
     logger.info(f"  30 FPS: {'✓ YES' if rt['30fps'] else '✗ NO'} (requires P99 < 33.33ms)")
     logger.info(f"  60 FPS: {'✓ YES' if rt['60fps'] else '✗ NO'} (requires P99 < 16.67ms)")
+
+    if "native_fps" in rt:
+        native_fps = rt.get("native_fps_value", 0)
+        native_frame_time = 1000.0 / native_fps if native_fps > 0 else 0
+        logger.info(
+            f"  Native ({native_fps:.1f} FPS): {'✓ YES' if rt['native_fps'] else '✗ NO'} "
+            f"(requires P99 < {native_frame_time:.2f}ms)"
+        )
 
     logger.info("=" * 70)
 
@@ -261,12 +366,24 @@ def main():
         "--image-size",
         type=int,
         default=640,
-        help="Image size for inference (default: 640)",
+        help="Image size for synthetic benchmark (default: 640)",
     )
     parser.add_argument(
         "--no-optimize",
         action="store_true",
         help="Disable model optimization (faster startup, slower inference)",
+    )
+
+    # Video benchmark
+    parser.add_argument(
+        "--video",
+        type=str,
+        help=f"Video file for realistic benchmark (default: {DEFAULT_VIDEO} if --use-video is set)",
+    )
+    parser.add_argument(
+        "--use-video",
+        action="store_true",
+        help=f"Use default video ({DEFAULT_VIDEO}) for benchmark",
     )
 
     # Benchmark configuration
@@ -323,6 +440,20 @@ def main():
 
     logger.info(f"Checkpoint: {checkpoint_path}")
 
+    # Resolve video path
+    video_path = None
+    if args.video:
+        video_path = Path(args.video)
+        if not video_path.exists():
+            logger.error(f"Video not found: {video_path}")
+            sys.exit(1)
+    elif args.use_video:
+        video_path = Path(DEFAULT_VIDEO)
+        if not video_path.exists():
+            logger.error(f"Default video not found: {video_path}")
+            logger.error("Please specify a video with --video or ensure crane_hook_1_short.mp4 exists")
+            sys.exit(1)
+
     # Run benchmark
     results = benchmark_latency(
         checkpoint_path=checkpoint_path,
@@ -331,6 +462,7 @@ def main():
         warmup_runs=args.warmup,
         test_runs=args.runs,
         optimize=not args.no_optimize,
+        video_path=video_path,
     )
 
     # Print results

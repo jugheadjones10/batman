@@ -13,7 +13,7 @@ The benchmarking system measures:
 
 ### 1. Run Benchmark on Multiple GPUs
 
-Submit benchmark jobs for all available GPUs:
+By default, the benchmark uses real video frames from `crane_hook_1_short.mp4` for realistic latency measurements:
 
 ```bash
 ./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus all
@@ -23,6 +23,18 @@ Or specify specific GPUs:
 
 ```bash
 ./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus h200,a100-80,a100-40
+```
+
+Use a different video:
+
+```bash
+./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus h200,a100-80 --video my_video.mp4
+```
+
+Use synthetic dummy images (for pure GPU comparison without video overhead):
+
+```bash
+./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus h200,a100-80 --no-video
 ```
 
 ### 2. Monitor Jobs
@@ -102,12 +114,14 @@ Model Selection (required, mutually exclusive):
 
 Model Configuration:
   --model SIZE        Model size: base or large (default: base)
-  --image-size SIZE   Image size (default: 640)
+  --image-size SIZE   Image size for synthetic benchmark (default: 640)
   --no-optimize       Disable model optimization
 
 Benchmark Configuration:
   --warmup N          Number of warmup runs (default: 10)
   --runs N            Number of benchmark runs (default: 100)
+  --video FILE        Video file for realistic benchmark (default: crane_hook_1_short.mp4)
+  --no-video          Use synthetic dummy images instead of video
 
 GPU Selection (required):
   --gpus TYPES        Comma-separated GPU types or 'all'
@@ -138,6 +152,23 @@ Test both base and large models:
 ./submit_benchmark.sh --run my_run --gpus h200,a100-80 --model large
 ```
 
+## Benchmark Modes
+
+### Video Benchmark (Default)
+
+Uses real video frames for realistic latency measurements:
+- Includes actual frame content (varying complexity)
+- Tests real-world inference performance
+- Default video: `crane_hook_1_short.mp4`
+
+### Synthetic Benchmark (`--no-video`)
+
+Uses random dummy images for pure GPU comparison:
+- Consistent, reproducible results
+- Isolates GPU compute performance
+- No video I/O overhead
+- Good for comparing GPUs under identical conditions
+
 ## Understanding Results
 
 ### Latency Metrics
@@ -165,6 +196,8 @@ We use **P99 instead of mean** because:
 ========================================
 GPU LATENCY COMPARISON
 ========================================
+Benchmark Mode: video
+Video: crane_hook_1_short.mp4 (1920x1080 @ 30.0 FPS)
 
 GPU Type        GPU Name                  Mean       P50        P95        P99        FPS      30fps    60fps   
 ------------------------------------------------------------------------------------------------------------------------
@@ -197,13 +230,20 @@ Each `benchmark_results.json` contains:
   "hostname": "node123",
   "checkpoint": "runs/rfdetr_h200_20260120_105925/best.pth",
   "model_size": "base",
-  "image_size": 640,
+  "benchmark_mode": "video",
   "optimized": true,
   "gpu_info": {
     "available": true,
     "name": "NVIDIA H200",
     "memory_gb": 141.0,
     "device": "cuda"
+  },
+  "video_info": {
+    "path": "crane_hook_1_short.mp4",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30.0,
+    "total_frames": 150
   },
   "benchmark_config": {
     "warmup_runs": 10,
@@ -221,10 +261,14 @@ Each `benchmark_results.json` contains:
   },
   "realtime_capable": {
     "30fps": true,
-    "60fps": true
+    "60fps": true,
+    "native_fps": true,
+    "native_fps_value": 30.0
   }
 }
 ```
+
+Note: For synthetic benchmarks (`--no-video`), `video_info` is replaced with `image_size` and `native_fps` fields are not present.
 
 ## Tips
 
