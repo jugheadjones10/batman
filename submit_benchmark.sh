@@ -309,14 +309,24 @@ echo "  # Check status of all jobs"
 echo "  squeue -u \$USER"
 echo "  watch -n 2 squeue -u \$USER"
 echo ""
-echo "  # Monitor specific job logs"
+echo "  # Monitor stdout logs (one per GPU)"
 for i in "${!JOB_IDS[@]}"; do
     JOB_ID="${JOB_IDS[$i]}"
     GPU="${GPU_ARRAY[$i]}"
     echo "  tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.out  # ${GPU}"
 done
 echo ""
-echo "  # Monitor all logs at once (requires tmux or multiple terminals)"
+echo "  # Monitor stderr logs (errors)"
+for i in "${!JOB_IDS[@]}"; do
+    JOB_ID="${JOB_IDS[$i]}"
+    GPU="${GPU_ARRAY[$i]}"
+    echo "  tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.err  # ${GPU}"
+done
+echo ""
+echo "  # Monitor all logs at once (stdout + stderr)"
+echo "  tail -f logs/slurm_*_benchmark_*.out logs/slurm_*_benchmark_*.err"
+echo ""
+echo "  # Monitor all stdout only"
 echo "  tail -f logs/slurm_*_benchmark_*.out"
 echo ""
 echo "  # Cancel all jobs if needed"
@@ -345,17 +355,31 @@ Monitoring Commands
 # Check job status
 squeue -j $(IFS=,; echo "${JOB_IDS[*]}")
 
-# Monitor all logs
+# Monitor all logs (stdout + stderr)
+tail -f logs/slurm_*_benchmark_*.out logs/slurm_*_benchmark_*.err
+
+# Monitor stdout only
 tail -f logs/slurm_*_benchmark_*.out
 
-# Individual logs:
+# Monitor stderr only (errors)
+tail -f logs/slurm_*_benchmark_*.err
+
+# Individual stdout logs:
 EOF
 
 # Add individual log commands
 for i in "${!JOB_IDS[@]}"; do
     JOB_ID="${JOB_IDS[$i]}"
     GPU="${GPU_ARRAY[$i]}"
-    echo "tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.out  # ${GPU}" >> "${OUTPUT_DIR}/job_info.txt"
+    echo "tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.out  # ${GPU} stdout" >> "${OUTPUT_DIR}/job_info.txt"
+done
+
+echo "" >> "${OUTPUT_DIR}/job_info.txt"
+echo "# Individual stderr logs:" >> "${OUTPUT_DIR}/job_info.txt"
+for i in "${!JOB_IDS[@]}"; do
+    JOB_ID="${JOB_IDS[$i]}"
+    GPU="${GPU_ARRAY[$i]}"
+    echo "tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.err  # ${GPU} stderr" >> "${OUTPUT_DIR}/job_info.txt"
 done
 
 # Create a helper script for monitoring
@@ -366,11 +390,19 @@ cat > "${OUTPUT_DIR}/monitor.sh" << 'MONITOR_EOF'
 case "${1:-status}" in
     status)
         echo "Checking job status..."
-        squeue -j $(cat job_info.txt | grep "Job IDs:" | cut -d: -f2 | tr ' ' ',')
+        squeue -j $(cat job_info.txt | grep "Job IDs:" | cut -d: -f2 | tr ' ' ',') 2>/dev/null || echo "No jobs running"
         ;;
-    logs)
-        echo "Tailing all logs (Ctrl+C to exit)..."
+    logs|out)
+        echo "Tailing stdout logs (Ctrl+C to exit)..."
         tail -f ../../logs/slurm_*_benchmark_*.out
+        ;;
+    err|errors)
+        echo "Tailing stderr logs (Ctrl+C to exit)..."
+        tail -f ../../logs/slurm_*_benchmark_*.err
+        ;;
+    all)
+        echo "Tailing all logs - stdout + stderr (Ctrl+C to exit)..."
+        tail -f ../../logs/slurm_*_benchmark_*.out ../../logs/slurm_*_benchmark_*.err
         ;;
     results)
         echo "Checking for completed results..."
@@ -378,19 +410,26 @@ case "${1:-status}" in
             if [ -f "$dir/benchmark_results.json" ]; then
                 gpu=$(basename "$dir")
                 echo "✓ $gpu - Complete"
+            else
+                gpu=$(basename "$dir")
+                [ "$gpu" != "*/" ] && echo "○ $gpu - Pending/Running"
             fi
         done
         ;;
     compare)
         echo "Comparing results..."
-        python -m cli.compare_latency .
+        RESULTS_DIR="$(pwd)"
+        cd ../.. && python -m cli.compare_latency "$RESULTS_DIR"
         ;;
     *)
         echo "Usage: ./monitor.sh [command]"
         echo ""
         echo "Commands:"
         echo "  status   - Check job status (default)"
-        echo "  logs     - Tail all logs"
+        echo "  logs     - Tail stdout logs"
+        echo "  out      - Tail stdout logs (alias)"
+        echo "  err      - Tail stderr logs (errors)"
+        echo "  all      - Tail both stdout + stderr"
         echo "  results  - Check which GPUs have completed"
         echo "  compare  - Compare results"
         ;;
