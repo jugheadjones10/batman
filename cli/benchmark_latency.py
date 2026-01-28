@@ -120,8 +120,9 @@ def benchmark_latency(
     engine = RFDETRInference(
         checkpoint=checkpoint_path,
         model_size=model_size,
-        optimize_for_inference=optimize,
     )
+    # Load model onto device with optimization
+    engine.load_model(optimize=optimize)
 
     # Create dummy image
     dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
