@@ -8,6 +8,7 @@ The benchmarking system measures:
 - **Per-frame latency**: Mean, P50, P95, P99 percentiles
 - **Throughput**: Frames per second (FPS)
 - **Real-time capability**: Whether GPU can maintain 30 FPS or 60 FPS video processing
+- **Latency visualization**: Side-by-side videos showing real-time vs. delayed inference output
 
 ## Quick Start
 
@@ -36,6 +37,14 @@ Use synthetic dummy images (for pure GPU comparison without video overhead):
 ```bash
 ./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus h200,a100-80 --no-video
 ```
+
+Create side-by-side latency visualization video:
+
+```bash
+./submit_benchmark.sh --run rfdetr_h200_20260120_105925 --gpus h200 --create-latency-video
+```
+
+This generates a video showing the original feed alongside inference results with realistic latency delays, simulating what real-time processing would look like.
 
 ### 2. Monitor Jobs
 
@@ -122,6 +131,7 @@ Benchmark Configuration:
   --runs N            Number of benchmark runs (default: 100)
   --video FILE        Video file for realistic benchmark (default: crane_hook_1_short.mp4)
   --no-video          Use synthetic dummy images instead of video
+  --create-latency-video  Create side-by-side latency visualization video (requires video)
 
 GPU Selection (required):
   --gpus TYPES        Comma-separated GPU types or 'all'
@@ -169,6 +179,20 @@ Uses random dummy images for pure GPU comparison:
 - No video I/O overhead
 - Good for comparing GPUs under identical conditions
 
+### Latency Visualization (`--create-latency-video`)
+
+Creates a side-by-side comparison video showing real-time vs. delayed output:
+- **Left side**: Original video playing at real-time speed
+- **Right side**: Inference results delayed by actual per-frame latency
+- **Purpose**: Visualize what real-time processing would look like with live video feed
+- **Requirements**: Must be used with video input (not compatible with `--no-video`)
+- **Output files**:
+  - `detected_latency.mp4`: Inference video with realistic latency delays
+  - `sidebyside_latency.mp4`: Side-by-side comparison video
+  - `frames/`: Directory with annotated frames (used for video generation)
+
+This feature helps you understand the practical impact of inference latency by showing exactly how the output would lag behind a live feed.
+
 ## Understanding Results
 
 ### Latency Metrics
@@ -213,7 +237,13 @@ benchmark_results/
 └── 20260128_120000/          # Timestamp of benchmark suite
     ├── job_info.txt          # Job metadata
     ├── h200/                 # GPU-specific results
-    │   └── benchmark_results.json
+    │   ├── benchmark_results.json
+    │   ├── frames/           # Annotated frames (if --create-latency-video used)
+    │   │   ├── frame_00000.jpg
+    │   │   ├── frame_00001.jpg
+    │   │   └── ...
+    │   ├── detected_latency.mp4      # Latency-delayed inference video
+    │   └── sidebyside_latency.mp4    # Side-by-side comparison video
     ├── a100-80/
     │   └── benchmark_results.json
     └── a100-40/
@@ -264,11 +294,18 @@ Each `benchmark_results.json` contains:
     "60fps": true,
     "native_fps": true,
     "native_fps_value": 30.0
-  }
+  },
+  "per_frame_results": [
+    {"frame_idx": 0, "inference_time_ms": 12.1},
+    {"frame_idx": 1, "inference_time_ms": 11.8},
+    {"frame_idx": 2, "inference_time_ms": 13.2}
+  ]
 }
 ```
 
-Note: For synthetic benchmarks (`--no-video`), `video_info` is replaced with `image_size` and `native_fps` fields are not present.
+Notes:
+- For synthetic benchmarks (`--no-video`), `video_info` is replaced with `image_size` and `native_fps` fields are not present.
+- `per_frame_results` contains per-frame timing data, used for latency visualization.
 
 ## Tips
 
@@ -281,6 +318,12 @@ Note: For synthetic benchmarks (`--no-video`), `video_info` is replaced with `im
 4. **Check GPU load**: Ensure GPUs aren't running other workloads during benchmarking.
 
 5. **Model optimization**: The `--no-optimize` flag disables model optimization, useful for debugging but slower.
+
+6. **Latency visualization**: Use `--create-latency-video` to see the practical impact of latency:
+   - Shows exactly how delayed the output would be in a real-time scenario
+   - Helps identify if inference is fast enough for your use case
+   - Makes P99 latency metrics more tangible and understandable
+   - Note: This increases benchmark time and storage (saves annotated frames)
 
 ## Troubleshooting
 

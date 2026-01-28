@@ -25,6 +25,7 @@ GPU_TYPES=""
 TIME="00:30:00"
 VIDEO="crane_hook_1_short.mp4"  # Default video for realistic benchmark
 NO_VIDEO=false
+CREATE_LATENCY_VIDEO=false
 
 #-------------------------------------------------------------------------------
 # Parse Arguments
@@ -79,6 +80,10 @@ while [[ $# -gt 0 ]]; do
             NO_VIDEO=true
             shift
             ;;
+        --create-latency-video)
+            CREATE_LATENCY_VIDEO=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -99,6 +104,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --runs N            Number of benchmark runs (default: 100)"
             echo "  --video FILE        Video file for realistic benchmark (default: crane_hook_1_short.mp4)"
             echo "  --no-video          Use synthetic dummy images instead of video"
+            echo "  --create-latency-video  Create side-by-side latency visualization video (requires video)"
             echo ""
             echo "GPU Selection (required):"
             echo "  --gpus TYPES        Comma-separated GPU types or 'all'"
@@ -113,6 +119,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --run rfdetr_h200_20260120_105925 --gpus h200,a100-80"
             echo "  $0 --latest --gpus all"
             echo "  $0 --checkpoint runs/my_run/best.pth --gpus h200,h100-96,a100-80,a100-40"
+            echo "  $0 --run my_run --gpus h200 --create-latency-video"
             exit 0
             ;;
         *)
@@ -191,6 +198,16 @@ else
     BENCHMARK_TYPE="video (${VIDEO})"
 fi
 
+# Add latency video creation flag if requested
+if [ "$CREATE_LATENCY_VIDEO" = true ]; then
+    if [ "$NO_VIDEO" = true ]; then
+        echo "Warning: --create-latency-video requires video input (--video), ignoring flag"
+        CREATE_LATENCY_VIDEO=false
+    else
+        OPTIONAL_ARGS="${OPTIONAL_ARGS} --create-latency-video"
+    fi
+fi
+
 #-------------------------------------------------------------------------------
 # Create Output Directory with Timestamp
 #-------------------------------------------------------------------------------
@@ -208,6 +225,7 @@ echo "Model: ${MODEL}"
 echo "Benchmark type: ${BENCHMARK_TYPE}"
 echo "Warmup runs: ${WARMUP}"
 echo "Test runs: ${RUNS}"
+echo "Create latency video: ${CREATE_LATENCY_VIDEO}"
 echo "============================================================"
 echo ""
 

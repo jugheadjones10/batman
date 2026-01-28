@@ -33,7 +33,7 @@ import numpy as np
 from loguru import logger
 from PIL import Image
 
-from src.core.inference import RFDETRInference
+from src.core.inference import RFDETRInference, draw_detections
 
 
 RUNS_DIR = Path("runs")
@@ -148,6 +148,8 @@ def benchmark_latency(
     test_runs: int = 100,
     optimize: bool = True,
     video_path: Path | None = None,
+    save_frames: bool = False,
+    output_dir: Path | None = None,
 ) -> dict:
     """
     Benchmark inference latency with comprehensive metrics.
@@ -160,6 +162,8 @@ def benchmark_latency(
         test_runs: Number of test runs
         optimize: Whether to optimize model for inference
         video_path: Path to video file (None = use dummy images)
+        save_frames: Whether to save annotated frames for latency visualization
+        output_dir: Output directory for saving frames (required if save_frames=True)
 
     Returns:
         Dictionary with benchmark results
@@ -204,17 +208,71 @@ def benchmark_latency(
         if (i + 1) % 5 == 0:
             logger.info(f"  Warmup: {i + 1}/{warmup_runs}")
 
+    # Prepare frames directory if saving annotated frames
+    frames_dir = None
+    if save_frames:
+        if output_dir is None:
+            raise ValueError("output_dir is required when save_frames=True")
+        frames_dir = output_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Saving annotated frames to: {frames_dir}")
+
     # Benchmark phase
     logger.info(f"Running {test_runs} benchmark iterations...")
     times = []
+    per_frame_results = []
 
     for i in range(test_runs):
         img = test_images[(warmup_runs + i) % len(test_images)]
 
         start = time.perf_counter()
-        _ = engine.model.predict(img)
+        detections = engine.model.predict(img)
         elapsed = (time.perf_counter() - start) * 1000  # Convert to ms
         times.append(elapsed)
+        
+        # Store per-frame result
+        per_frame_results.append({
+            "frame_idx": i,
+            "inference_time_ms": round(elapsed, 2)
+        })
+
+        # Save annotated frame if requested
+        if save_frames and frames_dir:
+            # Convert image to BGR for OpenCV
+            if isinstance(img, np.ndarray):
+                if img.shape[2] == 3:  # RGB
+                    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                else:
+                    img_bgr = img
+            else:
+                img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            
+            # Convert detections to Detection objects for drawing
+            from src.core.inference import Detection
+            detection_objs = []
+            if hasattr(detections, 'xyxy') and len(detections.xyxy) > 0:
+                for j in range(len(detections.xyxy)):
+                    class_id = int(detections.class_id[j])
+                    class_name = (
+                        engine.class_names[class_id]
+                        if class_id < len(engine.class_names)
+                        else f"class_{class_id}"
+                    )
+                    detection_objs.append(
+                        Detection(
+                            bbox=tuple(detections.xyxy[j].tolist()),
+                            class_id=class_id,
+                            class_name=class_name,
+                            confidence=float(detections.confidence[j]),
+                        )
+                    )
+            
+            # Draw detections on frame
+            annotated = draw_detections(img_bgr, detection_objs, thickness=2)
+            
+            # Save frame
+            frame_path = frames_dir / f"frame_{i:05d}.jpg"
+            cv2.imwrite(str(frame_path), annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
         if (i + 1) % 20 == 0:
             logger.info(f"  Progress: {i + 1}/{test_runs}")
@@ -267,6 +325,7 @@ def benchmark_latency(
             "30fps": realtime_30fps,
             "60fps": realtime_60fps,
         },
+        "per_frame_results": per_frame_results,
     }
 
     # Add video-specific info
@@ -407,6 +466,13 @@ def main():
         type=str,
         help="Output directory for results (default: benchmark_results/)",
     )
+    
+    # Latency visualization
+    parser.add_argument(
+        "--create-latency-video",
+        action="store_true",
+        help="Create side-by-side latency visualization video (requires --video)",
+    )
 
     args = parser.parse_args()
 
@@ -453,6 +519,20 @@ def main():
             logger.error(f"Default video not found: {video_path}")
             logger.error("Please specify a video with --video or ensure crane_hook_1_short.mp4 exists")
             sys.exit(1)
+    
+    # Validate latency video requirements
+    if args.create_latency_video and not video_path:
+        logger.error("--create-latency-video requires a video file (use --video or --use-video)")
+        sys.exit(1)
+    
+    # Determine output directory early for frame saving
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path("benchmark_results") / timestamp
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Run benchmark
     results = benchmark_latency(
@@ -463,27 +543,57 @@ def main():
         test_runs=args.runs,
         optimize=not args.no_optimize,
         video_path=video_path,
+        save_frames=args.create_latency_video,
+        output_dir=output_dir,
     )
 
     # Print results
     print_results(results)
 
     # Save results
-    if args.output:
-        # When output is explicitly provided, save directly there
-        output_dir = Path(args.output)
-    else:
-        # When using default, add timestamp subdirectory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path("benchmark_results") / timestamp
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     output_file = output_dir / "benchmark_results.json"
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
 
     logger.info(f"\nResults saved to: {output_file}")
+    
+    # Create latency visualization if requested
+    if args.create_latency_video:
+        logger.info("\n" + "=" * 70)
+        logger.info("Creating latency visualization video...")
+        logger.info("=" * 70)
+        
+        try:
+            from cli.create_latency_video import create_latency_video
+            from cli.create_sidebyside_video import create_sidebyside_video
+            
+            # Step 1: Create latency-delayed inference video
+            latency_video_path = create_latency_video(
+                video_path=video_path,
+                results_json_path=output_file,
+                frames_dir=output_dir / "frames",
+                output_path=output_dir / "detected_latency.mp4",
+            )
+            logger.info(f"Latency video created: {latency_video_path}")
+            
+            # Step 2: Create side-by-side comparison video
+            sidebyside_path = create_sidebyside_video(
+                original_video_path=video_path,
+                latency_video_path=latency_video_path,
+                results_json_path=output_file,
+                output_path=output_dir / "sidebyside_latency.mp4",
+            )
+            logger.info(f"Side-by-side video created: {sidebyside_path}")
+            
+            logger.info("\n" + "=" * 70)
+            logger.info("Latency visualization complete!")
+            logger.info("=" * 70)
+            logger.info(f"View the result: {sidebyside_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create latency visualization: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":

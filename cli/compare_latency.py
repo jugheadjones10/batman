@@ -90,7 +90,8 @@ def format_comparison_table(results: dict[str, dict]) -> str:
     lines.append("")
 
     # Table header
-    header = f"{'GPU Type':<15} {'GPU Name':<25} {'Mean':<10} {'P50':<10} {'P95':<10} {'P99':<10} {'FPS':<8} {'30fps':<8} {'60fps':<8}"
+    GPU_NAME_WIDTH = 30
+    header = f"{'GPU Type':<12} {'GPU Name':<{GPU_NAME_WIDTH}} {'Mean':<9} {'P50':<9} {'P95':<9} {'P99':<9} {'FPS':<7} {'30fps':<6} {'60fps':<6}"
     lines.append(header)
     lines.append("-" * 120)
 
@@ -100,6 +101,9 @@ def format_comparison_table(results: dict[str, dict]) -> str:
     # Table rows
     for gpu_type, data in sorted_results:
         gpu_name = data["gpu_info"]["name"]
+        # Truncate long GPU names
+        if len(gpu_name) > GPU_NAME_WIDTH:
+            gpu_name = gpu_name[: GPU_NAME_WIDTH - 3] + "..."
         metrics = data["metrics"]
         rt = data["realtime_capable"]
 
@@ -111,7 +115,7 @@ def format_comparison_table(results: dict[str, dict]) -> str:
         rt_30 = "✓" if rt["30fps"] else "✗"
         rt_60 = "✓" if rt["60fps"] else "✗"
 
-        row = f"{gpu_type:<15} {gpu_name:<25} {mean:<10} {p50:<10} {p95:<10} {p99:<10} {fps:<8} {rt_30:<8} {rt_60:<8}"
+        row = f"{gpu_type:<12} {gpu_name:<{GPU_NAME_WIDTH}} {mean:<9} {p50:<9} {p95:<9} {p99:<9} {fps:<7} {rt_30:<6} {rt_60:<6}"
         lines.append(row)
 
     lines.append("=" * 120)
