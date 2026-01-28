@@ -304,18 +304,29 @@ echo "============================================================"
 echo "Job IDs: ${JOB_IDS[*]}"
 echo "Output directory: ${OUTPUT_DIR}"
 echo ""
-echo "Monitor jobs with:"
+echo "Useful commands:"
+echo "  # Check status of all jobs"
 echo "  squeue -u \$USER"
-echo "  watch squeue -u \$USER"
+echo "  watch -n 2 squeue -u \$USER"
 echo ""
-echo "Check logs in:"
-echo "  logs/slurm_*_benchmark_*.out"
+echo "  # Monitor specific job logs"
+for i in "${!JOB_IDS[@]}"; do
+    JOB_ID="${JOB_IDS[$i]}"
+    GPU="${GPU_ARRAY[$i]}"
+    echo "  tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.out  # ${GPU}"
+done
+echo ""
+echo "  # Monitor all logs at once (requires tmux or multiple terminals)"
+echo "  tail -f logs/slurm_*_benchmark_*.out"
+echo ""
+echo "  # Cancel all jobs if needed"
+echo "  scancel ${JOB_IDS[*]}"
 echo ""
 echo "When complete, compare results with:"
 echo "  python -m cli.compare_latency ${OUTPUT_DIR}"
 echo "============================================================"
 
-# Save job info
+# Save job info with monitoring commands
 cat > "${OUTPUT_DIR}/job_info.txt" << EOF
 Benchmark Suite
 ===============
@@ -328,4 +339,69 @@ Model Size: ${MODEL}
 Image Size: ${IMAGE_SIZE}
 Warmup Runs: ${WARMUP}
 Test Runs: ${RUNS}
+
+Monitoring Commands
+===================
+# Check job status
+squeue -j $(IFS=,; echo "${JOB_IDS[*]}")
+
+# Monitor all logs
+tail -f logs/slurm_*_benchmark_*.out
+
+# Individual logs:
 EOF
+
+# Add individual log commands
+for i in "${!JOB_IDS[@]}"; do
+    JOB_ID="${JOB_IDS[$i]}"
+    GPU="${GPU_ARRAY[$i]}"
+    echo "tail -f logs/slurm_${JOB_ID}_benchmark_${GPU}.out  # ${GPU}" >> "${OUTPUT_DIR}/job_info.txt"
+done
+
+# Create a helper script for monitoring
+cat > "${OUTPUT_DIR}/monitor.sh" << 'MONITOR_EOF'
+#!/bin/bash
+# Quick monitoring helper for this benchmark suite
+
+case "${1:-status}" in
+    status)
+        echo "Checking job status..."
+        squeue -j $(cat job_info.txt | grep "Job IDs:" | cut -d: -f2 | tr ' ' ',')
+        ;;
+    logs)
+        echo "Tailing all logs (Ctrl+C to exit)..."
+        tail -f ../../logs/slurm_*_benchmark_*.out
+        ;;
+    results)
+        echo "Checking for completed results..."
+        for dir in */; do
+            if [ -f "$dir/benchmark_results.json" ]; then
+                gpu=$(basename "$dir")
+                echo "✓ $gpu - Complete"
+            fi
+        done
+        ;;
+    compare)
+        echo "Comparing results..."
+        python -m cli.compare_latency .
+        ;;
+    *)
+        echo "Usage: ./monitor.sh [command]"
+        echo ""
+        echo "Commands:"
+        echo "  status   - Check job status (default)"
+        echo "  logs     - Tail all logs"
+        echo "  results  - Check which GPUs have completed"
+        echo "  compare  - Compare results"
+        ;;
+esac
+MONITOR_EOF
+
+chmod +x "${OUTPUT_DIR}/monitor.sh"
+
+echo ""
+echo "Helper script created: ${OUTPUT_DIR}/monitor.sh"
+echo "  cd ${OUTPUT_DIR} && ./monitor.sh logs    # Tail all logs"
+echo "  cd ${OUTPUT_DIR} && ./monitor.sh status  # Check job status"
+echo "  cd ${OUTPUT_DIR} && ./monitor.sh results # Check completion"
+echo "============================================================"

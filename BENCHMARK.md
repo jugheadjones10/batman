@@ -27,17 +27,31 @@ Or specify specific GPUs:
 
 ### 2. Monitor Jobs
 
-Check job status:
+The script creates a helper script in your results directory for easy monitoring:
 
 ```bash
-squeue -u $USER
-watch squeue -u $USER  # Auto-refresh
+# Navigate to your results directory
+cd benchmark_results/20260128_120000/
+
+# Quick commands via helper script
+./monitor.sh logs      # Tail all logs (Ctrl+C to exit)
+./monitor.sh status    # Check job status
+./monitor.sh results   # See which GPUs completed
+./monitor.sh compare   # Compare results when done
 ```
 
-Check logs:
+Or use SLURM commands directly:
 
 ```bash
+# Check all your jobs
+squeue -u $USER
+watch -n 2 squeue -u $USER  # Auto-refresh every 2 seconds
+
+# Tail all benchmark logs
 tail -f logs/slurm_*_benchmark_*.out
+
+# Tail specific GPU log (job ID shown when submitted)
+tail -f logs/slurm_12345_benchmark_h200.out
 ```
 
 ### 3. Compare Results
