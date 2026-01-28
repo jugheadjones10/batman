@@ -115,9 +115,9 @@ done
 # Validate Arguments
 #-------------------------------------------------------------------------------
 MODEL_SELECTION_COUNT=0
-[[ -n "$CHECKPOINT" ]] && ((MODEL_SELECTION_COUNT++))
-[[ -n "$RUN" ]] && ((MODEL_SELECTION_COUNT++))
-[[ "$LATEST" == true ]] && ((MODEL_SELECTION_COUNT++))
+[[ -n "$CHECKPOINT" ]] && ((MODEL_SELECTION_COUNT++)) || true
+[[ -n "$RUN" ]] && ((MODEL_SELECTION_COUNT++)) || true
+[[ "$LATEST" == true ]] && ((MODEL_SELECTION_COUNT++)) || true
 
 if [ $MODEL_SELECTION_COUNT -eq 0 ]; then
     echo "Error: Must specify one of --checkpoint, --run, or --latest"
