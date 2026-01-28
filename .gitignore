@@ -96,3 +96,6 @@ htmlcov/
 
 # Finetuning data
 datasets/
+
+# SSHFS mount point (remote GPU server)
+gpu-server/

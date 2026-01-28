@@ -27,8 +27,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import socket
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -127,6 +130,48 @@ def is_image_file(path: Path) -> bool:
     """Check if path is an image file."""
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
     return path.suffix.lower() in image_extensions
+
+
+def save_inference_config(args: argparse.Namespace, checkpoint: Path, output_dir: Path) -> None:
+    """Save inference configuration to a JSON file for reproducibility."""
+    config = {
+        "command": " ".join(sys.argv),
+        "timestamp": datetime.now().isoformat(),
+        "hostname": socket.gethostname(),
+        "working_directory": str(Path.cwd()),
+        "checkpoint": str(checkpoint),
+        "arguments": {
+            "checkpoint": str(checkpoint),
+            "run": args.run if hasattr(args, "run") else None,
+            "latest": args.latest if hasattr(args, "latest") else False,
+            "input": [str(p) for p in args.input],
+            "output": str(output_dir),
+            "model": args.model,
+            "confidence": args.confidence,
+            "device": args.device,
+            "frame_interval": args.frame_interval,
+            "track": args.track,
+            "no_kalman": args.no_kalman,
+            "track_thresh": args.track_thresh,
+            "track_buffer": args.track_buffer,
+            "match_thresh": args.match_thresh,
+            "optimize": not args.no_optimize,
+            "optimize_compile": args.optimize_compile,
+            "project": str(args.project) if args.project else None,
+            "classes": args.classes,
+        },
+        "environment": {
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
+        },
+    }
+    
+    # Save to output directory
+    config_path = output_dir / "inference_config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    
+    logger.info(f"Configuration saved to: {config_path}")
 
 
 def process_single_image(
@@ -450,6 +495,9 @@ Notes:
     
     # Resolve checkpoint path
     checkpoint = resolve_checkpoint(args)
+    
+    # Save configuration for reproducibility
+    save_inference_config(args, checkpoint, args.output)
 
     # Resolve class names
     class_names = None

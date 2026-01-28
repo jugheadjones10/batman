@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Import core training logic
@@ -46,6 +49,49 @@ def print_header(title: str) -> None:
     print("\n" + "=" * 60)
     print(title)
     print("=" * 60)
+
+
+def save_training_config(args: argparse.Namespace, output_dir: Path, dataset_dir: Path) -> None:
+    """Save training configuration to a JSON file for reproducibility."""
+    config = {
+        "command": " ".join(sys.argv),
+        "timestamp": datetime.now().isoformat(),
+        "hostname": socket.gethostname(),
+        "working_directory": str(Path.cwd()),
+        "arguments": {
+            "project": str(args.project) if args.project else None,
+            "dataset": str(dataset_dir),
+            "output_dir": str(output_dir),
+            "model": args.model,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "image_size": args.image_size,
+            "lr": args.lr,
+            "device": args.device,
+            "num_workers": args.num_workers,
+            "patience": args.patience,
+            "grad_accum": args.grad_accum,
+            "seed": args.seed,
+            "train_split": args.train_split,
+            "val_split": args.val_split,
+            "test_split": args.test_split,
+            "video_id": args.video_id,
+            "filter_classes": args.filter_classes,
+            "resume": str(args.resume) if args.resume else None,
+        },
+        "environment": {
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
+        },
+    }
+    
+    # Save to output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = output_dir / "training_config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"  Configuration saved to: {config_path}")
 
 
 def print_dataset_stats(stats: DatasetStats) -> None:
@@ -101,6 +147,9 @@ def cmd_train(
 ) -> Path:
     """Train model command."""
     print_header("TRAINING MODEL")
+
+    # Save training configuration for reproducibility
+    save_training_config(args, args.output_dir, dataset_dir)
 
     # Get device info
     device = get_device(args.device)
