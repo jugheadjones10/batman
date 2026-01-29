@@ -5,7 +5,7 @@ Manage classes in a Batman project.
 This CLI provides tools for listing, renaming, and merging classes.
 
 Usage:
-    # List all classes in a project
+    # List all classes with frame counts and annotations
     python -m cli.classes list --project data/projects/MyProject
 
     # Rename a class
@@ -43,15 +43,37 @@ def list_classes(args: argparse.Namespace) -> int:
         print("No classes defined in this project")
         return 0
 
+    # Count frames per class
+    from collections import defaultdict
+    
+    annotations = project.load_annotations()
+    frames_by_class = defaultdict(set)
+    
+    for ann in annotations.values():
+        class_idx = ann.get("class_label_id")
+        frame_id = ann.get("frame_id")
+        if class_idx is not None and frame_id is not None:
+            frames_by_class[class_idx].add(frame_id)
+    
+    # Add frame counts to class info
+    for cls in classes:
+        cls['frame_count'] = len(frames_by_class[cls['index']])
+        if cls['frame_count'] > 0:
+            cls['avg_per_frame'] = cls['annotation_count'] / cls['frame_count']
+        else:
+            cls['avg_per_frame'] = 0
+
     print(f"Project: {project.name}")
     print(f"Total classes: {len(classes)}")
+    print(f"Total frames: {project.frame_count}")
     print()
-    print(f"{'Idx':<5} {'Name':<30} {'Annotations':<12} {'Source':<15}")
-    print("-" * 65)
+    print(f"{'Idx':<5} {'Name':<30} {'Frames':<8} {'Annotations':<12} {'Avg/Frame':<10} {'Source':<15}")
+    print("-" * 95)
 
     for cls in classes:
         print(
-            f"{cls['index']:<5} {cls['name']:<30} {cls['annotation_count']:<12} {cls['source']:<15}"
+            f"{cls['index']:<5} {cls['name']:<30} {cls['frame_count']:<8} "
+            f"{cls['annotation_count']:<12} {cls['avg_per_frame']:<10.2f} {cls['source']:<15}"
         )
 
     return 0
@@ -131,7 +153,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # List all classes
+  # List all classes with frame counts and annotations
   python -m cli.classes list --project data/projects/MyProject
 
   # Rename a class

@@ -44,13 +44,8 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
-# Project data (keep structure, ignore contents)
-data/projects/*/videos/*
-data/projects/*/frames/*
-data/projects/*/labels/*
-data/projects/*/exports/*
-data/projects/*/runs/*
-!data/projects/*/.gitkeep
+# Project data
+data/
 
 # Model weights
 models/*.pt
@@ -103,5 +98,3 @@ site/
 
 # MkDocs cache
 .cache/
-
-data/
