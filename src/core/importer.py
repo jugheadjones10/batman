@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from src.core.project import Project
 
@@ -45,12 +45,9 @@ class DataImporter:
     - Roboflow datasets (via API)
     - COCO Zoo datasets (via FiftyOne)
     - Local COCO-format datasets
+    
+    Each import gets a unique negative video_id to keep imports separate.
     """
-
-    # Video IDs for imported data (negative to distinguish from real videos)
-    ROBOFLOW_VIDEO_ID = -1
-    LOCAL_COCO_VIDEO_ID = -2
-    COCO_ZOO_VIDEO_ID = -3
 
     def __init__(self, project: Project):
         self.project = project
@@ -106,11 +103,27 @@ class DataImporter:
 
         progress("processing", 30, "Download complete. Processing images...")
 
+        # Get unique video ID for this import
+        video_id = self.project.get_next_import_video_id()
+
+        # Register this import with the project
+        import_metadata = {
+            "type": "roboflow",
+            "workspace": workspace,
+            "project": rf_project,
+            "version": version,
+            "format": format,
+            "video_id": video_id,
+            "imported_at": datetime.utcnow().isoformat(),
+        }
+        import_id = self.project.register_import(import_metadata)
+
         # Process the downloaded dataset
         stats = self._process_coco_dataset(
             dataset_path=dataset_path,
-            video_id=self.ROBOFLOW_VIDEO_ID,
+            video_id=video_id,
             source="roboflow",
+            import_id=import_id,
             on_progress=on_progress,
             progress_start=30,
             progress_end=90,
@@ -187,11 +200,26 @@ class DataImporter:
 
         progress("processing", 40, f"Downloaded {len(dataset)} samples. Processing...")
 
+        # Get unique video ID for this import
+        video_id = self.project.get_next_import_video_id()
+
+        # Register this import with the project
+        import_metadata = {
+            "type": "coco_zoo",
+            "classes": classes,
+            "split": split,
+            "max_samples": max_samples,
+            "video_id": video_id,
+            "imported_at": datetime.utcnow().isoformat(),
+        }
+        import_id = self.project.register_import(import_metadata)
+
         # Process into our format
         stats = self._process_fiftyone_dataset(
             dataset=dataset,
-            video_id=self.COCO_ZOO_VIDEO_ID,
+            video_id=video_id,
             source="coco_zoo",
+            import_id=import_id,
             on_progress=on_progress,
             progress_start=40,
             progress_end=95,
@@ -215,6 +243,7 @@ class DataImporter:
         dataset,  # fo.Dataset
         video_id: int,
         source: str,
+        import_id: str,
         on_progress: Callable[[str, int, str], None] | None = None,
         progress_start: int = 0,
         progress_end: int = 100,
@@ -268,6 +297,7 @@ class DataImporter:
                 "is_approved": True,
                 "needs_review": False,
                 "source": source,
+                "import_id": import_id,  # Reference to imports.json
                 "original_filename": img_path.name,
                 "split": "train",  # FiftyOne doesn't track original split after filtering
             }
@@ -360,10 +390,23 @@ class DataImporter:
 
         progress("processing", 0, f"Importing from {coco_path}...")
 
+        # Get unique video ID for this import
+        video_id = self.project.get_next_import_video_id()
+
+        # Register this import with the project
+        import_metadata = {
+            "type": "local_coco",
+            "path": str(coco_path.absolute()),
+            "video_id": video_id,
+            "imported_at": datetime.utcnow().isoformat(),
+        }
+        import_id = self.project.register_import(import_metadata)
+
         stats = self._process_coco_dataset(
             dataset_path=coco_path,
-            video_id=self.LOCAL_COCO_VIDEO_ID,
+            video_id=video_id,
             source="local_coco",
+            import_id=import_id,
             on_progress=on_progress,
             progress_start=0,
             progress_end=95,
@@ -378,6 +421,7 @@ class DataImporter:
         dataset_path: Path,
         video_id: int,
         source: str,
+        import_id: str,
         on_progress: Callable[[str, int, str], None] | None = None,
         progress_start: int = 0,
         progress_end: int = 100,
@@ -485,6 +529,7 @@ class DataImporter:
                     "is_approved": True,
                     "needs_review": False,
                     "source": source,
+                    "import_id": import_id,  # Reference to imports.json
                     "original_filename": img_filename,
                     "split": normalized_split,
                 }

@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Instead of making new documentation md files, update the mkdoc setup that we have in the project. Any changes to the way the commands work, etc. should be updated there.

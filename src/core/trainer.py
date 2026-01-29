@@ -115,13 +115,18 @@ def get_device_info(device: str) -> dict[str, Any]:
     return info
 
 
-def load_project_data(project_dir: Path, video_id: int = -1) -> tuple[dict, dict, list[str], dict]:
+def load_project_data(
+    project_dir: Path, video_id: int | str | None = None
+) -> tuple[dict, dict, list[str], dict]:
     """
     Load project data from Batman project directory.
 
     Args:
         project_dir: Path to project directory
-        video_id: Video ID to load frames from (-1 for Roboflow imports)
+        video_id: Video ID(s) to load frames from:
+            - None or "all": Load all frames from all video directories
+            - "imports": Load only imported datasets (negative video IDs)
+            - int: Load from specific video ID
 
     Returns:
         Tuple of (frames_meta, annotations_data, class_names, project_config)
@@ -129,13 +134,13 @@ def load_project_data(project_dir: Path, video_id: int = -1) -> tuple[dict, dict
     Raises:
         FileNotFoundError: If required files don't exist
     """
-    frames_dir = project_dir / "frames" / str(video_id)
+    frames_base_dir = project_dir / "frames"
     annotations_file = project_dir / "labels" / "current" / "annotations.json"
     project_config_file = project_dir / "project.json"
 
     # Verify paths exist
-    if not frames_dir.exists():
-        raise FileNotFoundError(f"Frames directory not found: {frames_dir}")
+    if not frames_base_dir.exists():
+        raise FileNotFoundError(f"Frames directory not found: {frames_base_dir}")
     if not annotations_file.exists():
         raise FileNotFoundError(f"Annotations file not found: {annotations_file}")
     if not project_config_file.exists():
@@ -146,10 +151,41 @@ def load_project_data(project_dir: Path, video_id: int = -1) -> tuple[dict, dict
         project_config = json.load(f)
     class_names = project_config.get("classes", [])
 
-    # Load frames metadata
-    frames_meta_file = frames_dir / "frames.json"
-    with open(frames_meta_file) as f:
-        frames_meta = json.load(f)
+    # Determine which video directories to load
+    video_dirs_to_load = []
+    
+    if video_id is None or video_id == "all":
+        # Load all video directories
+        for video_dir in frames_base_dir.iterdir():
+            if video_dir.is_dir() and (video_dir / "frames.json").exists():
+                video_dirs_to_load.append(video_dir)
+    elif video_id == "imports":
+        # Load only imports (negative video IDs)
+        for video_dir in frames_base_dir.iterdir():
+            if video_dir.is_dir() and (video_dir / "frames.json").exists():
+                try:
+                    vid = int(video_dir.name)
+                    if vid < 0:
+                        video_dirs_to_load.append(video_dir)
+                except ValueError:
+                    pass
+    else:
+        # Load specific video ID
+        video_dir = frames_base_dir / str(video_id)
+        if not video_dir.exists():
+            raise FileNotFoundError(f"Video directory not found: {video_dir}")
+        video_dirs_to_load.append(video_dir)
+    
+    if not video_dirs_to_load:
+        raise FileNotFoundError(f"No video directories found in {frames_base_dir}")
+
+    # Load and merge frames metadata from all directories
+    frames_meta = {}
+    for video_dir in video_dirs_to_load:
+        frames_meta_file = video_dir / "frames.json"
+        with open(frames_meta_file) as f:
+            dir_frames = json.load(f)
+            frames_meta.update(dir_frames)
 
     # Load annotations
     with open(annotations_file) as f:
@@ -287,7 +323,7 @@ def prepare_coco_dataset(
     train_split: float = 0.70,
     val_split: float = 0.15,
     test_split: float = 0.15,
-    video_id: int = -1,
+    video_id: int | str | None = "imports",
     clean: bool = True,
     filter_classes: list[str] | None = None,
     seed: int = 42,
@@ -301,7 +337,7 @@ def prepare_coco_dataset(
         train_split: Fraction for training
         val_split: Fraction for validation
         test_split: Fraction for testing
-        video_id: Video ID to process (-1 for Roboflow imports)
+        video_id: Video ID(s) to process: 'all', 'imports' (default), or specific ID
         clean: Whether to remove existing output directory
         filter_classes: If specified, only include these classes (by name)
         seed: Random seed for reproducible splits

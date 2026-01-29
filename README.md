@@ -115,6 +115,25 @@ npm run dev
 
 Open http://localhost:5173 in your browser.
 
+### GPU Server Access (Optional)
+
+If you're training on a remote GPU cluster, you can mount it locally for easy file access:
+
+```bash
+# Mount your GPU server
+./mount_gpu.sh
+
+# Access files in ./gpu-server/
+# - View training results
+# - Upload videos via drag & drop
+# - Check logs without SSH
+
+# Unmount when done
+./umount_gpu.sh
+```
+
+See [SSHFS_SETUP.md](SSHFS_SETUP.md) for installation and configuration.
+
 ## 📖 User Guide
 
 ### 1. Create a Project

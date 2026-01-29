@@ -425,13 +425,21 @@ async def list_imported_datasets(project_name: str):
 
     datasets = []
 
-    # Check for imported datasets (negative video IDs)
-    source_map = {
-        DataImporter.ROBOFLOW_VIDEO_ID: "roboflow",
-        DataImporter.LOCAL_COCO_VIDEO_ID: "local_coco",
-        DataImporter.COCO_ZOO_VIDEO_ID: "coco_zoo",
-    }
+    # Load imports metadata to get source info
+    imports_metadata = {}
+    imports_path = project_dir / "imports" / "imports.json"
+    if imports_path.exists():
+        with open(imports_path) as f:
+            imports_metadata = json.load(f)
+    
+    # Build video_id to source map from imports metadata
+    video_id_to_source = {}
+    for import_id, import_meta in imports_metadata.items():
+        vid = import_meta.get("video_id")
+        if vid is not None:
+            video_id_to_source[vid] = import_meta.get("type", "unknown")
 
+    # Check for imported datasets (negative video IDs)
     for video_dir in frames_dir.iterdir():
         if not video_dir.is_dir():
             continue
@@ -450,6 +458,13 @@ async def list_imported_datasets(project_name: str):
         with open(meta_path) as f:
             frames_meta = json.load(f)
 
+        # Get source from video_id mapping or frame metadata
+        source = video_id_to_source.get(video_id)
+        if not source and frames_meta:
+            # Fallback: get from first frame's metadata
+            first_frame = next(iter(frames_meta.values()))
+            source = first_frame.get("source", "unknown")
+
         # Get sample images (up to 6)
         image_files = [
             f
@@ -465,7 +480,7 @@ async def list_imported_datasets(project_name: str):
         datasets.append(
             {
                 "video_id": video_id,
-                "source": source_map.get(video_id, "unknown"),
+                "source": source or "unknown",
                 "image_count": len(frames_meta),
                 "annotation_count": annotations_by_video.get(video_id, 0),
                 "sample_images": sample_urls,

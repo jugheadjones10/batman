@@ -284,7 +284,7 @@ async def get_classes_with_details(project_name: str):
     # Load frames metadata to identify which frames are from which source
     frames_by_source = {}  # frame_id -> source
     
-    # Check for imported frames (video_id = -1 for roboflow, -2 for local_coco)
+    # Check all video directories (negative video_ids are imports, positive are real videos)
     frames_dir = project_path / "frames"
     if frames_dir.exists():
         for video_dir in frames_dir.iterdir():

@@ -1,0 +1,4 @@
+# Documentation dependencies
+mkdocs>=1.5.3
+mkdocs-shadcn>=0.1.0
+pymdown-extensions>=10.7

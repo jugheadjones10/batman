@@ -13,7 +13,23 @@ brew install fuse-t
 brew install fuse-t-sshfs
 ```
 
-### Mounting the GPU Server
+### Quick Start (Recommended)
+
+```bash
+# Mount the GPU server
+./mount_gpu.sh
+
+# When done
+./umount_gpu.sh
+```
+
+That's it! Simple two-command workflow.
+
+**Note:** Edit `mount_gpu.sh` line 23 to set your username if different from `youngjin`.
+
+### Manual Mounting (Advanced)
+
+If you prefer to mount manually:
 
 ```bash
 # Create mount point inside your project
@@ -115,7 +131,7 @@ cat inference_results/20260128_110804/inference_config.json
 ### 1. Mount the Server
 
 ```bash
-sshfs username@xlogin.comp.nus.edu.sg:~/batman ~/Projects/batman/gpu-server
+./mount_gpu.sh
 ```
 
 ### 2. Upload Video

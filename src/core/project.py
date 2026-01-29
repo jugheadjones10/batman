@@ -87,6 +87,31 @@ class Project:
     def tracks_path(self) -> Path:
         return self.labels_dir / "tracks.json"
 
+    @property
+    def imports_metadata_path(self) -> Path:
+        return self.path / "imports" / "imports.json"
+
+    def get_next_import_video_id(self) -> int:
+        """
+        Get the next available negative video ID for a new import.
+        
+        Returns:
+            Negative integer for the new import (-1, -2, -3, etc.)
+        """
+        # Find all existing video IDs (both positive and negative)
+        existing_ids = []
+        if self.frames_dir.exists():
+            for video_dir in self.frames_dir.iterdir():
+                if video_dir.is_dir() and video_dir.name.lstrip('-').isdigit():
+                    existing_ids.append(int(video_dir.name))
+        
+        # Find the lowest negative ID (most negative)
+        negative_ids = [vid for vid in existing_ids if vid < 0]
+        if negative_ids:
+            return min(negative_ids) - 1  # Go one more negative
+        else:
+            return -1  # First import
+
     # -------------------------------------------------------------------------
     # Class methods for loading/creating
     # -------------------------------------------------------------------------
@@ -255,6 +280,39 @@ class Project:
 
         with open(frames_meta_path, "w") as f:
             json.dump(frames_meta, f, indent=2)
+
+    def load_imports_metadata(self) -> dict[str, Any]:
+        """Load imports metadata."""
+        if self.imports_metadata_path.exists():
+            with open(self.imports_metadata_path) as f:
+                return json.load(f)
+        return {}
+
+    def save_imports_metadata(self, imports_meta: dict[str, Any]) -> None:
+        """Save imports metadata."""
+        self.imports_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.imports_metadata_path, "w") as f:
+            json.dump(imports_meta, f, indent=2)
+
+    def register_import(self, import_metadata: dict[str, Any]) -> str:
+        """
+        Register a new import and return its ID.
+        
+        Args:
+            import_metadata: Metadata about the import (type, source details, etc.)
+            
+        Returns:
+            Import ID that can be referenced by frames
+        """
+        imports_meta = self.load_imports_metadata()
+        
+        # Generate import ID based on timestamp
+        import_id = f"import_{len(imports_meta) + 1}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        
+        imports_meta[import_id] = import_metadata
+        self.save_imports_metadata(imports_meta)
+        
+        return import_id
 
     def __repr__(self) -> str:
         return f"Project(name={self.name!r}, path={self.path}, classes={len(self.classes)}, frames={self.frame_count})"

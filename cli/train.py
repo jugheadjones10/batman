@@ -44,6 +44,24 @@ from src.core.trainer import (
 )
 
 
+def parse_video_id(video_id_str: str) -> int | str:
+    """
+    Parse video_id argument to int or special string.
+    
+    Args:
+        video_id_str: String like 'all', 'imports', '-1', '1', etc.
+        
+    Returns:
+        int for specific video IDs, or string for 'all'/'imports'
+    """
+    if video_id_str in ("all", "imports"):
+        return video_id_str
+    try:
+        return int(video_id_str)
+    except ValueError:
+        raise ValueError(f"Invalid video_id: {video_id_str}. Use 'all', 'imports', or a number.")
+
+
 def print_header(title: str) -> None:
     """Print a section header."""
     print("\n" + "=" * 60)
@@ -108,9 +126,12 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
     """Prepare dataset command."""
     print_header("PREPARING DATASET")
 
+    # Parse video_id argument
+    video_id = parse_video_id(args.video_id)
+
     # Load project info first
     _, annotations_data, class_names, project_config = load_project_data(
-        args.project, args.video_id
+        args.project, video_id
     )
 
     print(f"✓ Loaded project: {project_config.get('name', 'Unknown')}")
@@ -130,7 +151,7 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
         train_split=args.train_split,
         val_split=args.val_split,
         test_split=args.test_split,
-        video_id=args.video_id,
+        video_id=video_id,
         clean=not args.no_clean,
         filter_classes=filter_classes,
         seed=args.seed,
@@ -331,7 +352,10 @@ Examples:
         "--test-split", type=float, default=0.15, help="Fraction for testing (default: 0.15)"
     )
     data_group.add_argument(
-        "--video-id", type=int, default=-1, help="Video ID to process (-1 for imports, default: -1)"
+        "--video-id",
+        type=str,
+        default="imports",
+        help="Video ID(s) to process: 'all', 'imports' (default), or specific ID like '-1'",
     )
     data_group.add_argument(
         "--prepare-only", action="store_true", help="Only prepare dataset, don't train"
