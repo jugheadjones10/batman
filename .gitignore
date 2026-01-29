@@ -93,7 +93,7 @@ htmlcov/
 datasets/
 
 # SSHFS mount point (remote GPU server)
-gpu-server/# Documentation build output
+gpu-server/
 site/
 
 # MkDocs cache
