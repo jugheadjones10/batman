@@ -22,12 +22,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Set up PyTorch distributed training environment variables
+# Required for RF-DETR even in single-GPU mode
+if "MASTER_ADDR" not in os.environ:
+    os.environ["MASTER_ADDR"] = "localhost"
+if "MASTER_PORT" not in os.environ:
+    os.environ["MASTER_PORT"] = str(12355 + random.randint(0, 1000))
+if "WORLD_SIZE" not in os.environ:
+    os.environ["WORLD_SIZE"] = "1"
+if "RANK" not in os.environ:
+    os.environ["RANK"] = "0"
+if "LOCAL_RANK" not in os.environ:
+    os.environ["LOCAL_RANK"] = "0"
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
