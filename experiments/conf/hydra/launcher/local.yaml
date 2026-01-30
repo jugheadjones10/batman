@@ -1,3 +1,0 @@
-# @package hydra.launcher
-# Local launcher for testing without SLURM
-_target_: hydra._internal.core.plugins.BasicLauncher
