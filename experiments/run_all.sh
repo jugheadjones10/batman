@@ -31,13 +31,13 @@ EXPERIMENTS="exp_person_25,exp_person_50,exp_person_75,exp_person_100"
 #-------------------------------------------------------------------------------
 # Parse Arguments
 #-------------------------------------------------------------------------------
-DRY_RUN=""
+DRY_RUN=false
 LOCAL_MODE=false
 
 for arg in "$@"; do
     case $arg in
         --dry-run)
-            DRY_RUN="--cfg job"
+            DRY_RUN=true
             echo "DRY RUN MODE - showing config only"
             ;;
         --local)
@@ -69,13 +69,27 @@ echo "Timeout:     $TIMEOUT_MIN minutes"
 echo "============================================================"
 echo ""
 
+if [ "$DRY_RUN" = true ]; then
+    # Dry run - show config for first experiment only
+    echo "Showing resolved config for exp_person_25..."
+    echo ""
+    python experiments/train_experiment.py \
+        experiment=exp_person_25 \
+        --cfg job
+    
+    echo ""
+    echo "============================================================"
+    echo "Would submit these experiments: $EXPERIMENTS"
+    echo "============================================================"
+    exit 0
+fi
+
 if [ "$LOCAL_MODE" = true ]; then
     # Run locally without SLURM (one at a time)
     echo "Running locally (no SLURM)..."
     python experiments/train_experiment.py --multirun \
         experiment=$EXPERIMENTS \
-        hydra/launcher=basic \
-        $DRY_RUN
+        hydra/launcher=basic
 else
     # Run on SLURM
     echo "Submitting to SLURM..."
@@ -88,11 +102,10 @@ else
         hydra.launcher.mem_gb=$MEM_GB \
         hydra.launcher.timeout_min=$TIMEOUT_MIN \
         "hydra.launcher.constraint=$GPU_CONSTRAINT" \
-        hydra.launcher.array_parallelism=$ARRAY_PARALLELISM \
-        $DRY_RUN
+        hydra.launcher.array_parallelism=$ARRAY_PARALLELISM
 fi
 
-if [ -z "$DRY_RUN" ]; then
+if [ "$DRY_RUN" = false ]; then
     echo ""
     echo "============================================================"
     echo "Jobs submitted!"
