@@ -1,0 +1,5 @@
+name: exp_person_50
+description: "Person at 50% (1:2 ratio)"
+frame_sample_fractions:
+  person: 0.50
+  crane hook: 1.0

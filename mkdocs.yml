@@ -43,6 +43,7 @@ nav:
   - Guides:
       - Training Workflow: guides/training.md
       - Inference Workflow: guides/inference.md
+      - Experiment Framework: guides/experiments.md
       - Benchmarking Guide: guides/benchmarking.md
       - SLURM Usage: guides/slurm.md
   - API Reference: api/index.md

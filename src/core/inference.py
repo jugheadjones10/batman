@@ -521,16 +521,21 @@ def draw_detections(
 
     for det in detections:
         x1, y1, x2, y2 = [int(c) for c in det.bbox]
+        
+        # Calculate center coordinates
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+        
         color = colors[det.class_id % len(colors)]
 
         # Draw box
         cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-        # Prepare label
+        # Prepare label with center coordinates
         if det.track_id is not None:
-            label = f"{det.class_name} #{det.track_id} {det.confidence:.2f}"
+            label = f"{det.class_name} #{det.track_id} {det.confidence:.2f} ({cx},{cy})"
         else:
-            label = f"{det.class_name} {det.confidence:.2f}"
+            label = f"{det.class_name} {det.confidence:.2f} ({cx},{cy})"
 
         # Draw label background
         (label_w, label_h), baseline = cv2.getTextSize(

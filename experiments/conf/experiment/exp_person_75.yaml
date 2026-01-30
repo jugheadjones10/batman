@@ -1,0 +1,5 @@
+name: exp_person_75
+description: "Person at 75% (~1:1.3 ratio)"
+frame_sample_fractions:
+  person: 0.75
+  crane hook: 1.0

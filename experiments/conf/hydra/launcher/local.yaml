@@ -1,0 +1,7 @@
+# @package _global_
+# Local launcher for testing without SLURM
+
+hydra:
+  launcher:
+    _target_: hydra._internal.utils._locate
+    path: hydra._internal.core.default_launcher.BasicLauncher

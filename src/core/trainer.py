@@ -317,6 +317,69 @@ def create_coco_split(
     return len(coco_data["images"]), len(coco_data["annotations"])
 
 
+def sample_frames_by_class(
+    frames_meta: dict,
+    annotations_data: dict,
+    class_names: list[str],
+    original_class_names: list[str],
+    sample_fractions: dict[str, float],
+    seed: int = 42,
+) -> set[str]:
+    """
+    Sample frames based on per-class sampling fractions.
+
+    For each class, we identify all frames containing that class and sample
+    the specified fraction. The final result is the union of all sampled frames.
+
+    Args:
+        frames_meta: Frame metadata dict (frame_id -> frame_info)
+        annotations_data: Annotations dict (ann_id -> annotation)
+        class_names: List of class names to consider
+        original_class_names: Original full list of class names (for ID mapping)
+        sample_fractions: Dict mapping class name to sampling fraction (0.0-1.0)
+        seed: Random seed for reproducibility
+
+    Returns:
+        Set of frame IDs to include in the dataset
+    """
+    random.seed(seed)
+
+    # Build mapping from class name to class ID
+    class_name_to_id = {name: idx for idx, name in enumerate(original_class_names)}
+
+    # Group frames by which classes they contain
+    frames_by_class: dict[str, set[str]] = {name: set() for name in class_names}
+
+    for ann in annotations_data.values():
+        frame_id = str(ann["frame_id"])
+        if frame_id not in frames_meta:
+            continue
+
+        class_id = ann["class_label_id"]
+        if class_id < len(original_class_names):
+            class_name = original_class_names[class_id]
+            if class_name in frames_by_class:
+                frames_by_class[class_name].add(frame_id)
+
+    # Sample frames for each class according to the specified fractions
+    sampled_frames: set[str] = set()
+
+    for class_name in class_names:
+        fraction = sample_fractions.get(class_name, 1.0)
+        class_frames = list(frames_by_class[class_name])
+
+        if fraction >= 1.0:
+            # Include all frames for this class
+            sampled_frames.update(class_frames)
+        else:
+            # Sample the specified fraction
+            n_sample = max(1, int(len(class_frames) * fraction))
+            random.shuffle(class_frames)
+            sampled_frames.update(class_frames[:n_sample])
+
+    return sampled_frames
+
+
 def prepare_coco_dataset(
     project_dir: Path,
     output_dir: Path,
@@ -326,6 +389,7 @@ def prepare_coco_dataset(
     video_id: int | str | None = "imports",
     clean: bool = True,
     filter_classes: list[str] | None = None,
+    frame_sample_fractions: dict[str, float] | None = None,
     seed: int = 42,
 ) -> DatasetStats:
     """
@@ -340,6 +404,8 @@ def prepare_coco_dataset(
         video_id: Video ID(s) to process: 'all', 'imports' (default), or specific ID
         clean: Whether to remove existing output directory
         filter_classes: If specified, only include these classes (by name)
+        frame_sample_fractions: If specified, sample frames per class.
+            Dict mapping class name to fraction (0.0-1.0), e.g. {"person": 0.25, "crane hook": 1.0}
         seed: Random seed for reproducible splits
 
     Returns:
@@ -379,8 +445,20 @@ def prepare_coco_dataset(
     val_dir.mkdir(parents=True, exist_ok=True)
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    # Split frames
-    all_frame_ids = list(frames_meta.keys())
+    # Apply frame sampling if specified
+    if frame_sample_fractions:
+        all_frame_ids = list(sample_frames_by_class(
+            frames_meta,
+            annotations_data,
+            class_names,
+            original_class_names,
+            frame_sample_fractions,
+            seed,
+        ))
+    else:
+        all_frame_ids = list(frames_meta.keys())
+
+    # Shuffle and split frames
     random.shuffle(all_frame_ids)
 
     n_total = len(all_frame_ids)

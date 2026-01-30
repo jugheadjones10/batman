@@ -1,0 +1,35 @@
+defaults:
+  - experiment: exp_person_100  # Default experiment
+  - hydra/launcher: slurm       # Use SLURM launcher for --multirun
+  - _self_
+
+# Project settings
+project_dir: data/projects/Test
+output_dataset: datasets/experiment_${experiment.name}
+
+# Classes to train on
+classes:
+  - crane hook
+  - person
+
+# Training settings
+training:
+  epochs: 50
+  batch_size: 16
+  image_size: 640
+  lr: 1e-4
+  patience: 10
+  model: base
+
+# Test videos for inference after training
+test_videos:
+  - crane_hook+human_short.mp4
+  - crane_hook_1_short.mp4
+
+# Hydra output directory config
+hydra:
+  run:
+    dir: experiments/outputs/${experiment.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: experiments/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${experiment.name}

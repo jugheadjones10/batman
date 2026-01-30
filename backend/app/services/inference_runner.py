@@ -335,13 +335,17 @@ class InferenceRunner:
             x2 = int((box["x"] + box["width"] / 2) * width)
             y2 = int((box["y"] + box["height"] / 2) * height)
 
+            # Calculate center coordinates
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
+
             color = colors[cls_id % len(colors)]
 
             # Draw box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-            # Draw label
-            label = f"{class_name} {conf:.2f}"
+            # Draw label with center coordinates
+            label = f"{class_name} {conf:.2f} ({cx},{cy})"
             if track_id is not None:
                 label = f"[{track_id}] " + label
 
