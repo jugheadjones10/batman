@@ -103,7 +103,12 @@ else
     # Uses --gres format for GPU allocation: gpu:<type>:<count>
     echo "Submitting to SLURM..."
     
-    python experiments/train_experiment.py --multirun \
+    # Create timestamp for this run
+    TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+    SUBMIT_LOG="experiments/submit_${TIMESTAMP}.log"
+    
+    # Run in background with nohup so Ctrl+C won't kill it
+    nohup python experiments/train_experiment.py --multirun \
         experiment=$EXPERIMENTS \
         hydra/launcher=submitit_slurm \
         hydra.launcher.partition=$PARTITION \
@@ -111,21 +116,40 @@ else
         hydra.launcher.mem_gb=$MEM_GB \
         hydra.launcher.timeout_min=$TIMEOUT_MIN \
         hydra.launcher.array_parallelism=$ARRAY_PARALLELISM \
-        "hydra.launcher.gres=gpu:${GPU_TYPE}:1"
+        "hydra.launcher.gres=gpu:${GPU_TYPE}:1" \
+        > "$SUBMIT_LOG" 2>&1 &
+    
+    PID=$!
+    echo "Started background process (PID: $PID)"
+    echo "Submission log: $SUBMIT_LOG"
+    echo ""
+    
+    # Wait a few seconds for jobs to be submitted
+    echo "Waiting for jobs to be submitted..."
+    sleep 5
+    
+    # Show what was submitted
+    echo ""
+    echo "Submission output:"
+    echo "----------------------------------------"
+    cat "$SUBMIT_LOG"
+    echo "----------------------------------------"
 fi
 
-if [ "$DRY_RUN" = false ]; then
-    echo ""
-    echo "============================================================"
-    echo "Jobs submitted!"
-    echo ""
-    echo "Monitor with:"
-    echo "  squeue -u \$USER"
-    echo ""
-    echo "View logs:"
-    echo "  tail -f experiments/multirun/*/exp_person_*/train_experiment.log"
-    echo ""
-    echo "Collect results after completion:"
-    echo "  python experiments/collect_results.py --latest"
-    echo "============================================================"
-fi
+echo ""
+echo "============================================================"
+echo "Jobs submitted! (running in background)"
+echo ""
+echo "Monitor SLURM jobs:"
+echo "  squeue -u \$USER"
+echo ""
+echo "Find latest multirun directory:"
+echo "  ls -t experiments/multirun/ | head -1"
+echo ""
+echo "View experiment logs:"
+echo "  LATEST=\$(ls -t experiments/multirun/ | head -1)"
+echo "  tail -f experiments/multirun/\$LATEST/*/.submitit/*/*_log.out"
+echo ""
+echo "Collect results after completion:"
+echo "  python experiments/collect_results.py --latest"
+echo "============================================================"
