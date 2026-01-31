@@ -142,6 +142,7 @@ def resume_all_experiments_slurm(
     
     # Use Hydra interpolation: resume_from will be resolved per experiment
     # The trick is to set resume_from as a pattern that includes ${experiment.name}
+    # Note: We need to escape the $ for shell, but subprocess with list args doesn't use shell
     resume_from_pattern = f"{multirun_dir_abs}/${{experiment.name}}"
     
     cmd = [
@@ -161,44 +162,56 @@ def resume_all_experiments_slurm(
     
     print(f"\nExperiments to resume: {exp_names}")
     print(f"Resume pattern: {resume_from_pattern}")
+    print(f"\nCommand: {' '.join(cmd)}")
     
     if dry_run:
-        print(f"\nWould run:\n  {' '.join(cmd)}")
+        print(f"\n[DRY RUN] Would run the above command")
         return True
     
-    print(f"\nSubmitting jobs...")
+    print(f"\nSubmitting jobs (this may take a minute)...")
     
     try:
-        # Run the submission command
-        result = subprocess.run(
+        # Run the submission command WITHOUT capturing output so we can see progress
+        # Use Popen to stream output in real-time
+        process = subprocess.Popen(
             cmd,
             cwd=str(project_root),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=120,  # Allow up to 2 minutes for submission
+            bufsize=1,  # Line buffered
         )
         
-        if result.returncode == 0:
+        # Stream output in real-time
+        output_lines = []
+        try:
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    print(f"  {line.rstrip()}")
+                    output_lines.append(line)
+        except KeyboardInterrupt:
+            process.kill()
+            print("\nInterrupted by user")
+            return False
+        
+        process.wait(timeout=300)  # Wait up to 5 minutes for completion
+        
+        if process.returncode == 0:
             print(f"\nJobs submitted successfully!")
-            # Print any relevant output about job submission
-            for line in result.stdout.split("\n"):
-                if line.strip():
-                    print(f"  {line}")
             return True
         else:
-            print(f"\nERROR: Submission failed (exit code {result.returncode})")
-            if result.stdout:
-                print(f"stdout:\n{result.stdout}")
-            if result.stderr:
-                print(f"stderr:\n{result.stderr}")
+            print(f"\nERROR: Submission failed (exit code {process.returncode})")
             return False
             
     except subprocess.TimeoutExpired:
-        print("\nERROR: Job submission timed out (>120s). Jobs may still have been submitted.")
+        process.kill()
+        print("\nERROR: Job submission timed out (>5 min). Jobs may still have been submitted.")
         print("Check with: squeue -u $USER")
         return False
     except Exception as e:
         print(f"\nERROR: Failed to submit jobs: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

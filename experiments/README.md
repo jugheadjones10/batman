@@ -348,23 +348,33 @@ CLI entry point. Parses arguments and orchestrates result collection and display
 
 ### resume_experiments.py
 
-Resumes experiments where training completed but post-training steps (inference, summary) failed.
+Resumes experiments where training completed but post-training steps (inference, summary) failed. This is particularly useful when RF-DETR's `sys.exit()` behavior prevented inference and summary generation from running.
 
 #### Usage
 
 ```bash
-# Resume all experiments via SLURM (recommended)
+# Resume all experiments via SLURM in one batch (recommended)
 python experiments/resume_experiments.py --slurm experiments/multirun/2026-01-30_17-14-22/
 
-# Resume locally (only for testing)
-python experiments/resume_experiments.py --local experiments/multirun/2026-01-30_17-14-22/
-
-# Resume a specific experiment
-python experiments/resume_experiments.py --slurm experiments/multirun/2026-01-30_17-14-22/exp_person_25
-
-# Dry run (show what would be done)
+# Dry run first to see what will be submitted
 python experiments/resume_experiments.py --slurm --dry-run experiments/multirun/2026-01-30_17-14-22/
+
+# Resume locally (only for testing, not recommended for heavy workloads)
+python experiments/resume_experiments.py --local experiments/multirun/2026-01-30_17-14-22/
 ```
+
+#### How It Works
+
+The script:
+1. Scans the multirun directory for experiments with completed training (checkpoint files exist)
+2. Identifies experiments missing `experiment_summary.json` (post-training steps didn't complete)
+3. Submits all experiments in a **single `--multirun` command** to SLURM
+
+The key trick is using Hydra interpolation for `resume_from`:
+```
+resume_from=/path/to/multirun/${experiment.name}
+```
+This automatically resolves to the correct path for each experiment in the sweep.
 
 #### Functions
 
@@ -381,9 +391,22 @@ Identifies experiments that need to be resumed. An experiment needs resuming if:
 
 ---
 
+##### `resume_all_experiments_slurm(experiments, multirun_dir, dry_run) -> bool`
+
+Resumes all experiments via SLURM in a single `--multirun` command. This submits all experiments as a SLURM job array, similar to how the original training was submitted.
+
+**Parameters:**
+- `experiments` (list[tuple[Path, str]]): List of (experiment_dir, experiment_name) tuples
+- `multirun_dir` (Path): Path to the multirun directory
+- `dry_run` (bool): If True, only show what would be done
+
+**Returns:** True if jobs submitted successfully, False otherwise
+
+---
+
 ##### `resume_experiment_local(exp_dir, exp_name, dry_run) -> bool`
 
-Resumes a single experiment locally.
+Resumes a single experiment locally (runs sequentially).
 
 **Parameters:**
 - `exp_dir` (Path): Experiment directory
@@ -396,7 +419,7 @@ Resumes a single experiment locally.
 
 ##### `resume_experiment_slurm(exp_dir, exp_name, dry_run) -> bool`
 
-Resumes a single experiment by submitting to SLURM.
+Resumes a single experiment by submitting to SLURM. Uses `--multirun` flag to activate Hydra's submitit launcher.
 
 **Parameters:**
 - `exp_dir` (Path): Experiment directory
@@ -405,12 +428,17 @@ Resumes a single experiment by submitting to SLURM.
 
 **Returns:** True if job submitted successfully, False otherwise
 
+---
+
 **SLURM Configuration:**
-- Partition: `gpu-long`
-- GPU Type: `h100-96`
-- Timeout: 120 minutes
-- CPUs: 8
-- Memory: 64GB
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Partition | `gpu-long` | SLURM partition |
+| GPU Type | `h100-96` | H100 96GB GPU |
+| Timeout | 120 minutes | 2 hours for inference |
+| CPUs | 8 | CPUs per task |
+| Memory | 64GB | RAM per job |
+| Array Parallelism | 4 | Max concurrent jobs |
 
 ---
 
@@ -420,8 +448,8 @@ CLI entry point for resuming experiments.
 
 **Arguments:**
 - `directory`: Path to multirun or experiment directory (required)
-- `--slurm`: Submit jobs to SLURM
-- `--local`: Run locally
+- `--slurm`: Submit all jobs to SLURM in one batch (recommended)
+- `--local`: Run locally one by one (not recommended)
 - `--dry-run`: Preview without executing
 
 ---
@@ -625,13 +653,32 @@ Each experiment generates an `experiment_summary.json`:
    - Training may have failed. Check training logs in `.submitit/` directory
    - Verify GPU memory is sufficient for the batch size
 
-2. **Experiments stuck at training**
-   - RF-DETR calls `sys.exit()` which may interfere with Hydra
-   - Use `resume_experiments.py` to complete post-training steps
+2. **Training completes but no `experiment_summary.json`**
+   - This happens because RF-DETR's `train()` method calls `sys.exit(0)` internally
+   - The training subprocess completes, but the main script exits before running inference
+   - **Solution:** Use `resume_experiments.py` to complete post-training steps:
+     ```bash
+     python experiments/resume_experiments.py --slurm experiments/multirun/<timestamp>/
+     ```
 
-3. **SLURM jobs failing immediately**
+3. **SLURM launcher not working (runs locally instead)**
+   - Hydra's `submitit_slurm` launcher only activates with `--multirun` flag
+   - Even for single experiments, you must use `--multirun`:
+     ```bash
+     # Wrong (runs locally):
+     python experiments/train_experiment.py experiment=exp_person_25 hydra/launcher=submitit_slurm
+     
+     # Correct (submits to SLURM):
+     python experiments/train_experiment.py --multirun experiment=exp_person_25 hydra/launcher=submitit_slurm
+     ```
+
+4. **SLURM jobs failing immediately**
    - Check partition availability: `sinfo -p gpu-long`
    - Verify GPU type exists: `scontrol show node xgpi0`
+
+5. **OOM (Out of Memory) on login node**
+   - Never run inference on the login node - always submit to SLURM
+   - Use `--slurm` flag with `resume_experiments.py`, not `--local`
 
 ### Useful Commands
 
@@ -647,4 +694,10 @@ scancel -u $USER
 
 # View experiment logs
 tail -f experiments/multirun/<timestamp>/<exp>/.submitit/*_log.out
+
+# Check which experiments need resuming
+python experiments/resume_experiments.py --slurm --dry-run experiments/multirun/<timestamp>/
+
+# Collect results after all jobs complete
+python experiments/collect_results.py --latest --format markdown
 ```
