@@ -6,6 +6,10 @@ defaults:
 project_dir: data/projects/Test
 output_dataset: datasets/experiment_${experiment.name}
 
+# Resume from existing experiment (set to path to skip training)
+# Example: resume_from=/path/to/experiments/multirun/2026-01-30_17-14-22/exp_person_25
+resume_from: null
+
 # Classes to train on
 classes:
   - crane hook
