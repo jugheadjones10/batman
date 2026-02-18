@@ -260,6 +260,16 @@ echo "============================================================"
 # Change to project directory
 cd ~/batman || { echo "Error: ~/batman not found"; exit 1; }
 
+# Use project venv so dependencies (loguru, torch, etc.) are available.
+# On the cluster, create once:  python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+if [ -f .venv/bin/activate ]; then
+  source .venv/bin/activate
+  echo "Using project venv: $(which python3)"
+else
+  echo "No .venv found. On the cluster: python3 -m venv .venv && source .venv/bin/activate && pip install -e ."
+  echo "Then resubmit."
+fi
+
 # Print GPU info
 echo ""
 echo "GPU Info:"
@@ -274,10 +284,6 @@ export RANK=0
 export LOCAL_RANK=0
 
 echo "Distributed config: WORLD_SIZE=$WORLD_SIZE, MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT"
-
-# Using system Python 3.12 (no activation needed)
-# If you set up a venv later, uncomment:
-# source .venv/bin/activate
 
 # Print Python info
 echo "Python: $(which python3) ($(python3 --version 2>&1))"
