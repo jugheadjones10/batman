@@ -28,6 +28,80 @@ ls runs/rfdetr_h100_*/
 cat runs/rfdetr_h100_*/results.json
 ```
 
+## Getting data to the GPU machine
+
+If you prepare data locally and the cluster has the repo at `~/batman`, sync the project (and optionally the whole repo) to the cluster, then submit from there.
+
+### 1. Prepare data locally
+
+Run imports and class merges on your machine (e.g. run `scripts/project_one_data.sh` or use the importer/classes CLI). You should have a project directory such as `data/projects/One/`.
+
+### 2. Sync to the cluster
+
+From your **local** machine, sync the repo and project data to the login node. The training job script expects the repo at `~/batman` (see `submit_train.sh`).
+
+**Option A – Sync full repo (simplest)**
+
+```bash
+rsync -avz --exclude '.git' --exclude '__pycache__' --exclude 'runs' \
+  /path/to/batman/ USER@cluster:~batman/
+```
+
+Replace `USER` and `cluster` with your SSH user and host. This keeps code and `data/projects/` in sync.
+
+**Option B – Sync only one project**
+
+If the repo already exists on the cluster and you only need to update one project:
+
+```bash
+rsync -avz /path/to/batman/data/projects/One/ USER@cluster:~/batman/data/projects/One/
+```
+
+### 3. On the cluster: install deps and submit
+
+SSH to the cluster, go to the repo, ensure dependencies are installed, then submit:
+
+```bash
+ssh USER@cluster
+cd ~/batman
+uv sync   # if not already done
+./submit_train.sh --project data/projects/One --gpu h100-96
+```
+
+Monitor with `squeue -u $USER` and `tail -f logs/job_*.log`. When the job finishes, checkpoints and logs are under `runs/rfdetr_*_*/`.
+
+### 4. (Optional) Copy results back
+
+To copy a run back to your laptop:
+
+```bash
+rsync -avz USER@cluster:~/batman/runs/rfdetr_h100_20260128_123456/ ./runs/
+```
+
+### Alternative: Mount GPU server and copy data
+
+If you use the **mount GPU script** (`./mount_gpu.sh`), the remote batman repo appears at `gpu-server/`. Copy the project into that path so the cluster sees it without rsync:
+
+```bash
+# 1. Mount the GPU server (remote ~/batman → ./gpu-server)
+./mount_gpu.sh
+
+# 2. Ensure remote has data/projects, then copy your project
+mkdir -p gpu-server/data/projects
+cp -r data/projects/One gpu-server/data/projects/
+# Or incremental sync (only changed files):
+# rsync -av data/projects/One/ gpu-server/data/projects/One/
+
+# 3. On the cluster: SSH in and submit (data is already there)
+# ssh USER@cluster
+# cd ~/batman && ./submit_train.sh --project data/projects/One --gpu h100-96
+
+# 4. When done, unmount
+./umount_gpu.sh
+```
+
+Because `gpu-server/` is the live remote filesystem, any copy into `gpu-server/data/projects/` is immediately visible on the cluster at `~/batman/data/projects/One`.
+
 ## GPU Types and Partitions
 
 ### Available GPUs

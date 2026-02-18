@@ -2,7 +2,6 @@ import { useState, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { motion } from 'framer-motion'
 import {
   Upload,
   Video,
@@ -38,7 +37,7 @@ export default function ProjectPage() {
     project: '',
     version: 1,
   })
-  const [showImageGallery, setShowImageGallery] = useState<number | null>(null)
+  const [showImageGallery, setShowImageGallery] = useState<number | string | null>(null)
   const [galleryPage, setGalleryPage] = useState(0)
   const GALLERY_PAGE_SIZE = 100
   const [renamingClass, setRenamingClass] = useState<string | null>(null)
@@ -101,7 +100,7 @@ export default function ProjectPage() {
   })
 
   const deleteVideoMutation = useMutation({
-    mutationFn: (videoId: number) => api.videos.delete(projectName!, videoId),
+    mutationFn: (videoId: number | string) => api.videos.delete(projectName!, videoId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
@@ -159,7 +158,7 @@ export default function ProjectPage() {
   }
 
   const deleteDatasetMutation = useMutation({
-    mutationFn: (videoId: number) => api.import.deleteDataset(projectName!, videoId),
+    mutationFn: (videoId: number | string) => api.import.deleteDataset(projectName!, videoId),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })

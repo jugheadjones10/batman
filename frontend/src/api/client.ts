@@ -57,7 +57,7 @@ export const api = {
   videos: {
     list: (projectName: string) =>
       request<import('@/types').Video[]>(`/projects/${projectName}/videos`),
-    get: (projectName: string, videoId: number) =>
+    get: (projectName: string, videoId: number | string) =>
       request<import('@/types').Video>(`/projects/${projectName}/videos/${videoId}`),
     upload: async (projectName: string, file: File) => {
       const formData = new FormData()
@@ -74,7 +74,7 @@ export const api = {
     },
     extractFrames: (
       projectName: string,
-      videoId: number,
+      videoId: number | string,
       sampling?: { mode: string; interval: number }
     ) =>
       request<import('@/types').Frame[]>(
@@ -84,26 +84,26 @@ export const api = {
           body: JSON.stringify(sampling || {}),
         }
       ),
-    getFrames: (projectName: string, videoId: number) =>
+    getFrames: (projectName: string, videoId: number | string) =>
       request<import('@/types').Frame[]>(`/projects/${projectName}/videos/${videoId}/frames`),
-    delete: (projectName: string, videoId: number) =>
+    delete: (projectName: string, videoId: number | string) =>
       request<{ message: string }>(`/projects/${projectName}/videos/${videoId}`, {
         method: 'DELETE',
       }),
-    streamUrl: (projectName: string, videoId: number, proxy = true) =>
+    streamUrl: (projectName: string, videoId: number | string, proxy = true) =>
       `${API_BASE}/projects/${projectName}/videos/${videoId}/stream?proxy=${proxy}`,
-    frameUrl: (projectName: string, videoId: number, frameNumber: number) =>
+    frameUrl: (projectName: string, videoId: number | string, frameNumber: number) =>
       `${API_BASE}/projects/${projectName}/videos/${videoId}/frame/${frameNumber}`,
   },
 
   // Annotations
   annotations: {
-    listForFrame: (projectName: string, frameId: number) =>
+    listForFrame: (projectName: string, frameId: number | string) =>
       request<import('@/types').Annotation[]>(
         `/projects/${projectName}/frames/${frameId}/annotations`
       ),
     create: (projectName: string, data: {
-      frame_id: number
+      frame_id: number | string
       class_label_id: number
       box: import('@/types').BoundingBox
       track_id?: number
@@ -133,7 +133,7 @@ export const api = {
 
   // Tracks
   tracks: {
-    listForVideo: (projectName: string, videoId: number) =>
+    listForVideo: (projectName: string, videoId: number | string) =>
       request<import('@/types').Track[]>(`/projects/${projectName}/videos/${videoId}/tracks`),
     update: (projectName: string, trackId: number, data: Partial<{
       class_label_id: number
@@ -162,7 +162,7 @@ export const api = {
   // Labeling
   labeling: {
     autoLabel: (projectName: string, data?: {
-      video_ids?: number[]
+      video_ids?: (number | string)[]
       use_exemplars?: boolean
       tracking_mode?: string
     }) =>
@@ -182,7 +182,7 @@ export const api = {
       }>(`/projects/${projectName}/labeling/auto-label/${jobId}/status`),
     refine: (projectName: string, data: {
       scope: 'clip_range' | 'touched_tracks' | 'full'
-      video_id?: number
+      video_id?: number | string
       track_ids?: number[]
     }) =>
       request<{ job_id: string }>(`/projects/${projectName}/labeling/refine`, {
@@ -194,9 +194,9 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ description }),
       }),
-    getProblemQueue: (projectName: string, videoId?: number) =>
+    getProblemQueue: (projectName: string, videoId?: number | string) =>
       request<import('@/types').ProblemQueueItem[]>(
-        `/projects/${projectName}/problem-queue${videoId ? `?video_id=${videoId}` : ''}`
+        `/projects/${projectName}/problem-queue${videoId != null ? `?video_id=${videoId}` : ''}`
       ),
   },
 
@@ -275,7 +275,7 @@ export const api = {
         `/projects/${projectName}/inference/run-on-image?frame_id=${frameId}&confidence_threshold=${config?.confidence_threshold || 0.5}&iou_threshold=${config?.iou_threshold || 0.45}`,
         { method: 'POST' }
       ),
-    runOnVideo: (projectName: string, videoId: number, config: import('@/types').InferenceConfig) =>
+    runOnVideo: (projectName: string, videoId: number | string, config: import('@/types').InferenceConfig) =>
       request<{
         total_frames: number
         avg_fps: number
@@ -285,7 +285,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(config),
       }),
-    exportVideo: (projectName: string, videoId: number, config: import('@/types').InferenceConfig) =>
+    exportVideo: (projectName: string, videoId: number | string, config: import('@/types').InferenceConfig) =>
       request<{
         output_path: string
         total_frames: number
@@ -382,25 +382,25 @@ export const api = {
       }),
     listDatasets: (projectName: string) =>
       request<{
-        video_id: number
+        video_id: number | string
         source: string
         image_count: number
         annotation_count: number
         sample_images: string[]
       }[]>(`/projects/${projectName}/import/datasets`),
-    listImages: (projectName: string, videoId: number, offset = 0, limit = 50) =>
+    listImages: (projectName: string, videoId: number | string, offset = 0, limit = 50) =>
       request<{
         total: number
         offset: number
         limit: number
-        images: { frame_id: number; url: string; original_filename: string; split: string }[]
+        images: { frame_id: number | string; url: string; original_filename: string; split: string }[]
       }>(`/projects/${projectName}/import/images/${videoId}?offset=${offset}&limit=${limit}`),
-    deleteDataset: (projectName: string, videoId: number) =>
+    deleteDataset: (projectName: string, videoId: number | string) =>
       request<{ message: string; images_deleted: number; annotations_deleted: number }>(
         `/projects/${projectName}/import/datasets/${videoId}`,
         { method: 'DELETE' }
       ),
-    imageUrl: (projectName: string, videoId: number, filename: string) =>
+    imageUrl: (projectName: string, videoId: number | string, filename: string) =>
       `${API_BASE}/projects/${projectName}/import/image/${videoId}/${filename}`,
   },
 

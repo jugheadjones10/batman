@@ -23,9 +23,9 @@ export interface ProjectConfig {
   use_appearance_embedding: boolean
 }
 
-// Video types
+// Video types (id: video_1 or legacy 1)
 export interface Video {
-  id: number
+  id: number | string
   filename: string
   width: number
   height: number
@@ -39,8 +39,8 @@ export interface Video {
 }
 
 export interface Frame {
-  id: number
-  video_id: number
+  id: number | string
+  video_id: number | string
   frame_number: number
   timestamp: number
   image_path: string
@@ -59,7 +59,7 @@ export interface BoundingBox {
 
 export interface Annotation {
   id: number
-  frame_id: number
+  frame_id: number | string
   class_label_id: number
   class_name: string
   class_color: string
@@ -79,7 +79,7 @@ export interface Track {
   class_label_id: number
   class_name: string
   class_color: string
-  video_id: number
+  video_id: number | string
   start_frame: number
   end_frame: number
   annotation_count: number
@@ -136,10 +136,10 @@ export interface LabelIteration {
 }
 
 export interface ProblemQueueItem {
-  frame_id: number
+  frame_id: number | string
   frame_number: number
   timestamp: number
-  video_id: number
+  video_id: number | string
   problem_type: string
   severity: number
   description: string

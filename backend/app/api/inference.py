@@ -111,7 +111,7 @@ async def run_on_image(
 @router.post("/run-on-video/{video_id}")
 async def run_on_video(
     project_name: str,
-    video_id: int,
+    video_id: str,
     config: InferenceConfig,
 ):
     """Run inference on a video and return results."""
@@ -160,7 +160,7 @@ async def run_on_video(
 async def stream_inference(
     websocket: WebSocket,
     project_name: str,
-    video_id: int,
+    video_id: str,
 ):
     """Stream real-time inference results via WebSocket."""
     await websocket.accept()
@@ -219,7 +219,7 @@ async def stream_inference(
 @router.post("/export-video/{video_id}")
 async def export_annotated_video(
     project_name: str,
-    video_id: int,
+    video_id: str,
     config: InferenceConfig,
 ):
     """Export video with detection overlay."""

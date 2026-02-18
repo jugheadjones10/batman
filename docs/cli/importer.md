@@ -69,8 +69,11 @@ python -m cli.importer roboflow \
   --rf-project crane-detection \
   --version 1
 
-# With environment variable
+# With environment variable or .env file
 export ROBOFLOW_API_KEY=YOUR_API_KEY
+# Or add to a .env file in the project root (loaded automatically):
+# ROBOFLOW_API_KEY=your_key
+
 python -m cli.importer roboflow \
   --project data/projects/CraneHook \
   --create \
@@ -233,34 +236,152 @@ python -m cli.importer list
 python -m cli.importer list --projects-dir /mnt/data/projects
 ```
 
+## Re-creating a project (step-by-step)
+
+Use this checklist to create a new project with the current framework (source-key frame directories, string `frame_id`).
+
+### 1. Create the project (import or UI)
+
+**From scratch:** If the project path does not exist (e.g. `data/projects/MyProject`), use `--create`. The importer will create the project directory and `project.json`, then run the import. Use a path that does **not** exist yet; if it already exists, the importer will error when `--create` is used.
+
+**Option A – Create via COCO Zoo import**
+
+```bash
+# MyProject must not exist yet; the command creates it and imports in one go
+uv run python -m cli.importer coco \
+  --project data/projects/MyProject \
+  --create \
+  --classes person car \
+  --split validation \
+  --max-samples 100
+```
+
+- Frames go under `frames/coco_zoo_person_car_1/` with frame IDs like `coco_zoo_person_car_1_000000`.
+- `imports/imports.json` will have an entry with `"source_key": "coco_zoo_person_car_1"`.
+
+**Option B – Create via Roboflow import**
+
+```bash
+export ROBOFLOW_API_KEY=your_key
+
+# MyProject must not exist yet; the command creates it and imports in one go
+uv run python -m cli.importer roboflow \
+  --project data/projects/MyProject \
+  --create \
+  --workspace your-workspace \
+  --rf-project your-project \
+  --version 1
+```
+
+- Frames go under `frames/roboflow_{project-slug}_1/` (e.g. `roboflow_your-project_1`) with frame IDs like `roboflow_your-project_1_000042`.
+
+**Option C – Create via Web UI**
+
+1. Start dev server: `./scripts/run_dev.sh` (or backend + frontend manually).
+2. Open http://localhost:5173.
+3. Create a new project, then either import (Roboflow/COCO zoo) or upload a video.
+4. Uploaded videos get `frames/video_1/`, `frames/video_2/`, etc., and string frame IDs (e.g. `video_1_000000`).
+
+### 2. Add more data (optional)
+
+- **Another COCO zoo import** (same project): run `coco` again with different `--classes` or same; you get a new dir, e.g. `coco_zoo_person_car_2`.
+- **Another Roboflow import**: run `roboflow` again; you get e.g. `roboflow_your-project_2`.
+- **Upload video in UI**: creates `video_1`, `video_2`, … under `frames/` and entries in `videos/videos.json` with string keys (`"video_1"`, `"video_2"`).
+
+### 3. Train
+
+- **All data (imports + videos):**
+
+  ```bash
+  uv run python -m cli.train \
+    --project data/projects/MyProject \
+    --video-id all \
+    --model base \
+    --epochs 50 \
+    --output-dir runs/my_run
+  ```
+
+- **Imports only:**
+
+  ```bash
+  uv run python -m cli.train \
+    --project data/projects/MyProject \
+    --video-id imports \
+    --model base \
+    --epochs 50 \
+    --output-dir runs/my_run
+  ```
+
+- **Single source** (use the source_key as returned by API / directory name):
+
+  ```bash
+  uv run python -m cli.train \
+    --project data/projects/MyProject \
+    --video-id "coco_zoo_person_car_1" \
+    --model base \
+    --epochs 50 \
+    --output-dir runs/my_run
+  ```
+
+### 4. Run inference and iterate
+
+- Use the run from `--output-dir` with the inference CLI or Web UI.
+- Annotations and tracks use string `frame_id` and (for videos) string `video_id` (e.g. `video_1`).
+
+### 5. IDs and paths (reference)
+
+| Source            | Frame directory example           | Example frame_id                    |
+|------------------|-----------------------------------|-------------------------------------|
+| Roboflow         | `frames/roboflow_crane-hook_1/`   | `roboflow_crane-hook_1_000042`      |
+| COCO zoo         | `frames/coco_zoo_person_car_1/`   | `coco_zoo_person_car_1_000000`      |
+| Uploaded video   | `frames/video_1/`                 | `video_1_000000`                    |
+
+- **Videos list**: `videos/videos.json` keys are `"video_1"`, `"video_2"`, …
+- **Imports**: Listed by scanning `frames/` for dirs that are not in `videos.json`; each has a `source_key` in `imports/imports.json`.
+
+### 6. Recording and replaying data setup
+
+To get the same data state on a new project, record your steps in a script and re-run with a different project path:
+
+1. **Record**: Save your import and class commands in a shell script (see `scripts/data_prep_example.sh`).
+2. **Replay**: Set `PROJECT=data/projects/NewProject` (or pass it when running) and run the script. Use `--create` on the first import if the project does not exist yet.
+
+Example:
+
+```bash
+# Run the example script for a different project
+PROJECT=data/projects/Other ./scripts/data_prep_example.sh
+```
+
+Edit the script to match your imports (workspace, rf-project, COCO classes) and merge/rename steps. That script is your reproducible “data transformation pipeline.”
+
 ## Project Structure
 
-After import, projects have this structure:
+After import, projects have this structure. **New imports** (Roboflow, COCO zoo) use human-readable source-key directory names; **local COCO** and legacy projects may still use numeric IDs.
 
 ```
 data/projects/MyProject/
 ├── project.json        # Project metadata
-├── imports/           # Import tracking
-│   └── imports.json   # Metadata for all imports (includes video_id for each)
-├── videos/            # Empty (for later video uploads)
-├── frames/            # All frames (videos and imports)
-│   ├── -1/           # First import (unique video_id)
-│   │   ├── frames.json      # Frame metadata with import_id references
-│   │   ├── -1000000.jpg
-│   │   ├── -1000001.jpg
-│   │   └── ...
-│   ├── -2/           # Second import (unique video_id)
+├── imports/            # Import tracking
+│   └── imports.json   # Metadata for all imports (source_key or video_id)
+├── videos/             # Uploaded videos
+├── frames/             # All frames (videos and imports)
+│   ├── roboflow_crane-hook_1/      # Roboflow import (source_key)
 │   │   ├── frames.json
-│   │   └── *.jpg
-│   ├── -3/           # Third import
-│   ├── 1/            # Real video #1 (positive IDs)
-│   └── 2/            # Real video #2
-└── labels/            # Imported annotations
+│   │   ├── roboflow_crane-hook_1_000000.jpg
+│   │   └── ...
+│   ├── coco_zoo_person_1/          # COCO zoo import (source_key)
+│   │   ├── frames.json
+│   │   └── coco_zoo_person_1_*.jpg
+│   ├── video_1/                    # Uploaded video (source_key)
+│   ├── -1/                         # Legacy: local COCO or old import
+│   └── 1/                          # Legacy: numeric video ID
+└── labels/
     └── current/
         └── annotations.json
 ```
 
-**Important**: Each import gets its own unique negative video_id (-1, -2, -3, ...). This keeps imports separate and makes them easy to manage individually.
+**Naming**: Roboflow imports use `roboflow_{project-slug}_{seq}` (e.g. `roboflow_crane-hook_1`). COCO zoo uses `coco_zoo_{classes-slug}_{seq}` (e.g. `coco_zoo_person_1`). Uploaded videos use `video_1`, `video_2`. Frame IDs are strings like `roboflow_crane-hook_1_000042`. Legacy projects (numeric `-1`, `1`, etc.) remain supported.
 
 ### project.json
 
@@ -295,6 +416,7 @@ All imports are tracked in `data/projects/MyProject/imports/imports.json`:
     "project": "crane-detection",
     "version": 1,
     "format": "coco",
+    "source_key": "roboflow_crane-detection_1",
     "imported_at": "2026-01-28T10:30:00.123456"
   },
   "import_2_20260128_110000": {
@@ -302,6 +424,7 @@ All imports are tracked in `data/projects/MyProject/imports/imports.json`:
     "classes": ["person", "car"],
     "split": "validation",
     "max_samples": 100,
+    "source_key": "coco_zoo_person_car_1",
     "imported_at": "2026-01-28T11:00:00.123456"
   },
   "import_3_20260128_120000": {
@@ -312,9 +435,11 @@ All imports are tracked in `data/projects/MyProject/imports/imports.json`:
 }
 ```
 
+Roboflow and COCO zoo imports include `source_key` (the frame directory name). Local COCO may use numeric `video_id` only.
+
 ### Frame References
 
-Each frame stores only a lightweight reference to the import:
+Each frame stores only a lightweight reference to the import. New imports use string `frame_id` (e.g. `roboflow_crane-detection_1_000000`) and `source_key`; legacy may use numeric `video_id`.
 
 ```json
 {

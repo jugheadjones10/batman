@@ -19,8 +19,8 @@ router = APIRouter(prefix="/projects/{project_name}/labeling", tags=["labeling"]
 class AutoLabelRequest(BaseModel):
     """Request to run auto-labeling on frames."""
 
-    video_ids: Optional[list[int]] = None  # None = all videos
-    frame_ids: Optional[list[int]] = None  # None = all frames for selected videos
+    video_ids: Optional[list[int | str]] = None  # None = all videos (int or source_key str)
+    frame_ids: Optional[list[int | str]] = None  # None = all frames for selected videos
     use_exemplars: bool = True
     tracking_mode: Literal["visible_only", "occlusion_tolerant"] = "visible_only"
     skip_labeled_frames: bool = True  # Skip frames that already have annotations
@@ -233,7 +233,7 @@ async def _run_auto_labeling(
             with open(tracks_path) as f:
                 existing_tracks = json.load(f)
 
-        # Get frame IDs that already have annotations
+        # Get frame IDs that already have annotations (frame_id can be int or str)
         labeled_frame_ids = set()
         if request.skip_labeled_frames and not request.overwrite:
             for ann in existing_annotations.values():
@@ -242,7 +242,6 @@ async def _run_auto_labeling(
 
         _labeling_jobs[job_id].message = "Loading frames..."
 
-        # Collect frames to process
         frames_to_process = []
         frames_dir = project_path / "frames"
 
@@ -251,7 +250,7 @@ async def _run_auto_labeling(
                 if not video_dir.is_dir():
                     continue
 
-                video_id = int(video_dir.name)
+                video_id = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
                 if request.video_ids and video_id not in request.video_ids:
                     continue
 
@@ -261,17 +260,14 @@ async def _run_auto_labeling(
                         frames_meta = json.load(f)
 
                     for frame_id, frame_data in frames_meta.items():
-                        frame_id_int = int(frame_id)
-
-                        if request.frame_ids and frame_id_int not in request.frame_ids:
+                        fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
+                        if request.frame_ids and fid not in request.frame_ids:
                             continue
-
-                        # Skip frames that already have annotations
-                        if request.skip_labeled_frames and frame_id_int in labeled_frame_ids:
+                        if request.skip_labeled_frames and fid in labeled_frame_ids:
                             continue
 
                         frames_to_process.append({
-                            "id": frame_id_int,
+                            "id": fid,
                             "video_id": video_id,
                             **frame_data,
                         })

@@ -33,9 +33,12 @@ BATCH_SIZE=""  # Will be set based on GPU if empty
 IMAGE_SIZE=640
 LR="1e-4"
 PATIENCE=10
-PROJECT_DIR="data/projects/Test"
+PROJECT_DIR="data/projects/One"
+# Where to write the prepared COCO dataset (train/val/test splits); used as input for training
 OUTPUT_DATASET="datasets/rfdetr_coco"
+# Where to write the training run (checkpoints, logs). Empty = auto: runs/rfdetr_<gpu>_<timestamp>
 OUTPUT_DIR=""
+# Model size: nano (~3M) | small (~10M) | base (~28M) | medium (~48M) | large (~76M). base = balanced speed/accuracy
 MODEL="base"
 TIME="24:00:00"
 DRY_RUN=false
@@ -85,25 +88,27 @@ show_help() {
     exit 0
 }
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+    arg="$1"
     case $arg in
-        --gpu=*)        GPU_TYPE="${arg#*=}" ;;
-        --num-gpus=*)   NUM_GPUS="${arg#*=}" ;;
-        --partition=*)  PARTITION="${arg#*=}" ;;
-        --epochs=*)     EPOCHS="${arg#*=}" ;;
-        --batch-size=*) BATCH_SIZE="${arg#*=}" ;;
-        --image-size=*) IMAGE_SIZE="${arg#*=}" ;;
-        --lr=*)         LR="${arg#*=}" ;;
-        --patience=*)   PATIENCE="${arg#*=}" ;;
-        --project=*)    PROJECT_DIR="${arg#*=}" ;;
-        --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
-        --model=*)      MODEL="${arg#*=}" ;;
-        --time=*)           TIME="${arg#*=}" ;;
-        --filter-classes=*) FILTER_CLASSES="${arg#*=}" ;;
-        --prepare-only)     PREPARE_ONLY=true ;;
-        --dry-run)          DRY_RUN=true ;;
-        --help|-h)          show_help ;;
-        *)              EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
+        --gpu=*)        GPU_TYPE="${arg#*=}"; shift ;;
+        --num-gpus=*)   NUM_GPUS="${arg#*=}"; shift ;;
+        --partition=*)  PARTITION="${arg#*=}"; shift ;;
+        --epochs=*)     EPOCHS="${arg#*=}"; shift ;;
+        --batch-size=*) BATCH_SIZE="${arg#*=}"; shift ;;
+        --image-size=*) IMAGE_SIZE="${arg#*=}"; shift ;;
+        --lr=*)         LR="${arg#*=}"; shift ;;
+        --patience=*)   PATIENCE="${arg#*=}"; shift ;;
+        --project=*)    PROJECT_DIR="${arg#*=}"; shift ;;
+        --project)      PROJECT_DIR="$2"; shift 2 ;;
+        --output-dir=*) OUTPUT_DIR="${arg#*=}"; shift ;;
+        --model=*)      MODEL="${arg#*=}"; shift ;;
+        --time=*)       TIME="${arg#*=}"; shift ;;
+        --filter-classes=*) FILTER_CLASSES="${arg#*=}"; shift ;;
+        --prepare-only) PREPARE_ONLY=true; shift ;;
+        --dry-run)      DRY_RUN=true; shift ;;
+        --help|-h)      show_help ;;
+        *)              EXTRA_ARGS="$EXTRA_ARGS $arg"; shift ;;
     esac
 done
 

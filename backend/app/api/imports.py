@@ -377,16 +377,16 @@ async def import_from_local_coco(
 class ImportedDatasetInfo(BaseModel):
     """Info about an imported dataset."""
 
-    video_id: int  # -1 for roboflow, -2 for local_coco
-    source: str  # "roboflow" | "local_coco"
+    video_id: str | int  # source_key (e.g. roboflow_crane-hook_1) or legacy -1, -2
+    source: str
     image_count: int
     annotation_count: int
-    sample_images: list[str]  # URLs to sample images
+    sample_images: list[str]
 
 
 @router.get("/datasets")
 async def list_imported_datasets(project_name: str):
-    """List all imported datasets in this project."""
+    """List all imported datasets (frame dirs that are not in videos.json)."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -394,63 +394,54 @@ async def list_imported_datasets(project_name: str):
     frames_dir = project_path / "frames"
     annotations_path = project_path / "labels" / "current" / "annotations.json"
 
-    # Load annotations to count per-dataset
-    annotations_by_video: dict[int, int] = {}
-    if annotations_path.exists():
+    # Load videos.json to exclude uploaded videos (video_1, video_2 or 1, 2)
+    videos_meta = {}
+    videos_json = project_path / "videos" / "videos.json"
+    if videos_json.exists():
+        with open(videos_json) as f:
+            videos_meta = json.load(f)
+
+    # Build frame_id -> dir_name for annotation counts (frame_id may be int or str)
+    frame_to_video: dict[str, str] = {}
+    annotations_by_video: dict[str, int] = {}
+    if frames_dir.exists() and annotations_path.exists():
         with open(annotations_path) as f:
             annotations = json.load(f)
-
-        # Count annotations by frame's video_id
-        frame_to_video: dict[int, int] = {}
         for video_dir in frames_dir.iterdir():
-            if not video_dir.is_dir():
+            if not video_dir.is_dir() or video_dir.name in videos_meta:
                 continue
-            try:
-                video_id = int(video_dir.name)
-            except ValueError:
-                continue
-
             meta_path = video_dir / "frames.json"
-            if meta_path.exists():
-                with open(meta_path) as f:
-                    frames_meta = json.load(f)
-                for frame_id in frames_meta.keys():
-                    frame_to_video[int(frame_id)] = video_id
-
+            if not meta_path.exists():
+                continue
+            with open(meta_path) as f:
+                frames_meta = json.load(f)
+            for frame_id in frames_meta.keys():
+                frame_to_video[str(frame_id)] = video_dir.name
         for ann in annotations.values():
-            frame_id = ann.get("frame_id")
-            video_id = frame_to_video.get(frame_id, 0)
-            if video_id < 0:  # Only count imported datasets
-                annotations_by_video[video_id] = annotations_by_video.get(video_id, 0) + 1
+            fid = str(ann.get("frame_id"))
+            vid = frame_to_video.get(fid)
+            if vid is not None:
+                annotations_by_video[vid] = annotations_by_video.get(vid, 0) + 1
 
-    datasets = []
-
-    # Load imports metadata to get source info
+    # Load imports metadata for source_key -> source type
     imports_metadata = {}
-    imports_path = project_dir / "imports" / "imports.json"
+    imports_path = project_path / "imports" / "imports.json"
     if imports_path.exists():
         with open(imports_path) as f:
             imports_metadata = json.load(f)
-    
-    # Build video_id to source map from imports metadata
     video_id_to_source = {}
     for import_id, import_meta in imports_metadata.items():
-        vid = import_meta.get("video_id")
+        vid = import_meta.get("source_key") or import_meta.get("video_id")
         if vid is not None:
-            video_id_to_source[vid] = import_meta.get("type", "unknown")
+            video_id_to_source[str(vid)] = import_meta.get("type", "unknown")
 
-    # Check for imported datasets (negative video IDs)
+    datasets = []
+    if not frames_dir.exists():
+        return datasets
+
     for video_dir in frames_dir.iterdir():
-        if not video_dir.is_dir():
+        if not video_dir.is_dir() or video_dir.name in videos_meta:
             continue
-        try:
-            video_id = int(video_dir.name)
-        except ValueError:
-            continue
-
-        if video_id >= 0:
-            continue  # Skip regular videos
-
         meta_path = video_dir / "frames.json"
         if not meta_path.exists():
             continue
@@ -458,46 +449,41 @@ async def list_imported_datasets(project_name: str):
         with open(meta_path) as f:
             frames_meta = json.load(f)
 
-        # Get source from video_id mapping or frame metadata
-        source = video_id_to_source.get(video_id)
+        source = video_id_to_source.get(video_dir.name)
         if not source and frames_meta:
-            # Fallback: get from first frame's metadata
             first_frame = next(iter(frames_meta.values()))
             source = first_frame.get("source", "unknown")
 
-        # Get sample images (up to 6)
         image_files = [
-            f
-            for f in video_dir.iterdir()
+            f for f in video_dir.iterdir()
             if f.suffix.lower() in [".jpg", ".jpeg", ".png"]
         ]
         sample_files = random.sample(image_files, min(6, len(image_files)))
         sample_urls = [
-            f"/api/projects/{project_name}/import/image/{video_id}/{f.name}"
+            f"/api/projects/{project_name}/import/image/{video_dir.name}/{f.name}"
             for f in sample_files
         ]
 
-        datasets.append(
-            {
-                "video_id": video_id,
-                "source": source or "unknown",
-                "image_count": len(frames_meta),
-                "annotation_count": annotations_by_video.get(video_id, 0),
-                "sample_images": sample_urls,
-            }
-        )
+        vid_out = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
+        datasets.append({
+            "video_id": vid_out,
+            "source": source or "unknown",
+            "image_count": len(frames_meta),
+            "annotation_count": annotations_by_video.get(video_dir.name, 0),
+            "sample_images": sample_urls,
+        })
 
     return datasets
 
 
 @router.get("/image/{video_id}/{filename}")
-async def get_imported_image(project_name: str, video_id: int, filename: str):
-    """Get an imported image file."""
+async def get_imported_image(project_name: str, video_id: str, filename: str):
+    """Get an imported image file (video_id is source_key or legacy -1, -2)."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    image_path = project_path / "frames" / str(video_id) / filename
+    image_path = project_path / "frames" / video_id / filename
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
 
@@ -507,7 +493,7 @@ async def get_imported_image(project_name: str, video_id: int, filename: str):
 @router.get("/images/{video_id}")
 async def list_imported_images(
     project_name: str,
-    video_id: int,
+    video_id: str,
     offset: int = 0,
     limit: int = 50,
 ):
@@ -516,7 +502,7 @@ async def list_imported_images(
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    frames_dir = project_path / "frames" / str(video_id)
+    frames_dir = project_path / "frames" / video_id
     if not frames_dir.exists():
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -527,59 +513,54 @@ async def list_imported_images(
     with open(meta_path) as f:
         frames_meta = json.load(f)
 
-    # Sort by frame_id
-    sorted_frames = sorted(frames_meta.items(), key=lambda x: int(x[0]))
-    total = len(sorted_frames)
+    # Sort by frame_id (string or numeric)
+    def sort_key(item):
+        k = item[0]
+        return (0, int(k)) if isinstance(k, str) and k.isdigit() else (1, k)
 
-    # Paginate
+    sorted_frames = sorted(frames_meta.items(), key=sort_key)
+    total = len(sorted_frames)
     paginated = sorted_frames[offset : offset + limit]
 
     images = []
     for frame_id, frame_data in paginated:
-        images.append(
-            {
-                "frame_id": int(frame_id),
-                "url": f"/api/projects/{project_name}/import/image/{video_id}/{Path(frame_data['image_path']).name}",
-                "original_filename": frame_data.get("original_filename", ""),
-                "split": frame_data.get("split", ""),
-            }
-        )
+        fname = Path(frame_data["image_path"]).name
+        images.append({
+            "frame_id": frame_id,
+            "url": f"/api/projects/{project_name}/import/image/{video_id}/{fname}",
+            "original_filename": frame_data.get("original_filename", ""),
+            "split": frame_data.get("split", ""),
+        })
 
-    return {
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "images": images,
-    }
+    return {"total": total, "offset": offset, "limit": limit, "images": images}
 
 
 @router.delete("/datasets/{video_id}")
-async def delete_imported_dataset(project_name: str, video_id: int):
-    """Delete an imported dataset."""
+async def delete_imported_dataset(project_name: str, video_id: str):
+    """Delete an imported dataset (video_id is source_key or legacy -1, -2)."""
     import shutil
 
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if video_id >= 0:
+    # Reject uploaded video dirs (video_1, video_2 or numeric >= 0)
+    if video_id.startswith("video_") or (video_id.lstrip("-").isdigit() and int(video_id) >= 0):
         raise HTTPException(
-            status_code=400, detail="Can only delete imported datasets (negative video_id)"
+            status_code=400, detail="Can only delete imported datasets, not uploaded videos"
         )
 
-    frames_dir = project_path / "frames" / str(video_id)
+    frames_dir = project_path / "frames" / video_id
     if not frames_dir.exists():
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Load frames to delete
     meta_path = frames_dir / "frames.json"
     frame_ids = set()
     if meta_path.exists():
         with open(meta_path) as f:
             frames_meta = json.load(f)
-        frame_ids = {int(fid) for fid in frames_meta.keys()}
+        frame_ids = set(frames_meta.keys())
 
-    # Delete annotations for these frames
     annotations_path = project_path / "labels" / "current" / "annotations.json"
     deleted_annotations = 0
     if annotations_path.exists():
@@ -588,7 +569,7 @@ async def delete_imported_dataset(project_name: str, video_id: int):
 
         new_annotations = {}
         for ann_id, ann_data in annotations.items():
-            if ann_data.get("frame_id") not in frame_ids:
+            if str(ann_data.get("frame_id")) not in frame_ids:
                 new_annotations[ann_id] = ann_data
             else:
                 deleted_annotations += 1

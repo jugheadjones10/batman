@@ -64,8 +64,8 @@ def load_project_to_fiftyone(project_name: str):
     dataset = fo.Dataset(name=dataset_name)
     dataset.persistent = False  # Don't save to disk
 
-    # Group annotations by frame_id
-    annotations_by_frame: dict[int, list[dict]] = {}
+    # Group annotations by frame_id (int or str)
+    annotations_by_frame: dict[int | str, list[dict]] = {}
     for ann_id, ann in annotations.items():
         frame_id = ann.get("frame_id")
         if frame_id not in annotations_by_frame:
@@ -80,12 +80,12 @@ def load_project_to_fiftyone(project_name: str):
         if not video_dir.is_dir():
             continue
 
+        # video_id can be int (legacy) or str (source_key)
         try:
-            video_id = int(video_dir.name)
+            video_id = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
         except ValueError:
             continue
 
-        # Load frames metadata
         meta_path = video_dir / "frames.json"
         if not meta_path.exists():
             continue
@@ -94,7 +94,7 @@ def load_project_to_fiftyone(project_name: str):
             frames_meta = json.load(f)
 
         for frame_id_str, frame_data in frames_meta.items():
-            frame_id = int(frame_id_str)
+            frame_id = int(frame_id_str) if isinstance(frame_id_str, str) and frame_id_str.isdigit() else frame_id_str
             image_path = Path(frame_data.get("image_path", ""))
 
             if not image_path.exists():

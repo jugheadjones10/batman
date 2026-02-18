@@ -160,15 +160,18 @@ def load_project_data(
             if video_dir.is_dir() and (video_dir / "frames.json").exists():
                 video_dirs_to_load.append(video_dir)
     elif video_id == "imports":
-        # Load only imports (negative video IDs)
+        # Load only imports: dirs that are not in videos.json (not uploaded videos)
+        videos_meta = {}
+        videos_json = project_dir / "videos" / "videos.json"
+        if videos_json.exists():
+            with open(videos_json) as f:
+                videos_meta = json.load(f)
         for video_dir in frames_base_dir.iterdir():
-            if video_dir.is_dir() and (video_dir / "frames.json").exists():
-                try:
-                    vid = int(video_dir.name)
-                    if vid < 0:
-                        video_dirs_to_load.append(video_dir)
-                except ValueError:
-                    pass
+            if not video_dir.is_dir() or (video_dir / "frames.json").exists() is False:
+                continue
+            if video_dir.name in videos_meta:
+                continue  # Skip uploaded videos (video_1, 1, etc.)
+            video_dirs_to_load.append(video_dir)
     else:
         # Load specific video ID
         video_dir = frames_base_dir / str(video_id)
@@ -241,8 +244,9 @@ def create_coco_split(
         coco_data["categories"].append({"id": i, "name": name, "supercategory": "object"})
 
     annotation_id = 1
-
-    for frame_id in frame_ids:
+    # COCO image_id must be int; frame_id can be string (e.g. roboflow_crane-hook_1_000042)
+    sorted_frame_ids = sorted(frame_ids)
+    for image_id, frame_id in enumerate(sorted_frame_ids):
         if frame_id not in frames_meta:
             continue
 
@@ -252,36 +256,30 @@ def create_coco_split(
         if not src_path.exists():
             continue
 
-        # Get image dimensions
         with Image.open(src_path) as img:
             img_width, img_height = img.size
 
-        # Get annotations for this frame
         frame_annotations = []
         for ann in annotations_data.values():
             if str(ann["frame_id"]) != frame_id:
                 continue
 
-            # Check if this annotation's class is in our filtered set
             original_class_id = ann["class_label_id"]
             if original_class_id not in class_id_map:
                 continue
 
-            # Convert normalized center format to COCO format
             cx = ann["x"] * img_width
             cy = ann["y"] * img_height
             w = ann["width"] * img_width
             h = ann["height"] * img_height
-
             x_min = cx - w / 2
             y_min = cy - h / 2
-
             category_id = class_id_map[original_class_id]
 
             frame_annotations.append(
                 {
                     "id": annotation_id,
-                    "image_id": int(frame_id),
+                    "image_id": image_id,
                     "category_id": category_id,
                     "bbox": [x_min, y_min, w, h],
                     "area": w * h,
@@ -290,23 +288,19 @@ def create_coco_split(
             )
             annotation_id += 1
 
-        # Only include images with annotations
         if frame_annotations:
-            # Copy image
             new_filename = f"{frame_id}.jpg"
             dst_path = output_dir / new_filename
             shutil.copy(src_path, dst_path)
 
-            # Add image entry
             coco_data["images"].append(
                 {
-                    "id": int(frame_id),
+                    "id": image_id,
                     "file_name": new_filename,
                     "width": img_width,
                     "height": img_height,
                 }
             )
-
             coco_data["annotations"].extend(frame_annotations)
 
     # Save COCO annotations

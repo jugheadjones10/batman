@@ -115,13 +115,22 @@ class ClassManager:
                 target_class="spreader"
             )
         """
-        # Validate all classes exist
+        # Validate source classes exist (target may be a new name not in project yet)
         for cls in source_classes:
+            if cls == target_class:
+                continue  # target is allowed to be missing; we'll add it below
             if cls not in self.project.classes:
                 raise ValueError(f"Class '{cls}' not found")
 
+        # If target doesn't exist yet, add it (merge into a new class name)
         if target_class not in self.project.classes:
-            raise ValueError(f"Target class '{target_class}' not found")
+            self.project.classes.append(target_class)
+            # Inherit source from first merged class so list shows e.g. "roboflow" not "unknown"
+            for cls in source_classes:
+                if cls != target_class and cls in self.project.class_sources:
+                    self.project.class_sources[target_class] = self.project.class_sources[cls]
+                    break
+            self.project.save()
 
         # Get class IDs (before any modifications)
         target_id = self.project.classes.index(target_class)

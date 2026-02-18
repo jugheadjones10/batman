@@ -162,12 +162,12 @@ class DatasetExporter:
                 if not image_path.exists():
                     continue
 
-                # Copy image
-                new_image_name = f"{frame_id:08d}.jpg"
-                shutil.copy(image_path, images_dir / new_image_name)
+                # frame_id can be int (legacy) or str (source_key_000042)
+                safe_name = f"{frame_id}.jpg" if isinstance(frame_id, str) else f"{frame_id:08d}.jpg"
+                shutil.copy(image_path, images_dir / safe_name)
 
-                # Create label file
-                label_path = labels_dir / f"{frame_id:08d}.txt"
+                label_name = f"{frame_id}.txt" if isinstance(frame_id, str) else f"{frame_id:08d}.txt"
+                label_path = labels_dir / label_name
                 anns = frame_annotations.get(frame_id, [])
 
                 with open(label_path, "w") as f:
@@ -222,32 +222,28 @@ class DatasetExporter:
             }
 
             annotation_id = 1
-
-            for frame in split_frames:
+            # COCO image_id must be int
+            for image_id, frame in enumerate(split_frames):
                 frame_id = frame["id"]
                 image_path = Path(frame["image_path"])
 
                 if not image_path.exists():
                     continue
 
-                # Get image dimensions
                 from PIL import Image
                 with Image.open(image_path) as img:
                     width, height = img.size
 
-                # Copy image to split folder (images alongside annotations)
-                new_image_name = f"{frame_id:08d}.jpg"
-                shutil.copy(image_path, split_dir / new_image_name)
+                safe_name = f"{frame_id}.jpg" if isinstance(frame_id, str) else f"{frame_id:08d}.jpg"
+                shutil.copy(image_path, split_dir / safe_name)
 
-                # Add image entry
                 coco_data["images"].append({
-                    "id": frame_id,
-                    "file_name": new_image_name,
+                    "id": image_id,
+                    "file_name": safe_name,
                     "width": width,
                     "height": height,
                 })
 
-                # Add annotations
                 anns = frame_annotations.get(frame_id, [])
                 for ann in anns:
                     # Handle both formats: nested {"box": {...}} or flat {x, y, width, height}
@@ -269,7 +265,7 @@ class DatasetExporter:
 
                     coco_data["annotations"].append({
                         "id": annotation_id,
-                        "image_id": frame_id,
+                        "image_id": image_id,
                         "category_id": ann.get("class_label_id", 0),
                         "bbox": [x, y, w, h],
                         "area": w * h,

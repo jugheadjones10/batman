@@ -56,10 +56,9 @@ def parse_video_id(video_id_str: str) -> int | str:
     """
     if video_id_str in ("all", "imports"):
         return video_id_str
-    try:
+    if video_id_str.lstrip("-").isdigit():
         return int(video_id_str)
-    except ValueError:
-        raise ValueError(f"Invalid video_id: {video_id_str}. Use 'all', 'imports', or a number.")
+    return video_id_str  # source_key e.g. roboflow_crane-hook_1
 
 
 def print_header(title: str) -> None:

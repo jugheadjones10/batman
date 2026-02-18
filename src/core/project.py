@@ -3,10 +3,43 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+def slugify(name: str) -> str:
+    """
+    Normalize a name for use in source_key (directory name segment).
+    Lowercase; replace spaces and path-unsafe chars with hyphen; collapse and strip.
+    Underscore is reserved for part separators (source_name_seq).
+    """
+    if not name:
+        return ""
+    s = name.lower().strip()
+    # Replace path-unsafe and space with hyphen
+    s = re.sub(r"[^\w\-]", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
+
+
+def get_next_source_key(frames_dir: Path, prefix: str) -> str:
+    """
+    Return the next available source_key for the given prefix.
+    prefix is e.g. 'roboflow_crane-hook'; returns 'roboflow_crane-hook_1' or '_2' etc.
+    """
+    frames_dir = Path(frames_dir)
+    if not frames_dir.exists():
+        return f"{prefix}_1"
+    prefix_ = prefix + "_"
+    existing = []
+    for d in frames_dir.iterdir():
+        if d.is_dir() and d.name.startswith(prefix_) and d.name[len(prefix_) :].isdigit():
+            existing.append(int(d.name[len(prefix_) :]))
+    seq = max(existing, default=0) + 1
+    return f"{prefix}_{seq}"
 
 
 @dataclass
@@ -94,23 +127,32 @@ class Project:
     def get_next_import_video_id(self) -> int:
         """
         Get the next available negative video ID for a new import.
-        
+        Legacy: use get_next_import_source_key for new source-key naming.
+
         Returns:
             Negative integer for the new import (-1, -2, -3, etc.)
         """
-        # Find all existing video IDs (both positive and negative)
         existing_ids = []
         if self.frames_dir.exists():
             for video_dir in self.frames_dir.iterdir():
-                if video_dir.is_dir() and video_dir.name.lstrip('-').isdigit():
+                if video_dir.is_dir() and video_dir.name.lstrip("-").isdigit():
                     existing_ids.append(int(video_dir.name))
-        
-        # Find the lowest negative ID (most negative)
         negative_ids = [vid for vid in existing_ids if vid < 0]
         if negative_ids:
-            return min(negative_ids) - 1  # Go one more negative
-        else:
-            return -1  # First import
+            return min(negative_ids) - 1
+        return -1
+
+    def get_next_import_source_key(self, import_type: str, name_part: str) -> str:
+        """
+        Get the next source_key for a new import (e.g. roboflow_crane-hook_1).
+        import_type: 'roboflow', 'coco_zoo', etc. name_part: slugified project or classes string.
+        """
+        prefix = f"{import_type}_{name_part}"
+        return get_next_source_key(self.frames_dir, prefix)
+
+    def get_next_video_source_key(self) -> str:
+        """Get the next source_key for an uploaded video (e.g. video_1, video_2)."""
+        return get_next_source_key(self.frames_dir, "video")
 
     # -------------------------------------------------------------------------
     # Class methods for loading/creating
@@ -262,22 +304,20 @@ class Project:
             json.dump(annotations, f, indent=2)
         self.annotation_count = len(annotations)
 
-    def load_frames_meta(self, video_id: int) -> dict[str, Any]:
-        """Load frames metadata for a video."""
+    def load_frames_meta(self, video_id: int | str) -> dict[str, Any]:
+        """Load frames metadata for a video or import (video_id or source_key)."""
         frames_dir = self.frames_dir / str(video_id)
         frames_meta_path = frames_dir / "frames.json"
-
         if frames_meta_path.exists():
             with open(frames_meta_path) as f:
                 return json.load(f)
         return {}
 
-    def save_frames_meta(self, video_id: int, frames_meta: dict[str, Any]) -> None:
-        """Save frames metadata for a video."""
+    def save_frames_meta(self, video_id: int | str, frames_meta: dict[str, Any]) -> None:
+        """Save frames metadata for a video or import (video_id or source_key)."""
         frames_dir = self.frames_dir / str(video_id)
         frames_dir.mkdir(parents=True, exist_ok=True)
         frames_meta_path = frames_dir / "frames.json"
-
         with open(frames_meta_path, "w") as f:
             json.dump(frames_meta, f, indent=2)
 

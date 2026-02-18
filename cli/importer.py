@@ -45,6 +45,26 @@ from src.core.importer import DataImporter
 from src.core.project import Project
 
 
+def _load_dotenv() -> None:
+    """Load .env from current directory or project root into os.environ."""
+    for d in (Path.cwd(), Path(__file__).resolve().parent.parent):
+        env_file = d / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if value.startswith(("'", '"')) and value[0] == value[-1]:
+                        value = value[1:-1]
+                    if key:
+                        os.environ.setdefault(key, value)
+            break
+
+
 def print_progress(status: str, pct: int, msg: str) -> None:
     """Print progress with a simple progress bar."""
     bar_width = 30
@@ -226,6 +246,7 @@ def list_projects(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(
         description="Import data into Batman projects",
         formatter_class=argparse.RawDescriptionHelpFormatter,

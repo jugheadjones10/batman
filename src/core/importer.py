@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from src.core.project import Project
+from src.core.project import Project, slugify
 
 
 @dataclass
@@ -103,8 +103,9 @@ class DataImporter:
 
         progress("processing", 30, "Download complete. Processing images...")
 
-        # Get unique video ID for this import
-        video_id = self.project.get_next_import_video_id()
+        # Get source_key for this import (e.g. roboflow_crane-hook_1)
+        name_part = slugify(rf_project)
+        source_key = self.project.get_next_import_source_key("roboflow", name_part)
 
         # Register this import with the project
         import_metadata = {
@@ -113,7 +114,7 @@ class DataImporter:
             "project": rf_project,
             "version": version,
             "format": format,
-            "video_id": video_id,
+            "source_key": source_key,
             "imported_at": datetime.utcnow().isoformat(),
         }
         import_id = self.project.register_import(import_metadata)
@@ -121,7 +122,7 @@ class DataImporter:
         # Process the downloaded dataset
         stats = self._process_coco_dataset(
             dataset_path=dataset_path,
-            video_id=video_id,
+            source_key=source_key,
             source="roboflow",
             import_id=import_id,
             on_progress=on_progress,
@@ -200,8 +201,9 @@ class DataImporter:
 
         progress("processing", 40, f"Downloaded {len(dataset)} samples. Processing...")
 
-        # Get unique video ID for this import
-        video_id = self.project.get_next_import_video_id()
+        # Get source_key for this import (e.g. coco_zoo_person_1)
+        name_part = "_".join(slugify(c) for c in classes)
+        source_key = self.project.get_next_import_source_key("coco_zoo", name_part)
 
         # Register this import with the project
         import_metadata = {
@@ -209,17 +211,18 @@ class DataImporter:
             "classes": classes,
             "split": split,
             "max_samples": max_samples,
-            "video_id": video_id,
+            "source_key": source_key,
             "imported_at": datetime.utcnow().isoformat(),
         }
         import_id = self.project.register_import(import_metadata)
 
-        # Process into our format
+        # Process into our format (only import annotations for requested classes)
         stats = self._process_fiftyone_dataset(
             dataset=dataset,
-            video_id=video_id,
+            source_key=source_key,
             source="coco_zoo",
             import_id=import_id,
+            classes_filter=classes,
             on_progress=on_progress,
             progress_start=40,
             progress_end=95,
@@ -241,23 +244,27 @@ class DataImporter:
     def _process_fiftyone_dataset(
         self,
         dataset,  # fo.Dataset
-        video_id: int,
+        source_key: str,
         source: str,
         import_id: str,
+        classes_filter: list[str] | None = None,
         on_progress: Callable[[str, int, str], None] | None = None,
         progress_start: int = 0,
         progress_end: int = 100,
     ) -> ImportStats:
-        """Process a FiftyOne dataset into our project format."""
+        """Process a FiftyOne dataset into our project format.
+
+        If classes_filter is set, only annotations whose label is in that list are imported.
+        """
         stats = ImportStats()
 
         # Load existing project data
         annotations = self.project.load_annotations()
-        frames_meta = self.project.load_frames_meta(video_id)
+        frames_meta = self.project.load_frames_meta(source_key)
         existing_frame_count = len(frames_meta)
 
         # Ensure frames directory exists
-        frames_dir = self.project.frames_dir / str(video_id)
+        frames_dir = self.project.frames_dir / source_key
         frames_dir.mkdir(parents=True, exist_ok=True)
 
         total_samples = len(dataset)
@@ -280,49 +287,45 @@ class DataImporter:
                 with Image.open(img_path) as img:
                     img_width, img_height = img.size
 
-            # Generate frame ID
+            # Generate string frame ID
             frame_idx = existing_frame_count + stats.images_imported
-            frame_id = video_id * 1000000 + frame_idx
+            frame_id = f"{source_key}_{frame_idx:06d}"
 
             # Copy image to frames directory
-            dest_path = frames_dir / f"{frame_id:08d}.jpg"
+            dest_path = frames_dir / f"{frame_id}.jpg"
             shutil.copy(img_path, dest_path)
 
             # Add frame metadata
             frames_meta[str(frame_id)] = {
-                "video_id": video_id,
+                "video_id": source_key,
                 "frame_number": frame_idx,
                 "timestamp": 0.0,
                 "image_path": str(dest_path),
                 "is_approved": True,
                 "needs_review": False,
                 "source": source,
-                "import_id": import_id,  # Reference to imports.json
+                "import_id": import_id,
                 "original_filename": img_path.name,
-                "split": "train",  # FiftyOne doesn't track original split after filtering
+                "split": "train",
             }
 
             stats.images_imported += 1
 
-            # Process detections
+            # Process detections (only requested classes when classes_filter is set)
             detections = sample.ground_truth
             if detections is not None:
                 for det in detections.detections:
-                    # FiftyOne uses normalized [x, y, width, height] format
-                    # where x, y is top-left corner
+                    class_name = det.label
+                    if classes_filter is not None and class_name not in classes_filter:
+                        continue
                     x, y, w, h = det.bounding_box
-
-                    # Convert to normalized center format
                     cx = x + w / 2
                     cy = y + h / 2
 
-                    # Get or add class
-                    class_name = det.label
                     class_idx = self.project.add_class(class_name, source=source)
                     if class_name not in stats.classes_added:
                         stats.classes_added.append(class_name)
 
-                    # Generate annotation ID
                     ann_id = max([int(k) for k in annotations.keys()], default=0) + 1
                     now = datetime.utcnow()
 
@@ -345,15 +348,13 @@ class DataImporter:
 
             processed += 1
 
-            # Report progress
             if on_progress and processed % 50 == 0:
                 pct = progress_start + int(
                     (processed / total_samples) * (progress_end - progress_start)
                 )
                 on_progress("processing", pct, f"Processing images... {processed}/{total_samples}")
 
-        # Save everything
-        self.project.save_frames_meta(video_id, frames_meta)
+        self.project.save_frames_meta(source_key, frames_meta)
         self.project.save_annotations(annotations)
         self.project.frame_count += stats.images_imported
         self.project.save()
@@ -402,9 +403,10 @@ class DataImporter:
         }
         import_id = self.project.register_import(import_metadata)
 
+        # Local COCO keeps legacy integer video_id
         stats = self._process_coco_dataset(
             dataset_path=coco_path,
-            video_id=video_id,
+            source_key=video_id,  # int for local_coco
             source="local_coco",
             import_id=import_id,
             on_progress=on_progress,
@@ -419,7 +421,7 @@ class DataImporter:
     def _process_coco_dataset(
         self,
         dataset_path: Path,
-        video_id: int,
+        source_key: str | int,
         source: str,
         import_id: str,
         on_progress: Callable[[str, int, str], None] | None = None,
@@ -428,20 +430,19 @@ class DataImporter:
     ) -> ImportStats:
         """
         Process a COCO-format dataset directory.
-        
-        Handles both:
-        - Multi-split datasets (train/, valid/, test/ subdirectories)
-        - Single-split datasets (images + _annotations.coco.json in root)
+        source_key: string (e.g. roboflow_crane-hook_1) for new naming, or int video_id for legacy local_coco.
         """
         stats = ImportStats()
+        use_legacy_id = isinstance(source_key, int)
+        dir_key = str(source_key)
 
         # Load existing project data
         annotations = self.project.load_annotations()
-        frames_meta = self.project.load_frames_meta(video_id)
+        frames_meta = self.project.load_frames_meta(dir_key)
         existing_frame_count = len(frames_meta)
 
         # Ensure frames directory exists
-        frames_dir = self.project.frames_dir / str(video_id)
+        frames_dir = self.project.frames_dir / dir_key
         frames_dir.mkdir(parents=True, exist_ok=True)
 
         # Determine splits to process
@@ -512,24 +513,28 @@ class DataImporter:
                         processed_images += 1
                         continue
 
-                # Generate frame ID
+                # Generate frame ID (string for source_key, int for legacy)
                 frame_idx = existing_frame_count + stats.images_imported
-                frame_id = video_id * 1000000 + frame_idx
+                if use_legacy_id:
+                    frame_id = int(source_key) * 1000000 + frame_idx
+                    dest_path = frames_dir / f"{frame_id:08d}.jpg"
+                    meta_video_id: str | int = int(source_key)
+                else:
+                    frame_id = f"{source_key}_{frame_idx:06d}"
+                    dest_path = frames_dir / f"{frame_id}.jpg"
+                    meta_video_id = source_key
 
-                # Copy image to frames directory
-                dest_path = frames_dir / f"{frame_id:08d}.jpg"
                 shutil.copy(img_path, dest_path)
 
-                # Add frame metadata
                 frames_meta[str(frame_id)] = {
-                    "video_id": video_id,
+                    "video_id": meta_video_id,
                     "frame_number": frame_idx,
                     "timestamp": 0.0,
                     "image_path": str(dest_path),
                     "is_approved": True,
                     "needs_review": False,
                     "source": source,
-                    "import_id": import_id,  # Reference to imports.json
+                    "import_id": import_id,
                     "original_filename": img_filename,
                     "split": normalized_split,
                 }
@@ -580,7 +585,7 @@ class DataImporter:
                     on_progress("processing", pct, f"Processing images... {processed_images}/{total_images}")
 
         # Save everything
-        self.project.save_frames_meta(video_id, frames_meta)
+        self.project.save_frames_meta(dir_key, frames_meta)
         self.project.save_annotations(annotations)
         self.project.frame_count += stats.images_imported
         self.project.save()

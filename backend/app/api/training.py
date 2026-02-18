@@ -78,9 +78,12 @@ async def export_dataset(
                 with open(meta_path) as f:
                     frames_meta = json.load(f)
                 for frame_id, frame_data in frames_meta.items():
+                    # frame_id and video_id can be int (legacy) or str (source_key)
+                    fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
+                    vid = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
                     frames.append({
-                        "id": int(frame_id),
-                        "video_id": int(video_dir.name),
+                        "id": fid,
+                        "video_id": vid,
                         **frame_data,
                     })
 

@@ -1,7 +1,7 @@
 """Annotation-related Pydantic models."""
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ class BoundingBox(BaseModel):
 class AnnotationCreate(BaseModel):
     """Request to create an annotation."""
 
-    frame_id: int
+    frame_id: Union[int, str]
     class_label_id: int
     box: BoundingBox
     track_id: Optional[int] = None
@@ -42,7 +42,7 @@ class AnnotationInfo(BaseModel):
     """Annotation information response."""
 
     id: int
-    frame_id: int
+    frame_id: Union[int, str]
     class_label_id: int
     class_name: str
     class_color: str
@@ -64,7 +64,7 @@ class TrackInfo(BaseModel):
     class_label_id: int
     class_name: str
     class_color: str
-    video_id: int
+    video_id: Union[int, str]
     start_frame: int
     end_frame: int
     annotation_count: int
@@ -98,7 +98,7 @@ class ExemplarCreate(BaseModel):
     """Request to create an exemplar."""
 
     class_label_id: int
-    frame_id: int
+    frame_id: Union[int, str]
     box: BoundingBox
     exemplar_type: Literal["anchor", "correction"] = "anchor"
 
@@ -109,7 +109,7 @@ class ExemplarInfo(BaseModel):
     id: int
     class_label_id: int
     class_name: str
-    frame_id: int
+    frame_id: Union[int, str]
     box: BoundingBox
     exemplar_type: str
     created_at: datetime
@@ -118,10 +118,10 @@ class ExemplarInfo(BaseModel):
 class ProblemQueueItem(BaseModel):
     """An item in the problem queue for review."""
 
-    frame_id: int
+    frame_id: Union[int, str]
     frame_number: int
     timestamp: float
-    video_id: int
+    video_id: Union[int, str]
     problem_type: str  # 'box_jump', 'track_switch', 'rapid_appear_disappear'
     severity: float  # 0-1, higher = more likely a problem
     description: str

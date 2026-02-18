@@ -82,7 +82,7 @@ export default function AnnotatePage() {
 
   // Create annotation mutation
   const createAnnotationMutation = useMutation({
-    mutationFn: (data: { frame_id: number; class_label_id: number; box: BoundingBox }) =>
+    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
       api.annotations.create(projectName!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrame?.id] })
@@ -125,7 +125,7 @@ export default function AnnotatePage() {
   useEffect(() => {
     if (videos?.length && !currentVideo) {
       if (videoIdParam) {
-        const video = videos.find((v) => v.id === Number(videoIdParam))
+        const video = videos.find((v) => String(v.id) === String(videoIdParam))
         if (video) {
           setCurrentVideo(video)
           return
@@ -628,7 +628,7 @@ export default function AnnotatePage() {
           <select
             value={currentVideo?.id || ''}
             onChange={(e) => {
-              const video = videos?.find((v) => v.id === Number(e.target.value))
+              const video = videos?.find((v) => String(v.id) === String(e.target.value))
               if (video) {
                 setCurrentVideo(video)
                 setCurrentFrameIndex(0)

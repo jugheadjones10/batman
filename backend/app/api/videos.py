@@ -1,5 +1,6 @@
 """Video management API routes."""
 
+import json
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from backend.app.models.video import (
     VideoUploadResponse,
 )
 from backend.app.services.video_processor import VideoProcessor
+from src.core.project import Project
 
 router = APIRouter(prefix="/projects/{project_name}/videos", tags=["videos"])
 
@@ -36,20 +38,20 @@ async def list_videos(project_name: str):
     if not videos_dir.exists():
         return videos
 
-    # Load video metadata
+    # Load video metadata (keys: legacy "1","2" or new "video_1","video_2")
     meta_path = videos_dir / "videos.json"
     if meta_path.exists():
-        import json
         with open(meta_path) as f:
             videos_meta = json.load(f)
 
         for vid_id, vid_data in videos_meta.items():
-            # Count annotations for this video
-            annotation_count = _count_video_annotations(project_path, int(vid_id))
-            
+            annotation_count = _count_video_annotations(project_path, vid_id)
+            # id: string for API (video_1 or 1)
+            vid_id_out = vid_id if isinstance(vid_id, str) and not vid_id.isdigit() else int(vid_id)
+
             videos.append(
                 VideoInfo(
-                    id=int(vid_id),
+                    id=vid_id_out,
                     filename=vid_data["filename"],
                     width=vid_data["width"],
                     height=vid_data["height"],
@@ -85,7 +87,6 @@ async def upload_video(
     videos_dir.mkdir(exist_ok=True)
 
     # Load or create videos metadata
-    import json
     meta_path = videos_dir / "videos.json"
     if meta_path.exists():
         with open(meta_path) as f:
@@ -93,8 +94,9 @@ async def upload_video(
     else:
         videos_meta = {}
 
-    # Generate new video ID
-    video_id = max([int(k) for k in videos_meta.keys()], default=0) + 1
+    # New uploads use source_key (video_1, video_2)
+    project = Project.load(project_path)
+    video_id = project.get_next_video_source_key()
 
     # Save uploaded file
     video_path = videos_dir / f"{video_id}_{file.filename}"
@@ -112,7 +114,7 @@ async def upload_video(
         video_path.unlink()
         raise HTTPException(status_code=400, detail=f"Failed to process video: {e}")
 
-    # Create proxy video if requested
+    # Create proxy video if requested (video_id is e.g. video_1)
     proxy_path = None
     if create_proxy:
         proxy_path = videos_dir / f"{video_id}_proxy.mp4"
@@ -123,8 +125,8 @@ async def upload_video(
 
     now = datetime.utcnow()
 
-    # Save video metadata
-    videos_meta[str(video_id)] = {
+    # Save video metadata (key is source_key e.g. video_1)
+    videos_meta[video_id] = {
         "filename": file.filename,
         "original_path": str(video_path),
         "proxy_path": str(proxy_path) if proxy_path and proxy_path.exists() else None,
@@ -164,19 +166,20 @@ async def upload_video(
 
 
 @router.get("/{video_id}", response_model=VideoInfo)
-async def get_video(project_name: str, video_id: int):
-    """Get video details."""
+async def get_video(project_name: str, video_id: str):
+    """Get video details (video_id: video_1 or legacy 1)."""
     project_path = get_project_path(project_name)
     videos_meta = await _load_videos_meta(project_path)
 
-    if str(video_id) not in videos_meta:
+    if video_id not in videos_meta:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    vid_data = videos_meta[str(video_id)]
+    vid_data = videos_meta[video_id]
     annotation_count = _count_video_annotations(project_path, video_id)
-    
+    vid_id_out = video_id if not video_id.isdigit() else int(video_id)
+
     return VideoInfo(
-        id=video_id,
+        id=vid_id_out,
         filename=vid_data["filename"],
         width=vid_data["width"],
         height=vid_data["height"],
@@ -191,15 +194,15 @@ async def get_video(project_name: str, video_id: int):
 
 
 @router.get("/{video_id}/stream")
-async def stream_video(project_name: str, video_id: int, proxy: bool = True):
+async def stream_video(project_name: str, video_id: str, proxy: bool = True):
     """Stream video file (original or proxy)."""
     project_path = get_project_path(project_name)
     videos_meta = await _load_videos_meta(project_path)
 
-    if str(video_id) not in videos_meta:
+    if video_id not in videos_meta:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    vid_data = videos_meta[str(video_id)]
+    vid_data = videos_meta[video_id]
 
     if proxy and vid_data.get("proxy_path"):
         video_path = Path(vid_data["proxy_path"])
@@ -217,15 +220,15 @@ async def stream_video(project_name: str, video_id: int, proxy: bool = True):
 
 
 @router.get("/{video_id}/frame/{frame_number}")
-async def get_frame_image(project_name: str, video_id: int, frame_number: int):
+async def get_frame_image(project_name: str, video_id: str, frame_number: int):
     """Get a specific frame as JPEG."""
     project_path = get_project_path(project_name)
     videos_meta = await _load_videos_meta(project_path)
 
-    if str(video_id) not in videos_meta:
+    if video_id not in videos_meta:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    vid_data = videos_meta[str(video_id)]
+    vid_data = videos_meta[video_id]
     video_path = Path(vid_data["original_path"])
 
     if not video_path.exists():
@@ -244,7 +247,7 @@ async def get_frame_image(project_name: str, video_id: int, frame_number: int):
 @router.post("/{video_id}/extract-frames", response_model=list[FrameInfo])
 async def extract_frames(
     project_name: str,
-    video_id: int,
+    video_id: str,
     sampling: SamplingConfig = None,
     start_time: Optional[float] = None,
     end_time: Optional[float] = None,
@@ -256,20 +259,18 @@ async def extract_frames(
     project_path = get_project_path(project_name)
     videos_meta = await _load_videos_meta(project_path)
 
-    if str(video_id) not in videos_meta:
+    if video_id not in videos_meta:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    vid_data = videos_meta[str(video_id)]
+    vid_data = videos_meta[video_id]
     video_path = Path(vid_data["original_path"])
 
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    # Create frames directory
-    frames_dir = project_path / "frames" / str(video_id)
+    frames_dir = project_path / "frames" / video_id
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extract frames
     extracted = await VideoProcessor.extract_frames(
         video_path,
         frames_dir,
@@ -279,18 +280,27 @@ async def extract_frames(
         end_time=end_time,
     )
 
-    # Save frames metadata
-    import json
+    # New source_key (video_1) uses string frame_id; legacy (1) uses int
+    use_string_frame_id = video_id.startswith("video_")
     frames_meta = {}
     frame_infos = []
 
     for i, frame_data in enumerate(extracted):
-        frame_id = video_id * 1000000 + i  # Unique frame ID
+        if use_string_frame_id:
+            frame_id = f"{video_id}_{i:06d}"
+            new_path = frames_dir / f"{frame_id}.jpg"
+            old_path = Path(frame_data["image_path"])
+            if old_path.exists():
+                old_path.rename(new_path)
+            image_path = str(new_path)
+        else:
+            frame_id = int(video_id) * 1000000 + i
+            image_path = frame_data["image_path"]
         frames_meta[str(frame_id)] = {
             "video_id": video_id,
             "frame_number": frame_data["frame_number"],
             "timestamp": frame_data["timestamp"],
-            "image_path": frame_data["image_path"],
+            "image_path": image_path,
             "is_approved": False,
             "needs_review": True,
         }
@@ -300,7 +310,7 @@ async def extract_frames(
                 video_id=video_id,
                 frame_number=frame_data["frame_number"],
                 timestamp=frame_data["timestamp"],
-                image_path=frame_data["image_path"],
+                image_path=image_path,
                 is_approved=False,
                 needs_review=True,
             )
@@ -310,13 +320,11 @@ async def extract_frames(
     with open(meta_path, "w") as f:
         json.dump(frames_meta, f, indent=2)
 
-    # Update video metadata
-    videos_meta[str(video_id)]["frame_count"] = len(extracted)
+    videos_meta[video_id]["frame_count"] = len(extracted)
     videos_meta_path = project_path / "videos" / "videos.json"
     with open(videos_meta_path, "w") as f:
         json.dump(videos_meta, f, indent=2)
 
-    # Update project config
     config = load_project_config(project_path)
     config["frame_count"] = config.get("frame_count", 0) + len(extracted)
     config["updated_at"] = datetime.utcnow().isoformat()
@@ -328,15 +336,14 @@ async def extract_frames(
 
 
 @router.get("/{video_id}/frames", response_model=list[FrameInfo])
-async def list_frames(project_name: str, video_id: int):
+async def list_frames(project_name: str, video_id: str):
     """List all extracted frames for a video."""
     project_path = get_project_path(project_name)
-    frames_dir = project_path / "frames" / str(video_id)
+    frames_dir = project_path / "frames" / video_id
 
     if not frames_dir.exists():
         return []
 
-    import json
     meta_path = frames_dir / "frames.json"
     if not meta_path.exists():
         return []
@@ -346,7 +353,7 @@ async def list_frames(project_name: str, video_id: int):
 
     return [
         FrameInfo(
-            id=int(frame_id),
+            id=frame_id if isinstance(frame_id, str) and not frame_id.isdigit() else int(frame_id),
             video_id=frame_data["video_id"],
             frame_number=frame_data["frame_number"],
             timestamp=frame_data["timestamp"],
@@ -359,17 +366,16 @@ async def list_frames(project_name: str, video_id: int):
 
 
 @router.delete("/{video_id}")
-async def delete_video(project_name: str, video_id: int):
+async def delete_video(project_name: str, video_id: str):
     """Delete a video and its frames."""
     project_path = get_project_path(project_name)
     videos_meta = await _load_videos_meta(project_path)
 
-    if str(video_id) not in videos_meta:
+    if video_id not in videos_meta:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    vid_data = videos_meta[str(video_id)]
+    vid_data = videos_meta[video_id]
 
-    # Delete video files
     video_path = Path(vid_data["original_path"])
     if video_path.exists():
         video_path.unlink()
@@ -379,28 +385,21 @@ async def delete_video(project_name: str, video_id: int):
         if proxy_path.exists():
             proxy_path.unlink()
 
-    # Delete frames
-    frames_dir = project_path / "frames" / str(video_id)
+    frames_dir = project_path / "frames" / video_id
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
 
-    # Update metadata
-    del videos_meta[str(video_id)]
+    del videos_meta[video_id]
     videos_meta_path = project_path / "videos" / "videos.json"
-
-    import json
     with open(videos_meta_path, "w") as f:
         json.dump(videos_meta, f, indent=2)
 
     logger.info(f"Deleted video {video_id}")
-
     return {"message": "Video deleted"}
 
 
 async def _load_videos_meta(project_path: Path) -> dict:
     """Load videos metadata."""
-    import json
-
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -412,11 +411,8 @@ async def _load_videos_meta(project_path: Path) -> dict:
         return json.load(f)
 
 
-def _count_video_annotations(project_path: Path, video_id: int) -> int:
+def _count_video_annotations(project_path: Path, video_id: str | int) -> int:
     """Count total annotations for a video across all its frames."""
-    import json
-    
-    # Get all frame IDs for this video
     frames_dir = project_path / "frames" / str(video_id)
     if not frames_dir.exists():
         return 0
@@ -427,21 +423,20 @@ def _count_video_annotations(project_path: Path, video_id: int) -> int:
     
     with open(frames_meta_path) as f:
         frames_meta = json.load(f)
-    
-    frame_ids = set(int(fid) for fid in frames_meta.keys())
-    
-    # Count annotations for these frames - annotations are in labels/current/
+
+    # frame_id in annotations may be int (legacy) or str (source_key_000042)
+    frame_ids = set(frames_meta.keys())
+
     annotations_path = project_path / "labels" / "current" / "annotations.json"
     if not annotations_path.exists():
         return 0
-    
+
     with open(annotations_path) as f:
         annotations = json.load(f)
-    
+
     total = 0
     for ann in annotations.values():
-        if ann.get("frame_id") in frame_ids:
+        if str(ann.get("frame_id")) in frame_ids:
             total += 1
-    
     return total
 

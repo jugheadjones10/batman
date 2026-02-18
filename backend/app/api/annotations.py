@@ -67,7 +67,7 @@ def _save_tracks_meta(project_path: Path, data: dict):
 
 
 @router.get("/frames/{frame_id}/annotations", response_model=list[AnnotationInfo])
-async def list_frame_annotations(project_name: str, frame_id: int):
+async def list_frame_annotations(project_name: str, frame_id: str):
     """List all annotations for a frame."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
@@ -82,7 +82,7 @@ async def list_frame_annotations(project_name: str, frame_id: int):
 
     annotations = []
     for ann_id, ann_data in annotations_meta.items():
-        if ann_data.get("frame_id") != frame_id:
+        if str(ann_data.get("frame_id")) != str(frame_id):
             continue
 
         class_id = ann_data.get("class_label_id", 0)
@@ -266,8 +266,8 @@ async def delete_annotation(project_name: str, annotation_id: int):
 
 
 @router.get("/videos/{video_id}/tracks", response_model=list[TrackInfo])
-async def list_tracks(project_name: str, video_id: int):
-    """List all tracks for a video."""
+async def list_tracks(project_name: str, video_id: str):
+    """List all tracks for a video (video_id: video_1 or legacy 1)."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -280,7 +280,7 @@ async def list_tracks(project_name: str, video_id: int):
 
     tracks = []
     for track_id, track_data in tracks_meta.items():
-        if track_data.get("video_id") != video_id:
+        if str(track_data.get("video_id")) != str(video_id):
             continue
 
         class_id = track_data.get("class_label_id", 0)
@@ -457,7 +457,7 @@ async def merge_tracks(project_name: str, data: TrackMergeRequest):
 
 
 @router.get("/problem-queue", response_model=list[ProblemQueueItem])
-async def get_problem_queue(project_name: str, video_id: Optional[int] = None):
+async def get_problem_queue(project_name: str, video_id: Optional[str] = None):
     """Get the problem queue for review acceleration."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
@@ -466,10 +466,9 @@ async def get_problem_queue(project_name: str, video_id: Optional[int] = None):
     tracks_meta = _load_tracks_meta(project_path)
     annotations_meta = _load_annotations_meta(project_path)
 
-    # Build track data for problem detection
     tracks_data = []
     for track_id, track_data in tracks_meta.items():
-        if video_id is not None and track_data.get("video_id") != video_id:
+        if video_id is not None and str(track_data.get("video_id")) != str(video_id):
             continue
 
         # Collect boxes for this track
@@ -498,7 +497,7 @@ async def get_problem_queue(project_name: str, video_id: Optional[int] = None):
             frame_id=0,  # Would need proper mapping
             frame_number=p["frame_number"],
             timestamp=0.0,  # Would need proper mapping
-            video_id=video_id or 0,
+            video_id=video_id if video_id is not None else 0,
             problem_type=p["problem_type"],
             severity=p["severity"],
             description=p["description"],
