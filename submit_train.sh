@@ -47,8 +47,11 @@ PREPARE_ONLY=false
 NUM_GPUS=1
 FILTER_CLASSES=""
 MAX_FRAMES_PER_CLASS=""
+SOURCES=""
+MANUAL_SPLIT_STRATEGY=""
 INFER_AFTER=false
 INFER_TEST_ONLY=false
+LABEL=""
 EXTRA_ARGS=""
 
 #-------------------------------------------------------------------------------
@@ -77,10 +80,16 @@ show_help() {
     echo "  --lr=RATE           Learning rate (default: 1e-4)"
     echo "  --patience=N        Early stopping patience (default: 10)"
     echo "  --model=SIZE        Model size: base, large (default: base)"
-    echo "  --output-dir=PATH   Output directory for run"
+    echo "  --label=NAME        Label appended to run name (e.g. rfdetr_h100-96_..._my-label)"
+    echo "  --output-dir=PATH   Output directory for run (overrides auto-naming)"
     echo "  --filter-classes=NAMES  Only train on specific classes (pipe-separated)"
     echo "                          Example: --filter-classes='crane hook|crane-hook'"
     echo "  --max-frames-per-class=N  Cap frames per class (random sample, deterministic)"
+    echo "  --sources=TYPES         Data sources to include (comma-separated)"
+    echo "                          Valid: manual_data, imports (excludes video frames)"
+    echo "                          Example: --sources=manual_data"
+    echo "  --manual-split=STRATEGY How to split manual data (default: train_only)"
+    echo "                          Options: proportional, val_only, train_only, all_splits"
     echo ""
     echo "SLURM Options:"
     echo "  --partition=NAME    SLURM partition (auto-detected if not set)"
@@ -111,10 +120,13 @@ while [[ $# -gt 0 ]]; do
         --project=*)    PROJECT_DIR="${arg#*=}"; shift ;;
         --project)      PROJECT_DIR="$2"; shift 2 ;;
         --output-dir=*) OUTPUT_DIR="${arg#*=}"; shift ;;
+        --label=*)      LABEL="${arg#*=}"; shift ;;
         --model=*)      MODEL="${arg#*=}"; shift ;;
         --time=*)       TIME="${arg#*=}"; shift ;;
         --filter-classes=*) FILTER_CLASSES="${arg#*=}"; shift ;;
         --max-frames-per-class=*) MAX_FRAMES_PER_CLASS="${arg#*=}"; shift ;;
+        --sources=*)        SOURCES="${arg#*=}"; shift ;;
+        --manual-split=*)   MANUAL_SPLIT_STRATEGY="${arg#*=}"; shift ;;
         --prepare-only) PREPARE_ONLY=true; shift ;;
         --infer-after)  INFER_AFTER=true; shift ;;
         --infer-test-only) INFER_TEST_ONLY=true; shift ;;
@@ -218,7 +230,11 @@ fi
 # Generate output directory (under project by default)
 if [ -z "$OUTPUT_DIR" ]; then
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    OUTPUT_DIR="${PROJECT_DIR}/runs/rfdetr_${GPU_TYPE}_${TIMESTAMP}"
+    RUN_NAME="rfdetr_${GPU_TYPE}_${TIMESTAMP}"
+    if [ -n "$LABEL" ]; then
+        RUN_NAME="${RUN_NAME}_${LABEL}"
+    fi
+    OUTPUT_DIR="${PROJECT_DIR}/runs/${RUN_NAME}"
 fi
 
 # Generate dataset output directory (under project by default)
@@ -320,6 +336,16 @@ if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
     MAX_FRAMES_ARG="--max-frames-per-class ${MAX_FRAMES_PER_CLASS}"
 fi
 
+SOURCES_ARG=""
+if [ -n "${SOURCES}" ]; then
+    SOURCES_ARG="--sources ${SOURCES}"
+fi
+
+MANUAL_SPLIT_ARG=""
+if [ -n "${MANUAL_SPLIT_STRATEGY}" ]; then
+    MANUAL_SPLIT_ARG="--manual-split-strategy ${MANUAL_SPLIT_STRATEGY}"
+fi
+
 # Add the training command
 if [ "$PREPARE_ONLY" = true ]; then
     cat >> "$SLURM_SCRIPT" << EOF
@@ -332,6 +358,8 @@ python3 -m cli.train \\
     --prepare-only \\
     ${FILTER_ARG} \\
     ${MAX_FRAMES_ARG} \\
+    ${SOURCES_ARG} \\
+    ${MANUAL_SPLIT_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -356,6 +384,8 @@ echo "\$PROJECT_CLASSES"
 echo ""
 FILTER_DISPLAY="${FILTER_CLASSES:-all classes}"
 echo "Training on:   \$FILTER_DISPLAY"
+echo "  Sources:     ${SOURCES:-all}"
+echo "  Manual split: ${MANUAL_SPLIT_STRATEGY:-train_only}"
 echo ""
 
 echo "Starting training..."
@@ -382,6 +412,8 @@ torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
     --num-workers 8 \\
     ${FILTER_ARG} \\
     ${MAX_FRAMES_ARG} \\
+    ${SOURCES_ARG} \\
+    ${MANUAL_SPLIT_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -402,6 +434,8 @@ python3 -m cli.train \\
     --num-workers 8 \\
     ${FILTER_ARG} \\
     ${MAX_FRAMES_ARG} \\
+    ${SOURCES_ARG} \\
+    ${MANUAL_SPLIT_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -472,6 +506,12 @@ echo "Time:         ${TIME}"
 echo "Batch Size:   ${BATCH_SIZE}"
 if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
 echo "Max frames/class: ${MAX_FRAMES_PER_CLASS}"
+fi
+if [ -n "${SOURCES}" ]; then
+echo "Sources:      ${SOURCES}"
+fi
+if [ -n "${MANUAL_SPLIT_STRATEGY}" ]; then
+echo "Manual split: ${MANUAL_SPLIT_STRATEGY}"
 fi
 echo "Output Dir:   ${OUTPUT_DIR}"
 if [ "$INFER_AFTER" = true ]; then

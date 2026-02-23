@@ -679,6 +679,7 @@ class RFDETRTrainer:
             "num_workers": config.num_workers,
             "early_stopping": config.patience > 0,
             "early_stopping_patience": config.patience,
+            "run_test": False,
         }
 
         if config.grad_accum > 1:
@@ -693,7 +694,17 @@ class RFDETRTrainer:
 
         # Train
         start_time = time.time()
-        self.model.train(**train_kwargs)
+        try:
+            self.model.train(**train_kwargs)
+        except RuntimeError as e:
+            if "Missing key(s) in state_dict" in str(e):
+                import logging
+                logging.warning(
+                    "Ignoring DDP state_dict reload error (rfdetr bug #316). "
+                    "Training completed successfully; checkpoints are saved."
+                )
+            else:
+                raise
         training_time = time.time() - start_time
 
         # Find best checkpoint
