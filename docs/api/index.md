@@ -1,6 +1,6 @@
 # API Reference
 
-Batman provides a REST API for project management, video processing, annotation, training, and inference.
+Batman provides a REST API for project management, manual data (folder-based images), annotation, training, and inference.
 
 ## Base URL
 
@@ -61,6 +61,31 @@ Content-Type: application/json
 ```http
 DELETE /api/projects/{name}
 ```
+
+### Manual Data
+
+Images placed in `project_root/manual_data/` can be synced and used for annotation.
+
+#### Sync Manual Data
+```http
+POST /api/projects/{name}/manual-data/sync
+```
+
+Scans the `manual_data/` folder for images (jpg, png, webp, bmp) and updates `frames/manual_data/frames.json`. Returns `{ images_found, images_added, images_removed, total }`.
+
+#### List Images
+```http
+GET /api/projects/{name}/manual-data/images?offset=0&limit=500
+```
+
+Returns paginated list of images with `{ total, offset, limit, images: [{ filename, frame_id, width, height, annotation_count, url }] }`.
+
+#### Get Image
+```http
+GET /api/projects/{name}/manual-data/image/{filename}
+```
+
+Serves an image file from the `manual_data/` folder.
 
 ### Videos
 
@@ -237,13 +262,21 @@ Content-Type: application/json
 
 {
   "format": "coco",
-  "split": {
-    "train": 0.7,
-    "val": 0.15,
-    "test": 0.15
-  }
+  "include_unapproved": false,
+  "split_by_video": true,
+  "data_sources": ["manual_data", "imports"],
+  "manual_data_split_strategy": "proportional"
 }
 ```
+
+**Data Sources** -- Only `manual_data` and `imports` are valid training sources. Video frames are always excluded from training exports.
+
+- `data_sources`: Array of sources to include. Defaults to both `["manual_data", "imports"]` when omitted or `null`.
+- `manual_data_split_strategy`: Controls how manual data is distributed across train/val/test splits:
+    - `"proportional"` (default) -- Distribute across all splits proportionally
+    - `"val_only"` -- All manual data goes to the validation set (useful for honest evaluation with human-annotated ground truth)
+    - `"train_only"` -- All manual data goes to the training set
+    - `"all_splits"` -- Manual data is duplicated into every split
 
 #### Start Training
 ```http
@@ -251,10 +284,14 @@ POST /api/projects/{name}/training/start
 Content-Type: application/json
 
 {
-  "dataset_path": "datasets/my_dataset",
-  "model": "base",
-  "epochs": 50,
-  "batch_size": 8
+  "name": "my-run",
+  "label_iteration_id": 0,
+  "config": {
+    "base_model": "rfdetr-b",
+    "epochs": 50,
+    "batch_size": 8,
+    "image_size": 640
+  }
 }
 ```
 

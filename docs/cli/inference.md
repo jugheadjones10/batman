@@ -91,9 +91,9 @@ Device for inference.
 
 #### `--confidence THRESHOLD` or `-t THRESHOLD`
 
-Confidence threshold for detections.
+Minimum confidence to include (default: `0.0` = show all; each box labeled with its confidence).
 
-- **Default**: `0.5`
+- **Default**: `0.0`
 - **Range**: `0.0` to `1.0`
 
 ### Optimization
@@ -169,7 +169,7 @@ data/projects/CraneHook/
   "video_id": "video_1",
   "created_at": "2026-02-20T...",
   "config": {
-    "confidence_threshold": 0.5,
+    "confidence_threshold": 0.0,
     "frame_interval": 1,
     "tracking": true,
     "tracking_mode": "bytetrack"
@@ -245,14 +245,14 @@ python -m cli.inference \
 
 1. **Enable Tracking for Videos**: `--track --track-buffer 30`
 2. **Skip Frames for Speed**: `--frame-interval 5 --track`
-3. **Tune Confidence**: Start at 0.5, adjust based on results
+3. **Filter by Confidence**: Default 0.0 shows all; use e.g. `--confidence 0.5` to filter low-confidence detections
 4. **Use Model Optimization**: Enabled by default (disable with `--no-optimize` only on errors)
 
 ## Troubleshooting
 
 ### No Detections
 
-- Lower confidence: `--confidence 0.3`
+- Lower threshold: `--confidence 0.0` (default) or `--confidence 0.3`
 - Verify class names match training (check `class_info.json` in run directory)
 - Confirm correct training run
 

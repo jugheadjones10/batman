@@ -1,12 +1,12 @@
 # Batman Documentation
 
-**Local Video Auto-Label → Human Correct → Fine-Tune Real-Time Detector**
+**Manual Image Annotation → Fine-Tune Real-Time Detector**
 
 Welcome to the Batman documentation! This guide covers all CLI tools, SLURM scripts, and workflows for training real-time object detectors.
 
 ## What is Batman?
 
-Batman is a localhost application that turns videos and object descriptions into a fine-tuned real-time detector. It uses **SAM3** (Segment Anything Model 3) as a label generator with text prompts, exemplar prompting, and built-in tracking. It provides a Roboflow-style review UI for corrections and fine-tunes smaller base models (YOLO11 or RF-DETR) for fast inference on new videos.
+Batman is a localhost application that turns annotated images into a fine-tuned real-time detector. You place images in a project's `manual_data/` folder, draw bounding boxes in a Label Studio-style UI, and fine-tune base models (YOLO11 or RF-DETR) for fast inference. It provides a streamlined annotation workflow and training pipeline.
 
 ## Quick Links
 
@@ -34,9 +34,8 @@ Batman is a localhost application that turns videos and object descriptions into
 
 ## Key Features
 
-- **Auto-labeling with SAM3**: Automatically generate bounding box annotations
-- **Smart Tracking**: Link detections across frames with occlusion handling
-- **Human-in-the-loop Review**: Fix boxes, adjust classes, split/merge tracks
+- **Manual Data Folder**: Place images in `project_root/manual_data/` and sync to load
+- **Label Studio-style Annotation UI**: Draw bounding boxes, assign classes, navigate with thumbnails
 - **Model Fine-tuning**: Train YOLO11 or RF-DETR on your labeled data
 - **Real-time Inference**: Test models with live tracking overlay
 - **GPU Benchmarking**: Test performance across different GPU types

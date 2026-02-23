@@ -282,9 +282,8 @@ async def get_classes_with_details(project_name: str):
     class_sources = config.get("class_sources", {})
     
     # Load frames metadata to identify which frames are from which source
-    frames_by_source = {}  # frame_id -> source
+    frames_by_source = {}  # frame_id (str) -> source
     
-    # Check all video directories (negative video_ids are imports, positive are real videos)
     frames_dir = project_path / "frames"
     if frames_dir.exists():
         for video_dir in frames_dir.iterdir():
@@ -295,11 +294,10 @@ async def get_classes_with_details(project_name: str):
                         frames_meta = json.load(f)
                     for frame_id, meta in frames_meta.items():
                         source = meta.get("source", "video")
-                        frames_by_source[int(frame_id)] = source
+                        frames_by_source[frame_id] = source
     
     # Count annotations per class, broken down by source
     annotations_path = project_path / "labels" / "current" / "annotations.json"
-    # Structure: {class_id: {"total": N, "sources": {"roboflow": N, "video": N, ...}}}
     class_stats = {i: {"total": 0, "sources": {}} for i in range(len(classes))}
     
     if annotations_path.exists():
@@ -311,17 +309,18 @@ async def get_classes_with_details(project_name: str):
                 continue
             
             frame_id = ann.get("frame_id", 0)
-            # Determine source: check annotation source first, then frame source
+            frame_id_str = str(frame_id)
             ann_source = ann.get("source", "manual")
             if ann_source in ("roboflow", "local_coco"):
                 source = ann_source
-            elif frame_id in frames_by_source:
-                source = frames_by_source[frame_id]
-            elif frame_id < 0:
-                # Negative frame IDs are from imports
+            elif frame_id_str in frames_by_source:
+                source = frames_by_source[frame_id_str]
+            elif isinstance(frame_id_str, str) and frame_id_str.startswith("manual_data"):
+                source = "manual_data"
+            elif isinstance(frame_id, (int, float)) and frame_id < 0:
                 source = "roboflow" if frame_id >= -1000000 else "local_coco"
             else:
-                source = "video"
+                source = ann_source
             
             class_stats[class_id]["total"] += 1
             class_stats[class_id]["sources"][source] = class_stats[class_id]["sources"].get(source, 0) + 1

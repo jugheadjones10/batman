@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from backend.app.api import annotations, imports, inference, labeling, projects, training, videos
+from backend.app.api import annotations, imports, inference, labeling, manual_data, projects, training, videos
 from backend.app.config import settings
 
 app = FastAPI(
@@ -32,6 +32,7 @@ app.include_router(labeling.router, prefix="/api")
 app.include_router(training.router, prefix="/api")
 app.include_router(inference.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
+app.include_router(manual_data.router, prefix="/api")
 
 
 @app.get("/api/health")

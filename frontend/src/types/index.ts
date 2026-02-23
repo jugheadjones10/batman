@@ -39,6 +39,15 @@ export interface Video {
   created_at: string
 }
 
+export interface ManualDataImage {
+  filename: string
+  frame_id: string
+  width: number
+  height: number
+  annotation_count: number
+  url: string
+}
+
 export interface Frame {
   id: number | string
   video_id: number | string
@@ -101,6 +110,17 @@ export interface TrainingConfig {
   freeze_backbone: boolean
   mixed_precision: boolean
   early_stopping_patience: number
+}
+
+export type DataSource = 'manual_data' | 'imports'
+export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'all_splits'
+
+export interface DatasetExportConfig {
+  format?: 'yolo' | 'coco' | 'both'
+  include_unapproved?: boolean
+  split_by_video?: boolean
+  data_sources?: DataSource[] | null
+  manual_data_split_strategy?: ManualDataSplitStrategy
 }
 
 export interface TrainingRun {
@@ -176,9 +196,11 @@ export interface InferenceResult {
 export interface InferenceResultSummary {
   run_name: string
   video_id: string
+  inference_id: string
   created_at: string
   config: {
     confidence_threshold: number
+    iou_threshold?: number
     frame_interval: number
     tracking: boolean
     tracking_mode: string
@@ -195,6 +217,6 @@ export interface InferenceResultSummary {
 export interface InferenceResultMatrix {
   runs: string[]
   videos: string[]
-  results: Record<string, Record<string, InferenceResultSummary | null>>
+  results: Record<string, Record<string, InferenceResultSummary[] | null>>
 }
 

@@ -401,9 +401,13 @@ async def list_imported_datasets(project_name: str):
         with open(videos_json) as f:
             videos_meta = json.load(f)
 
+    config = load_project_config(project_path)
+    classes = config.get("classes", [])
+
     # Build frame_id -> dir_name for annotation counts (frame_id may be int or str)
     frame_to_video: dict[str, str] = {}
     annotations_by_video: dict[str, int] = {}
+    classes_by_video: dict[str, set[int]] = {}
     if frames_dir.exists() and annotations_path.exists():
         with open(annotations_path) as f:
             annotations = json.load(f)
@@ -422,6 +426,8 @@ async def list_imported_datasets(project_name: str):
             vid = frame_to_video.get(fid)
             if vid is not None:
                 annotations_by_video[vid] = annotations_by_video.get(vid, 0) + 1
+                class_id = ann.get("class_label_id", 0)
+                classes_by_video.setdefault(vid, set()).add(class_id)
 
     # Load imports metadata for source_key -> source type
     imports_metadata = {}
@@ -441,6 +447,8 @@ async def list_imported_datasets(project_name: str):
 
     for video_dir in frames_dir.iterdir():
         if not video_dir.is_dir() or video_dir.name in videos_meta:
+            continue
+        if video_dir.name == "manual_data":
             continue
         meta_path = video_dir / "frames.json"
         if not meta_path.exists():
@@ -465,12 +473,15 @@ async def list_imported_datasets(project_name: str):
         ]
 
         vid_out = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
+        class_ids = sorted(classes_by_video.get(video_dir.name, set()))
+        class_names = [classes[cid] if cid < len(classes) else f"class_{cid}" for cid in class_ids]
         datasets.append({
             "video_id": vid_out,
             "source": source or "unknown",
             "image_count": len(frames_meta),
             "annotation_count": annotations_by_video.get(video_dir.name, 0),
             "sample_images": sample_urls,
+            "classes": class_names,
         })
 
     return datasets
@@ -485,9 +496,19 @@ async def get_imported_image(project_name: str, video_id: str, filename: str):
 
     image_path = project_path / "frames" / video_id / filename
     if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
+        if video_id == "manual_data":
+            image_path = project_path / "manual_data" / filename
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail="Image not found")
 
-    return FileResponse(image_path, media_type="image/jpeg")
+    suffix = image_path.suffix.lower()
+    media_type = {
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }.get(suffix, "image/jpeg")
+
+    return FileResponse(image_path, media_type=media_type)
 
 
 @router.get("/images/{video_id}")

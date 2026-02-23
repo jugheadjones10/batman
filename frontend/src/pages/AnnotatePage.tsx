@@ -1,20 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   SkipBack,
   SkipForward,
   ChevronLeft,
   ChevronRight,
-  Wand2,
-  Loader2,
   Trash2,
+  ArrowLeft,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
-import { useToast } from '@/components/ui/Toaster'
 import { useStore } from '@/store/useStore'
-import { cn, formatDuration } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import type { Annotation, BoundingBox } from '@/types'
 
 type DragMode = 'none' | 'draw' | 'move' | 'resize'
@@ -22,24 +20,18 @@ type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se' | null
 
 export default function AnnotatePage() {
   const { projectName } = useParams<{ projectName: string }>()
-  const [searchParams] = useSearchParams()
-  const videoIdParam = searchParams.get('video')
   const queryClient = useQueryClient()
-  const { toast } = useToast()
 
-  const {
-    currentVideo,
-    setCurrentVideo,
-    currentFrameIndex,
-    setCurrentFrameIndex,
-    selectedAnnotationId,
-    setSelectedAnnotation,
-    selectedClassId,
-    setSelectedClassId,
-  } = useStore()
+  const currentImageIndex = useStore((s) => s.currentImageIndex)
+  const setCurrentImageIndex = useStore((s) => s.setCurrentImageIndex)
+  const selectedAnnotationId = useStore((s) => s.selectedAnnotationId)
+  const setSelectedAnnotation = useStore((s) => s.setSelectedAnnotation)
+  const selectedClassId = useStore((s) => s.selectedClassId)
+  const setSelectedClassId = useStore((s) => s.setSelectedClassId)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const thumbnailStripRef = useRef<HTMLDivElement>(null)
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
 
   // Drag state
@@ -57,27 +49,21 @@ export default function AnnotatePage() {
     enabled: !!projectName,
   })
 
-  // Fetch videos
-  const { data: videos } = useQuery({
-    queryKey: ['videos', projectName],
-    queryFn: () => api.videos.list(projectName!),
+  // Fetch manual data images
+  const { data: manualData } = useQuery({
+    queryKey: ['manual-data-images', projectName],
+    queryFn: () => api.manualData.listImages(projectName!, 0, 500),
     enabled: !!projectName,
   })
 
-  // Fetch frames for current video
-  const { data: frames } = useQuery({
-    queryKey: ['frames', projectName, currentVideo?.id],
-    queryFn: () => api.videos.getFrames(projectName!, currentVideo!.id),
-    enabled: !!projectName && !!currentVideo,
-  })
+  const images = manualData?.images ?? []
+  const currentImage = images[currentImageIndex]
 
-  const currentFrame = frames?.[currentFrameIndex]
-
-  // Fetch annotations for current frame
+  // Fetch annotations for current image (frame_id)
   const { data: annotations } = useQuery({
-    queryKey: ['annotations', projectName, currentFrame?.id],
-    queryFn: () => api.annotations.listForFrame(projectName!, currentFrame!.id),
-    enabled: !!projectName && !!currentFrame,
+    queryKey: ['annotations', projectName, currentImage?.frame_id],
+    queryFn: () => api.annotations.listForFrame(projectName!, currentImage!.frame_id),
+    enabled: !!projectName && !!currentImage,
   })
 
   // Create annotation mutation
@@ -85,16 +71,26 @@ export default function AnnotatePage() {
     mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
       api.annotations.create(projectName!, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrame?.id] })
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
     },
   })
 
   // Update annotation mutation
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box }: { id: number; box: BoundingBox }) =>
-      api.annotations.update(projectName!, id, { box }),
+    mutationFn: ({ id, box, class_label_id }: { id: number; box?: BoundingBox; class_label_id?: number }) =>
+      api.annotations.update(projectName!, id, { ...(box && { box }), ...(class_label_id !== undefined && { class_label_id }) }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrame?.id] })
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
+    },
+  })
+
+  // Update annotation class mutation
+  const updateAnnotationClassMutation = useMutation({
+    mutationFn: ({ id, class_label_id }: { id: number; class_label_id: number }) =>
+      api.annotations.update(projectName!, id, { class_label_id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
     },
   })
 
@@ -102,45 +98,37 @@ export default function AnnotatePage() {
   const deleteAnnotationMutation = useMutation({
     mutationFn: (id: number) => api.annotations.delete(projectName!, id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrame?.id] })
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
       setSelectedAnnotation(null)
     },
   })
 
-  // Auto-label mutation
-  const autoLabelMutation = useMutation({
-    mutationFn: () =>
-      api.labeling.autoLabel(projectName!, {
-        video_ids: currentVideo ? [currentVideo.id] : undefined,
-      }),
-    onSuccess: (data) => {
-      toast({ title: 'Auto-labeling started', description: `Job ID: ${data.job_id}` })
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Auto-labeling failed', description: error.message, type: 'error' })
-    },
-  })
+  const updateClassMutateRef = useRef(updateAnnotationClassMutation.mutate)
+  updateClassMutateRef.current = updateAnnotationClassMutation.mutate
 
-  // Set video from URL param or first video as current if none selected
-  useEffect(() => {
-    if (videos?.length && !currentVideo) {
-      if (videoIdParam) {
-        const video = videos.find((v) => String(v.id) === String(videoIdParam))
-        if (video) {
-          setCurrentVideo(video)
-          return
-        }
-      }
-      setCurrentVideo(videos[0])
+  // Select a class: always update the active class, AND re-label the selected annotation if one exists
+  const handleSelectClass = useCallback((classIndex: number) => {
+    setSelectedClassId(classIndex)
+    const selId = useStore.getState().selectedAnnotationId
+    if (selId !== null) {
+      updateClassMutateRef.current({ id: selId, class_label_id: classIndex })
     }
-  }, [videos, currentVideo, setCurrentVideo, videoIdParam])
+  }, [setSelectedClassId])
 
-  // Update canvas size
+  // Clamp currentImageIndex when images change
+  useEffect(() => {
+    if (images.length > 0 && currentImageIndex >= images.length) {
+      setCurrentImageIndex(Math.max(0, images.length - 1))
+    }
+  }, [images.length, currentImageIndex, setCurrentImageIndex])
+
+  // Update canvas size based on current image dimensions
   useEffect(() => {
     const updateSize = () => {
-      if (containerRef.current && currentVideo) {
+      if (containerRef.current && currentImage && currentImage.width > 0 && currentImage.height > 0) {
         const container = containerRef.current
-        const aspectRatio = currentVideo.width / currentVideo.height
+        const aspectRatio = currentImage.width / currentImage.height
         const maxWidth = container.clientWidth - 16
         const maxHeight = container.clientHeight - 16
 
@@ -159,7 +147,7 @@ export default function AnnotatePage() {
     updateSize()
     window.addEventListener('resize', updateSize)
     return () => window.removeEventListener('resize', updateSize)
-  }, [currentVideo])
+  }, [currentImage])
 
   const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
@@ -167,7 +155,7 @@ export default function AnnotatePage() {
   const drawAnnotations = useCallback(() => {
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
-    if (!canvas || !ctx || !currentVideo) return
+    if (!canvas || !ctx || !currentImage) return
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
@@ -183,7 +171,7 @@ export default function AnnotatePage() {
       const color = colors[selectedClassId % colors.length]
       drawBox(ctx, drawingBox, color, true)
     }
-  }, [annotations, selectedAnnotationId, drawingBox, currentVideo, selectedClassId, canvasSize])
+  }, [annotations, selectedAnnotationId, drawingBox, currentImage, selectedClassId, canvasSize])
 
   useEffect(() => {
     drawAnnotations()
@@ -257,7 +245,7 @@ export default function AnnotatePage() {
 
   // Check if point is on a resize handle
   const getResizeHandle = (x: number, y: number, box: BoundingBox): ResizeHandle => {
-    const handleSize = 12 / canvasSize.width // Handle size in normalized coords
+    const handleSize = 12 / canvasSize.width
 
     const left = box.x - box.width / 2
     const right = box.x + box.width / 2
@@ -294,7 +282,6 @@ export default function AnnotatePage() {
 
   // Update cursor based on mouse position
   const updateCursor = (x: number, y: number) => {
-    // Check selected annotation first for resize handles
     if (selectedAnnotationId) {
       const selectedAnn = annotations?.find((a) => a.id === selectedAnnotationId)
       if (selectedAnn) {
@@ -314,7 +301,6 @@ export default function AnnotatePage() {
       }
     }
 
-    // Check if hovering over any annotation
     const hovered = getAnnotationAtPoint(x, y)
     if (hovered) {
       setCursor('pointer')
@@ -331,7 +317,6 @@ export default function AnnotatePage() {
 
     const { x, y } = coords
 
-    // Check if clicking on resize handle of selected annotation
     if (selectedAnnotationId) {
       const selectedAnn = annotations?.find((a) => a.id === selectedAnnotationId)
       if (selectedAnn) {
@@ -344,7 +329,6 @@ export default function AnnotatePage() {
           return
         }
 
-        // Check if clicking inside selected annotation to move it
         if (isInsideBox(x, y, selectedAnn.box)) {
           setDragMode('move')
           setDragStart({ x, y })
@@ -354,18 +338,15 @@ export default function AnnotatePage() {
       }
     }
 
-    // Check if clicking on any annotation
     const clickedAnn = getAnnotationAtPoint(x, y)
     if (clickedAnn) {
       setSelectedAnnotation(clickedAnn.id)
-      // Start move immediately
       setDragMode('move')
       setDragStart({ x, y })
       setOriginalBox({ ...clickedAnn.box })
       return
     }
 
-    // Start drawing new box
     setSelectedAnnotation(null)
     setDragMode('draw')
     setDragStart({ x, y })
@@ -377,7 +358,6 @@ export default function AnnotatePage() {
 
     const { x, y } = coords
 
-    // Update cursor when not dragging
     if (dragMode === 'none') {
       updateCursor(x, y)
       return
@@ -404,11 +384,9 @@ export default function AnnotatePage() {
         width: originalBox.width,
         height: originalBox.height,
       }
-      // Update local state for immediate feedback
       setDrawingBox(null)
-      // Update the annotation in the cache for live preview
       queryClient.setQueryData(
-        ['annotations', projectName, currentFrame?.id],
+        ['annotations', projectName, currentImage?.frame_id],
         (old: Annotation[] | undefined) =>
           old?.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox } : a))
       )
@@ -420,13 +398,11 @@ export default function AnnotatePage() {
       let top = originalBox.y - originalBox.height / 2
       let bottom = originalBox.y + originalBox.height / 2
 
-      // Adjust based on handle
       if (resizeHandle.includes('w')) left = Math.min(x, right - 0.01)
       if (resizeHandle.includes('e')) right = Math.max(x, left + 0.01)
       if (resizeHandle.includes('n')) top = Math.min(y, bottom - 0.01)
       if (resizeHandle.includes('s')) bottom = Math.max(y, top + 0.01)
 
-      // Clamp to canvas
       left = Math.max(0, left)
       right = Math.min(1, right)
       top = Math.max(0, top)
@@ -440,7 +416,7 @@ export default function AnnotatePage() {
       }
 
       queryClient.setQueryData(
-        ['annotations', projectName, currentFrame?.id],
+        ['annotations', projectName, currentImage?.frame_id],
         (old: Annotation[] | undefined) =>
           old?.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox } : a))
       )
@@ -448,10 +424,10 @@ export default function AnnotatePage() {
   }
 
   const handleMouseUp = () => {
-    if (dragMode === 'draw' && drawingBox && currentFrame) {
+    if (dragMode === 'draw' && drawingBox && currentImage) {
       if (drawingBox.width > 0.01 && drawingBox.height > 0.01) {
         createAnnotationMutation.mutate({
-          frame_id: currentFrame.id,
+          frame_id: currentImage.frame_id,
           class_label_id: selectedClassId,
           box: drawingBox,
         })
@@ -460,15 +436,13 @@ export default function AnnotatePage() {
     }
 
     if ((dragMode === 'move' || dragMode === 'resize') && selectedAnnotationId) {
-      // Get the current box from cache and save it
       const currentAnnotations = queryClient.getQueryData<Annotation[]>([
         'annotations',
         projectName,
-        currentFrame?.id,
+        currentImage?.frame_id,
       ])
       const ann = currentAnnotations?.find((a) => a.id === selectedAnnotationId)
       if (ann && originalBox) {
-        // Only update if box actually changed
         if (
           ann.box.x !== originalBox.x ||
           ann.box.y !== originalBox.y ||
@@ -487,62 +461,97 @@ export default function AnnotatePage() {
   }
 
   // Navigation
-  const goToFrame = (index: number) => {
-    if (frames && index >= 0 && index < frames.length) {
-      setCurrentFrameIndex(index)
+  const goToImage = useCallback((index: number) => {
+    if (images.length > 0 && index >= 0 && index < images.length) {
+      setCurrentImageIndex(index)
       setSelectedAnnotation(null)
     }
-  }
+  }, [images.length, setCurrentImageIndex, setSelectedAnnotation])
 
-  // Keyboard shortcuts
+  // Keep mutable refs for values that change often, so the keyboard handler is always current
+  const stateRef = useRef({ currentImageIndex, classCount: project?.classes.length || 0 })
+  stateRef.current = { currentImageIndex, classCount: project?.classes.length || 0 }
+
+  const goToImageRef = useRef(goToImage)
+  goToImageRef.current = goToImage
+
+  const deleteMutateRef = useRef(deleteAnnotationMutation.mutate)
+  deleteMutateRef.current = deleteAnnotationMutation.mutate
+
+  // Keyboard shortcuts — registered once, reads latest state from refs
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return
       }
 
+      const { currentImageIndex: idx, classCount } = stateRef.current
+      const selId = useStore.getState().selectedAnnotationId
+
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        goToFrame(currentFrameIndex - 1)
+        goToImageRef.current(idx - 1)
       }
       if (e.key === 'ArrowRight') {
         e.preventDefault()
-        goToFrame(currentFrameIndex + 1)
+        goToImageRef.current(idx + 1)
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAnnotationId) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selId !== null) {
         e.preventDefault()
-        deleteAnnotationMutation.mutate(selectedAnnotationId)
+        deleteMutateRef.current(selId)
       }
       if (e.key === 'Escape') {
         setSelectedAnnotation(null)
       }
       const num = parseInt(e.key)
-      if (!isNaN(num) && num >= 1 && num <= (project?.classes.length || 0)) {
-        setSelectedClassId(num - 1)
+      if (!isNaN(num) && num >= 1 && num <= classCount) {
+        e.preventDefault()
+        handleSelectClass(num - 1)
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentFrameIndex, selectedAnnotationId, project?.classes.length])
+  }, [setSelectedAnnotation, handleSelectClass])
+
+  // Scroll thumbnail into view when current image changes
+  useEffect(() => {
+    const strip = thumbnailStripRef.current
+    const thumb = strip?.querySelector(`[data-index="${currentImageIndex}"]`)
+    if (strip && thumb) {
+      thumb.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' })
+    }
+  }, [currentImageIndex])
+
+  if (!projectName) return null
 
   return (
     <div className="h-[calc(100vh-4rem)] flex overflow-hidden">
       {/* Main annotation area */}
       <div className="flex-1 flex flex-col min-w-0 bg-neutral-900">
+        {/* Back link */}
+        <div className="flex-shrink-0 px-4 py-2 border-b border-border flex items-center gap-2">
+          <Link to={`/projects/${projectName}`}>
+            <Button variant="ghost" size="sm" className="gap-1 h-8">
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back
+            </Button>
+          </Link>
+        </div>
+
         {/* Canvas area */}
         <div
           ref={containerRef}
           className="flex-1 flex items-center justify-center p-2 overflow-hidden min-h-0"
         >
-          {currentFrame ? (
+          {currentImage ? (
             <div
               className="relative flex-shrink-0"
               style={{ width: canvasSize.width, height: canvasSize.height }}
             >
               <img
-                src={api.videos.frameUrl(projectName!, currentVideo!.id, currentFrame.frame_number)}
-                alt={`Frame ${currentFrame.frame_number}`}
+                src={api.manualData.imageUrl(projectName, currentImage.filename)}
+                alt={currentImage.filename}
                 className="absolute inset-0 w-full h-full object-contain"
                 draggable={false}
               />
@@ -560,36 +569,37 @@ export default function AnnotatePage() {
             </div>
           ) : (
             <div className="text-center text-muted-foreground">
-              <p>No frames to annotate</p>
-              <p className="text-sm mt-1">Extract frames from a video first</p>
+              <p>No images to annotate</p>
+              <p className="text-sm mt-1">
+                Place images in <code className="bg-muted px-1 rounded">manual_data/</code> and sync
+              </p>
+              <Link to={`/projects/${projectName}`}>
+                <Button variant="outline" size="sm" className="mt-4">
+                  Go to project
+                </Button>
+              </Link>
             </div>
           )}
         </div>
 
-        {/* Timeline */}
+        {/* Navigation bar with thumbnail strip */}
         <div className="flex-shrink-0 bg-secondary border-t border-border px-4 py-2">
-          <div className="flex items-center gap-2 mb-1.5">
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToFrame(0)}>
+          <div className="flex items-center gap-2 mb-2">
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToImage(0)}>
               <SkipBack className="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToFrame(currentFrameIndex - 1)}>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToImage(currentImageIndex - 1)}>
               <ChevronLeft className="h-3.5 w-3.5" />
             </Button>
             <span className="text-xs font-mono min-w-[70px] text-center text-muted-foreground">
-              {currentFrameIndex + 1} / {frames?.length || 0}
+              {currentImageIndex + 1} / {images.length || 0}
             </span>
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToFrame(currentFrameIndex + 1)}>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToImage(currentImageIndex + 1)}>
               <ChevronRight className="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToFrame((frames?.length || 1) - 1)}>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToImage(images.length - 1)}>
               <SkipForward className="h-3.5 w-3.5" />
             </Button>
-
-            {currentFrame && (
-              <span className="text-xs text-muted-foreground ml-1">
-                {formatDuration(currentFrame.timestamp)}
-              </span>
-            )}
 
             <div className="flex-1" />
 
@@ -598,21 +608,32 @@ export default function AnnotatePage() {
             </span>
           </div>
 
-          <div className="relative h-5 bg-muted rounded overflow-hidden">
-            {frames && frames.length > 0 && frames.map((frame, i) => (
-              <div
-                key={frame.id}
+          {/* Thumbnail strip */}
+          <div
+            ref={thumbnailStripRef}
+            className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin"
+            style={{ maxHeight: 56 }}
+          >
+            {images.map((img, i) => (
+              <button
+                key={img.frame_id}
+                data-index={i}
+                onClick={() => goToImage(i)}
                 className={cn(
-                  'absolute h-full w-1 -ml-0.5 cursor-pointer transition-colors',
-                  i === currentFrameIndex
-                    ? 'bg-amber-400'
-                    : 'bg-amber-400/30 hover:bg-amber-400/60'
+                  'flex-shrink-0 w-12 h-12 rounded overflow-hidden border-2 transition-colors',
+                  i === currentImageIndex
+                    ? 'border-amber-400 ring-1 ring-amber-400'
+                    : img.annotation_count > 0
+                    ? 'border-green-500/50 hover:border-green-500/80'
+                    : 'border-border hover:border-primary/50'
                 )}
-                style={{
-                  left: `${(i / Math.max(frames.length - 1, 1)) * 100}%`,
-                }}
-                onClick={() => goToFrame(i)}
-              />
+              >
+                <img
+                  src={api.manualData.imageUrl(projectName, img.filename)}
+                  alt={img.filename}
+                  className="w-full h-full object-cover"
+                />
+              </button>
             ))}
           </div>
         </div>
@@ -620,30 +641,6 @@ export default function AnnotatePage() {
 
       {/* Sidebar */}
       <div className="w-64 flex-shrink-0 bg-secondary border-l border-border flex flex-col overflow-hidden">
-        {/* Video selector */}
-        <div className="flex-shrink-0 p-3 border-b border-border">
-          <label className="text-[10px] font-medium text-muted-foreground mb-1 block uppercase tracking-wide">
-            Video
-          </label>
-          <select
-            value={currentVideo?.id || ''}
-            onChange={(e) => {
-              const video = videos?.find((v) => String(v.id) === String(e.target.value))
-              if (video) {
-                setCurrentVideo(video)
-                setCurrentFrameIndex(0)
-              }
-            }}
-            className="w-full h-8 px-2 rounded border border-border bg-background text-sm"
-          >
-            {videos?.map((video) => (
-              <option key={video.id} value={video.id}>
-                {video.filename}
-              </option>
-            ))}
-          </select>
-        </div>
-
         {/* Classes */}
         <div className="flex-shrink-0 p-3 border-b border-border">
           <label className="text-[10px] font-medium text-muted-foreground mb-1 block uppercase tracking-wide">
@@ -656,7 +653,7 @@ export default function AnnotatePage() {
               {project?.classes.map((cls, i) => (
                 <button
                   key={cls}
-                  onClick={() => setSelectedClassId(i)}
+                  onClick={() => handleSelectClass(i)}
                   className={cn(
                     'w-full flex items-center gap-2 px-2 py-1 rounded text-sm text-left transition-colors',
                     selectedClassId === i ? 'bg-primary/20 text-primary' : 'hover:bg-muted text-foreground'
@@ -711,24 +708,6 @@ export default function AnnotatePage() {
               ))}
             </div>
           )}
-        </div>
-
-        {/* Auto-label button */}
-        <div className="flex-shrink-0 p-3 border-t border-border">
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full gap-2 h-8 text-xs"
-            onClick={() => autoLabelMutation.mutate()}
-            disabled={autoLabelMutation.isPending || !project?.classes.length}
-          >
-            {autoLabelMutation.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="h-3.5 w-3.5" />
-            )}
-            Auto-Label
-          </Button>
         </div>
       </div>
     </div>

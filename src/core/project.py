@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+
+SGT = timezone(timedelta(hours=8))
 
 
 def slugify(name: str) -> str:
@@ -405,16 +407,22 @@ class Project:
     # Inference results
     # -------------------------------------------------------------------------
 
-    def list_inference_results(self) -> dict[tuple[str, str], dict[str, Any]]:
+    @staticmethod
+    def _make_inference_id() -> str:
+        """Generate a timestamp-based inference ID in SGT (UTC+8)."""
+        return datetime.now(SGT).strftime("%Y%m%d_%H%M%S")
+
+    def list_inference_results(self) -> list[dict[str, Any]]:
         """
         List all persisted inference results.
 
-        Returns:
-            Dict mapping (run_name, video_id) to summary metadata
-            (loaded from the top-level fields of each result.json, excluding
-            the heavy 'frames' list).
+        Returns a flat list of summary dicts (no heavy 'frames' data),
+        each augmented with an ``inference_id`` key (the timestamp directory name).
+
+        Directory structure: inference/{run_name}/{video_id}/{inference_id}/result.json
+        Legacy structure:    inference/{run_name}/{video_id}/result.json  (no timestamp dir)
         """
-        results: dict[tuple[str, str], dict[str, Any]] = {}
+        results: list[dict[str, Any]] = []
         if not self.inference_dir.exists():
             return results
         for run_dir in self.inference_dir.iterdir():
@@ -423,49 +431,79 @@ class Project:
             for video_dir in run_dir.iterdir():
                 if not video_dir.is_dir():
                     continue
-                result_path = video_dir / "result.json"
-                if result_path.exists():
-                    with open(result_path) as f:
-                        data = json.load(f)
-                    summary = {k: v for k, v in data.items() if k != "frames"}
-                    results[(run_dir.name, video_dir.name)] = summary
+                # New layout: video_dir contains timestamp subdirectories
+                for child in video_dir.iterdir():
+                    if child.is_dir() and (child / "result.json").exists():
+                        with open(child / "result.json") as f:
+                            data = json.load(f)
+                        summary = {k: v for k, v in data.items() if k != "frames"}
+                        summary["inference_id"] = child.name
+                        results.append(summary)
+                    elif child.name == "result.json":
+                        # Legacy flat layout -- treat directory name as inference_id
+                        with open(child) as f:
+                            data = json.load(f)
+                        summary = {k: v for k, v in data.items() if k != "frames"}
+                        summary["inference_id"] = "legacy"
+                        results.append(summary)
         return results
 
-    def get_inference_result(self, run_name: str, video_id: str) -> dict[str, Any] | None:
+    def get_inference_result(
+        self, run_name: str, video_id: str, inference_id: str
+    ) -> dict[str, Any] | None:
         """Load a full inference result (including per-frame detections)."""
-        result_path = self.inference_dir / run_name / video_id / "result.json"
+        if inference_id == "legacy":
+            result_path = self.inference_dir / run_name / video_id / "result.json"
+        else:
+            result_path = self.inference_dir / run_name / video_id / inference_id / "result.json"
         if result_path.exists():
             with open(result_path) as f:
-                return json.load(f)
+                data = json.load(f)
+            data["inference_id"] = inference_id
+            return data
         return None
 
     def save_inference_result(self, run_name: str, video_id: str, data: dict[str, Any]) -> Path:
         """
-        Persist an inference result to disk.
+        Persist an inference result under a new timestamped directory.
+
+        Directory: inference/{run_name}/{video_id}/{inference_id}/result.json
+        The inference_id (SGT timestamp) is written into the data as well.
 
         Returns:
             Path to the result directory.
         """
-        result_dir = self.inference_dir / run_name / video_id
+        inference_id = self._make_inference_id()
+        data["inference_id"] = inference_id
+        data["created_at"] = datetime.now(SGT).isoformat()
+
+        result_dir = self.inference_dir / run_name / video_id / inference_id
         result_dir.mkdir(parents=True, exist_ok=True)
-        result_path = result_dir / "result.json"
-        with open(result_path, "w") as f:
+        with open(result_dir / "result.json", "w") as f:
             json.dump(data, f, indent=2)
         return result_dir
 
-    def delete_inference_result(self, run_name: str, video_id: str) -> bool:
+    def delete_inference_result(self, run_name: str, video_id: str, inference_id: str) -> bool:
         """Delete a persisted inference result. Returns True if it existed."""
         import shutil
 
-        result_dir = self.inference_dir / run_name / video_id
-        if result_dir.exists():
-            shutil.rmtree(result_dir)
-            # Clean up empty run dir
-            run_dir = self.inference_dir / run_name
-            if run_dir.exists() and not any(run_dir.iterdir()):
-                run_dir.rmdir()
-            return True
-        return False
+        if inference_id == "legacy":
+            result_dir = self.inference_dir / run_name / video_id
+        else:
+            result_dir = self.inference_dir / run_name / video_id / inference_id
+        if not result_dir.exists():
+            return False
+
+        shutil.rmtree(result_dir)
+
+        # Clean up empty parent directories
+        video_dir = self.inference_dir / run_name / video_id
+        if video_dir.exists() and not any(video_dir.iterdir()):
+            video_dir.rmdir()
+        run_dir = self.inference_dir / run_name
+        if run_dir.exists() and not any(run_dir.iterdir()):
+            run_dir.rmdir()
+        return True
 
     def __repr__(self) -> str:
         return f"Project(name={self.name!r}, path={self.path}, classes={len(self.classes)}, frames={self.frame_count})"

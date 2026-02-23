@@ -25,6 +25,9 @@ class DatasetExporter:
         split_by_video: bool = True,
         train_ratio: float = 0.7,
         val_ratio: float = 0.2,
+        manual_data_split_strategy: Literal[
+            "proportional", "val_only", "train_only", "all_splits"
+        ] = "proportional",
     ) -> dict:
         """
         Export dataset to specified format.
@@ -38,6 +41,7 @@ class DatasetExporter:
             split_by_video: Split train/val/test by video, not frame
             train_ratio: Ratio of data for training
             val_ratio: Ratio of data for validation
+            manual_data_split_strategy: How to route manual data across splits
 
         Returns:
             Export result with paths and statistics
@@ -48,13 +52,15 @@ class DatasetExporter:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Group frames by video for splitting
-        video_frames = {}
+        # Separate manual data frames from other frames
+        manual_frames = []
+        other_frames = []
         for frame in frames:
             vid_id = frame.get("video_id", 0)
-            if vid_id not in video_frames:
-                video_frames[vid_id] = []
-            video_frames[vid_id].append(frame)
+            if vid_id == "manual_data":
+                manual_frames.append(frame)
+            else:
+                other_frames.append(frame)
 
         # Create annotations lookup
         frame_annotations = {}
@@ -64,18 +70,20 @@ class DatasetExporter:
                 frame_annotations[fid] = []
             frame_annotations[fid].append(ann)
 
-        # Split videos into train/val/test
+        # Split non-manual frames by video/source group
+        video_frames = {}
+        for frame in other_frames:
+            vid_id = frame.get("video_id", 0)
+            if vid_id not in video_frames:
+                video_frames[vid_id] = []
+            video_frames[vid_id].append(frame)
+
         video_ids = list(video_frames.keys())
         n_videos = len(video_ids)
-        n_train = max(1, int(n_videos * train_ratio))
-        n_val = max(1, int(n_videos * val_ratio))
 
-        train_videos = set(video_ids[:n_train])
-        val_videos = set(video_ids[n_train : n_train + n_val])
-        test_videos = set(video_ids[n_train + n_val :])
-
-        # If only one video, split frames instead
-        if n_videos == 1:
+        if n_videos == 0:
+            splits = {"train": [], "val": [], "test": []}
+        elif n_videos == 1:
             all_frames = video_frames[video_ids[0]]
             n_frames = len(all_frames)
             n_train_frames = int(n_frames * train_ratio)
@@ -87,11 +95,41 @@ class DatasetExporter:
                 "test": all_frames[n_train_frames + n_val_frames :],
             }
         else:
+            n_train = max(1, int(n_videos * train_ratio))
+            n_val = max(1, int(n_videos * val_ratio))
+
+            train_videos = set(video_ids[:n_train])
+            val_videos = set(video_ids[n_train : n_train + n_val])
+            test_videos = set(video_ids[n_train + n_val :])
+
             splits = {
                 "train": [f for vid in train_videos for f in video_frames.get(vid, [])],
                 "val": [f for vid in val_videos for f in video_frames.get(vid, [])],
                 "test": [f for vid in test_videos for f in video_frames.get(vid, [])],
             }
+
+        # Apply manual data split strategy
+        if manual_frames:
+            if manual_data_split_strategy == "proportional":
+                n_manual = len(manual_frames)
+                n_m_train = int(n_manual * train_ratio)
+                n_m_val = int(n_manual * val_ratio)
+                splits["train"].extend(manual_frames[:n_m_train])
+                splits["val"].extend(manual_frames[n_m_train : n_m_train + n_m_val])
+                splits["test"].extend(manual_frames[n_m_train + n_m_val :])
+            elif manual_data_split_strategy == "val_only":
+                splits["val"].extend(manual_frames)
+            elif manual_data_split_strategy == "train_only":
+                splits["train"].extend(manual_frames)
+            elif manual_data_split_strategy == "all_splits":
+                splits["train"].extend(manual_frames)
+                splits["val"].extend(manual_frames)
+                splits["test"].extend(manual_frames)
+
+            logger.info(
+                f"Manual data ({len(manual_frames)} frames) routed with "
+                f"strategy '{manual_data_split_strategy}'"
+            )
 
         results = {
             "format": format,

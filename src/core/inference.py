@@ -47,7 +47,7 @@ class FrameResult:
 class InferenceConfig:
     """Configuration for inference."""
 
-    confidence_threshold: float = 0.5
+    confidence_threshold: float = 0.0  # 0 = show all detections; each box is labeled with its confidence
     nms_threshold: float = 0.5
     device: str = "auto"
     # Optimization settings

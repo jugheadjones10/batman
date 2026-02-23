@@ -73,7 +73,7 @@ Model architecture size: `base` or `large` (default: `base`).
 
 #### `--confidence=THRESHOLD`
 
-Detection confidence threshold (default: `0.5`).
+Minimum confidence to include (default: `0.0` = show all; each box labeled with its confidence).
 
 #### `--no-optimize`
 

@@ -2,7 +2,7 @@
 
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +15,8 @@ from backend.app.models.training import InferenceConfig
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
 from src.core.project import Project
+
+SGT = timezone(timedelta(hours=8))
 
 router = APIRouter(prefix="/projects/{project_name}/inference", tags=["inference"])
 
@@ -76,7 +78,7 @@ async def load_model(project_name: str, request: LoadModelRequest):
 async def run_on_image(
     project_name: str,
     frame_id: int,
-    confidence_threshold: float = 0.5,
+    confidence_threshold: float = 0.0,
     iou_threshold: float = 0.45,
 ):
     """Run inference on a single frame."""
@@ -166,7 +168,6 @@ async def run_on_video(
     persist_data = {
         "run_name": run_name,
         "video_id": video_id,
-        "created_at": datetime.utcnow().isoformat(),
         "config": {
             "confidence_threshold": config.confidence_threshold,
             "iou_threshold": config.iou_threshold,
@@ -182,16 +183,21 @@ async def run_on_video(
         },
         "frames": result.get("results", []),
     }
-    project.save_inference_result(run_name, video_id, persist_data)
+    result_dir = project.save_inference_result(run_name, video_id, persist_data)
 
     result["persisted"] = True
     result["run_name"] = run_name
+    result["inference_id"] = persist_data.get("inference_id")
     return result
 
 
 @router.get("/results")
 async def list_inference_results(project_name: str):
-    """List all persisted inference results as a matrix of runs x videos."""
+    """List all persisted inference results as a matrix of runs x videos.
+
+    Each cell now contains a list of inference results (multiple runs per
+    video are supported), sorted newest-first by inference_id (SGT timestamp).
+    """
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -201,24 +207,38 @@ async def list_inference_results(project_name: str):
 
     runs_set: set[str] = set()
     videos_set: set[str] = set()
-    results_map: dict[str, dict[str, dict]] = {}
+    results_map: dict[str, dict[str, list[dict]]] = {}
 
-    for (run_name, vid_id), summary in raw_results.items():
+    for summary in raw_results:
+        run_name = summary.get("run_name", "")
+        vid_id = summary.get("video_id", "")
+        inf_id = summary.get("inference_id", "legacy")
         runs_set.add(run_name)
         videos_set.add(vid_id)
-        results_map.setdefault(run_name, {})[vid_id] = {
-            **summary,
-            "has_video": (project.inference_dir / run_name / vid_id / "detected.mp4").exists(),
-        }
+
+        # Check for detected video in the timestamped dir
+        if inf_id != "legacy":
+            has_video = (project.inference_dir / run_name / vid_id / inf_id / "detected.mp4").exists()
+        else:
+            has_video = (project.inference_dir / run_name / vid_id / "detected.mp4").exists()
+
+        entry = {**summary, "has_video": has_video}
+        results_map.setdefault(run_name, {}).setdefault(vid_id, []).append(entry)
+
+    # Sort each cell newest-first
+    for r in results_map:
+        for v in results_map[r]:
+            results_map[r][v].sort(key=lambda x: x.get("inference_id", ""), reverse=True)
 
     runs = sorted(runs_set)
     videos = sorted(videos_set)
 
-    padded: dict[str, dict[str, dict | None]] = {}
+    padded: dict[str, dict[str, list[dict] | None]] = {}
     for r in runs:
         padded[r] = {}
         for v in videos:
-            padded[r][v] = results_map.get(r, {}).get(v)
+            cell = results_map.get(r, {}).get(v)
+            padded[r][v] = cell if cell else None
 
     return {
         "runs": runs,
@@ -227,31 +247,42 @@ async def list_inference_results(project_name: str):
     }
 
 
-@router.get("/results/{run_name}/{video_id}")
-async def get_inference_result(project_name: str, run_name: str, video_id: str):
-    """Load a specific persisted inference result."""
+@router.get("/results/{run_name}/{video_id}/{inference_id}")
+async def get_inference_result(
+    project_name: str, run_name: str, video_id: str, inference_id: str
+):
+    """Load a specific persisted inference result by its inference_id (SGT timestamp)."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
     project = Project.load(project_path)
-    result = project.get_inference_result(run_name, video_id)
+    result = project.get_inference_result(run_name, video_id, inference_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Inference result not found")
 
-    result["has_video"] = (project.inference_dir / run_name / video_id / "detected.mp4").exists()
+    if inference_id != "legacy":
+        result["has_video"] = (
+            project.inference_dir / run_name / video_id / inference_id / "detected.mp4"
+        ).exists()
+    else:
+        result["has_video"] = (
+            project.inference_dir / run_name / video_id / "detected.mp4"
+        ).exists()
     return result
 
 
-@router.delete("/results/{run_name}/{video_id}")
-async def delete_inference_result(project_name: str, run_name: str, video_id: str):
+@router.delete("/results/{run_name}/{video_id}/{inference_id}")
+async def delete_inference_result(
+    project_name: str, run_name: str, video_id: str, inference_id: str
+):
     """Delete a persisted inference result."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
     project = Project.load(project_path)
-    deleted = project.delete_inference_result(run_name, video_id)
+    deleted = project.delete_inference_result(run_name, video_id, inference_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Inference result not found")
 
@@ -284,7 +315,8 @@ async def export_annotated_video(
         raise HTTPException(status_code=404, detail="Video not found")
 
     video_path = Path(videos_meta[str(video_id)]["original_path"])
-    output_dir = project_path / "inference" / run_name / video_id
+    inference_id = datetime.now(SGT).strftime("%Y%m%d_%H%M%S")
+    output_dir = project_path / "inference" / run_name / video_id / inference_id
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "detected.mp4"
 

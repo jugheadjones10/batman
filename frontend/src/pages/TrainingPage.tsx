@@ -23,8 +23,7 @@ import { Input } from '@/components/ui/Input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Progress } from '@/components/ui/Progress'
 import { useToast } from '@/components/ui/Toaster'
-import { formatDate, formatNumber } from '@/lib/utils'
-import type { TrainingConfig, TrainingRun } from '@/types'
+import type { TrainingConfig, TrainingRun, DataSource, ManualDataSplitStrategy } from '@/types'
 
 export default function TrainingPage() {
   const { projectName } = useParams<{ projectName: string }>()
@@ -47,21 +46,51 @@ export default function TrainingPage() {
   })
   const [showAdvanced, setShowAdvanced] = useState(false)
 
+  // Data source selection state
+  const [includeManualData, setIncludeManualData] = useState(true)
+  const [includeImports, setIncludeImports] = useState(true)
+  const [splitStrategy, setSplitStrategy] = useState<ManualDataSplitStrategy>('train_only')
+
   const { data: project } = useQuery({
     queryKey: ['project', projectName],
     queryFn: () => api.projects.get(projectName!),
     enabled: !!projectName,
   })
 
+  const { data: manualImages } = useQuery({
+    queryKey: ['manual-data-images', projectName],
+    queryFn: () => api.manualData.listImages(projectName!, 0, 1),
+    enabled: !!projectName,
+  })
+
+  const { data: importedDatasets } = useQuery({
+    queryKey: ['imported-datasets', projectName],
+    queryFn: () => api.import.listDatasets(projectName!),
+    enabled: !!projectName,
+  })
+
+  const hasManualData = (manualImages?.total ?? 0) > 0
+  const hasImports = (importedDatasets?.length ?? 0) > 0
+
   const { data: runs, isLoading: runsLoading } = useQuery({
     queryKey: ['training-runs', projectName],
     queryFn: () => api.training.listRuns(projectName!),
     enabled: !!projectName,
-    refetchInterval: 5000, // Poll for status updates
+    refetchInterval: 5000,
   })
 
+  const buildExportConfig = () => {
+    const sources: DataSource[] = []
+    if (includeManualData && hasManualData) sources.push('manual_data')
+    if (includeImports && hasImports) sources.push('imports')
+    return {
+      data_sources: sources.length > 0 ? sources : null,
+      manual_data_split_strategy: splitStrategy,
+    }
+  }
+
   const exportMutation = useMutation({
-    mutationFn: () => api.training.exportDataset(projectName!),
+    mutationFn: () => api.training.exportDataset(projectName!, buildExportConfig()),
     onSuccess: (data) => {
       toast({
         title: 'Dataset exported',
@@ -97,10 +126,15 @@ export default function TrainingPage() {
       return
     }
 
-    // Export dataset first if not done
-    await exportMutation.mutateAsync()
+    const sources: DataSource[] = []
+    if (includeManualData && hasManualData) sources.push('manual_data')
+    if (includeImports && hasImports) sources.push('imports')
+    if (sources.length === 0) {
+      toast({ title: 'No data sources', description: 'Enable at least one data source', type: 'error' })
+      return
+    }
 
-    // Then start training
+    await exportMutation.mutateAsync()
     trainMutation.mutate()
   }
 
@@ -138,6 +172,67 @@ export default function TrainingPage() {
                   onChange={(e) => setRunName(e.target.value)}
                 />
               </div>
+
+              {/* Data Sources */}
+              {(hasManualData || hasImports) && (
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Data Sources</label>
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-4">
+                      {hasManualData && (
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={includeManualData}
+                            onChange={(e) => setIncludeManualData(e.target.checked)}
+                            className="rounded"
+                          />
+                          <span className="text-sm">
+                            Manual Data
+                            <span className="text-muted-foreground ml-1">
+                              ({manualImages?.total ?? 0} images)
+                            </span>
+                          </span>
+                        </label>
+                      )}
+                      {hasImports && (
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={includeImports}
+                            onChange={(e) => setIncludeImports(e.target.checked)}
+                            className="rounded"
+                          />
+                          <span className="text-sm">
+                            Imported Datasets
+                            <span className="text-muted-foreground ml-1">
+                              ({importedDatasets?.length ?? 0} datasets)
+                            </span>
+                          </span>
+                        </label>
+                      )}
+                    </div>
+
+                    {hasManualData && includeManualData && (
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+                          Manual Data Strategy
+                        </label>
+                        <select
+                          value={splitStrategy}
+                          onChange={(e) => setSplitStrategy(e.target.value as ManualDataSplitStrategy)}
+                          className="w-full h-9 px-3 rounded-md border border-border bg-background text-sm"
+                        >
+                          <option value="proportional">Proportional - Distribute across all splits</option>
+                          <option value="val_only">Validation Only - Use only for model evaluation</option>
+                          <option value="train_only">Training Only - Use only for training</option>
+                          <option value="all_splits">All Splits - Include in every split</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Base model */}
               <div>

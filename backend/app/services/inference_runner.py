@@ -48,7 +48,7 @@ class InferenceRunner:
     async def run_on_image(
         self,
         image_path: Path,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.0,
         iou_threshold: float = 0.45,
     ) -> dict:
         """Run inference on a single image."""
@@ -66,7 +66,7 @@ class InferenceRunner:
             )
             detections = self._parse_yolo_results(results[0])
         else:
-            results = self.model.predict(str(image_path))
+            results = self.model.predict(str(image_path), threshold=confidence_threshold)
             detections = self._parse_rfdetr_results(results)
 
         inference_time = (time.perf_counter() - start_time) * 1000
@@ -79,7 +79,7 @@ class InferenceRunner:
     async def run_on_video(
         self,
         video_path: Path,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.0,
         iou_threshold: float = 0.45,
         enable_tracking: bool = True,
         tracking_config: Optional[TrackingConfig] = None,
@@ -125,7 +125,7 @@ class InferenceRunner:
                     )
                     detections = self._parse_yolo_results(results[0])
                 else:
-                    results = self.model.predict(frame)
+                    results = self.model.predict(frame, threshold=confidence_threshold)
                     detections = self._parse_rfdetr_results(results)
 
                 # Apply tracking
@@ -150,7 +150,7 @@ class InferenceRunner:
         self,
         video_path: Path,
         output_path: Optional[Path] = None,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.0,
         iou_threshold: float = 0.45,
         enable_tracking: bool = True,
         tracking_config: Optional[TrackingConfig] = None,
@@ -213,7 +213,7 @@ class InferenceRunner:
                         )
                         detections = self._parse_yolo_results(results[0])
                     else:
-                        results = self.model.predict(frame)
+                        results = self.model.predict(frame, threshold=confidence_threshold)
                         detections = self._parse_rfdetr_results(results)
                     
                     last_detections = detections

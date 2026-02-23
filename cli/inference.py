@@ -214,7 +214,6 @@ def persist_result(
     data = {
         "run_name": run_name,
         "video_id": video_id,
-        "created_at": datetime.utcnow().isoformat(),
         "config": {
             "confidence_threshold": config.confidence_threshold,
             "frame_interval": config.frame_interval,
@@ -231,6 +230,14 @@ def persist_result(
     }
 
     result_dir = project.save_inference_result(run_name, video_id, data)
+
+    # Move detected.mp4 from the flat video dir into the timestamped result dir
+    flat_video_dir = project.inference_dir / run_name / video_id
+    flat_video = flat_video_dir / "detected.mp4"
+    if flat_video.exists() and result_dir != flat_video_dir:
+        import shutil
+        shutil.move(str(flat_video), str(result_dir / "detected.mp4"))
+
     logger.info(f"  Result saved: {result_dir}")
 
 
@@ -264,7 +271,7 @@ Examples:
 
     parser.add_argument("--model", choices=["base", "large"], default="base", help="Model size (default: base)")
     parser.add_argument("--device", default="auto", help="Device: cuda, mps, cpu, or auto")
-    parser.add_argument("--confidence", "-t", type=float, default=0.5, help="Confidence threshold (default: 0.5)")
+    parser.add_argument("--confidence", "-t", type=float, default=0.0, help="Min confidence to include (0=all; each box shows its confidence)")
 
     parser.add_argument("--no-optimize", action="store_true", help="Skip model optimization")
     parser.add_argument("--optimize-compile", action="store_true", help="Use JIT compilation")

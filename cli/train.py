@@ -99,6 +99,8 @@ def save_training_config(args: argparse.Namespace, output_dir: Path, dataset_dir
             "video_id": args.video_id,
             "filter_classes": args.filter_classes,
             "max_frames_per_class": args.max_frames_per_class,
+            "sources": args.sources,
+            "manual_split_strategy": args.manual_split_strategy,
             "resume": str(args.resume) if args.resume else None,
         },
         "environment": {
@@ -130,12 +132,18 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
     """Prepare dataset command."""
     print_header("PREPARING DATASET")
 
+    # Parse sources if provided
+    sources_list = None
+    if args.sources:
+        sources_list = [s.strip() for s in args.sources.split(",") if s.strip()]
+        print(f"  Data sources: {sources_list}")
+
     # Parse video_id argument
     video_id = parse_video_id(args.video_id)
 
     # Load project info first
     _, annotations_data, class_names, project_config = load_project_data(
-        args.project, video_id
+        args.project, video_id, sources=sources_list
     )
 
     print(f"✓ Loaded project: {project_config.get('name', 'Unknown')}")
@@ -152,7 +160,7 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
     frame_sample_fractions = None
     if args.max_frames_per_class is not None:
         from collections import defaultdict
-        frames_meta, _, _, _ = load_project_data(args.project, video_id)
+        frames_meta, _, _, _ = load_project_data(args.project, video_id, sources=sources_list)
         frames_by_class: dict[str, set[str]] = defaultdict(set)
         for ann in annotations_data.values():
             fid = str(ann["frame_id"])
@@ -185,6 +193,8 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
         filter_classes=filter_classes,
         frame_sample_fractions=frame_sample_fractions,
         seed=args.seed,
+        sources=sources_list,
+        manual_data_split_strategy=args.manual_split_strategy,
     )
 
     print_dataset_stats(stats)
@@ -295,7 +305,7 @@ def cmd_infer_after(args: argparse.Namespace, run_dir: Path, class_names: list[s
         print(f"  Videos: {len(videos)}")
 
     config = InferenceConfig(
-        confidence_threshold=0.5,
+        confidence_threshold=0.0,
         device=args.device,
         save_visualizations=True,
     )
@@ -418,6 +428,20 @@ Examples:
         type=int,
         default=None,
         help="Cap frames per class to roughly this number (randomly sampled, deterministic with --seed)",
+    )
+    data_group.add_argument(
+        "--sources",
+        type=str,
+        default=None,
+        help="Data sources to include (comma-separated). Valid: manual_data,imports. "
+             "When set, overrides --video-id and always excludes video frames.",
+    )
+    data_group.add_argument(
+        "--manual-split-strategy",
+        type=str,
+        choices=["proportional", "val_only", "train_only", "all_splits"],
+        default="train_only",
+        help="How to distribute manual data across splits (default: train_only)",
     )
 
     # Training

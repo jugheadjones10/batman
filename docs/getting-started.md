@@ -56,25 +56,29 @@ uv run python -m cli.inference --help
 
 ## Quick Start Tutorial
 
-### Step 1: Import Data
+### Step 1: Add Images
 
-Import a dataset from Roboflow or COCO Zoo:
+Place your images (jpg, png, webp, bmp) in the project's `manual_data/` folder:
 
 ```bash
-# Import from COCO Zoo
-uv run python -m cli.importer coco \
-  --project data/projects/MyProject \
-  --create \
-  --classes person car \
-  --split validation \
-  --max-samples 100
+# Create project and manual_data folder
+mkdir -p data/projects/MyProject/manual_data
+
+# Copy your images
+cp your_images/*.jpg data/projects/MyProject/manual_data/
 ```
 
-See [Data Import](cli/importer.md) for more options.
+Then start the web UI and click **Refresh** on the project page to sync images, or use the API:
+
+```bash
+curl -X POST http://localhost:8000/api/projects/MyProject/manual-data/sync
+```
+
+Alternatively, import from Roboflow or COCO Zoo via the [Importer CLI](cli/importer.md).
 
 ### Step 2: Train a Model
 
-Train an RF-DETR model on your data:
+Train an RF-DETR model on your data. By default, both manual data and imported datasets are included:
 
 ```bash
 uv run python -m cli.train \
@@ -84,6 +88,30 @@ uv run python -m cli.train \
   --batch-size 8 \
   --output-dir runs/my_first_run
 ```
+
+To control which data sources are used and how manual data is split:
+
+```bash
+# Use only manual data for training
+uv run python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data \
+  --epochs 50
+
+# Use both sources, with manual data reserved for validation
+uv run python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data,imports \
+  --manual-split-strategy val_only \
+  --epochs 50
+```
+
+Available `--manual-split-strategy` options:
+
+- `proportional` (default) -- distribute across all splits
+- `val_only` -- use manual data only for validation
+- `train_only` -- use manual data only for training
+- `all_splits` -- include manual data in every split
 
 See [Training CLI](cli/train.md) for detailed options.
 
@@ -158,7 +186,7 @@ cd frontend
 npm run dev
 ```
 
-Then open http://localhost:5173 in your browser.
+Then open http://localhost:5180 (or the port shown) in your browser.
 
 See [Development Server](scripts/run-dev.md) for more information.
 

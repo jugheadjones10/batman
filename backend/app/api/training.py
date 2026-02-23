@@ -66,38 +66,52 @@ async def export_dataset(
     if not classes:
         raise HTTPException(status_code=400, detail="No classes defined")
 
-    # Determine which video IDs are excluded from training
+    # Load videos.json to identify video directories (which are excluded from training)
     videos_meta_path = project_path / "videos" / "videos.json"
-    excluded_video_ids: set[str] = set()
+    video_dir_names: set[str] = set()
     if videos_meta_path.exists():
         with open(videos_meta_path) as f:
             videos_meta = json.load(f)
-        excluded_video_ids = {
-            vid_id for vid_id, meta in videos_meta.items()
-            if meta.get("exclude_from_training", False)
-        }
+        video_dir_names = set(videos_meta.keys())
 
-    # Load frames (skip test-only videos)
+    # Determine which data sources to include (default: both manual_data and imports)
+    allowed_sources = set(config.data_sources or ["manual_data", "imports"])
+
+    # Load frames, categorizing each directory as manual_data, video, or imports
     frames = []
     frames_dir = project_path / "frames"
     if frames_dir.exists():
-        for video_dir in frames_dir.iterdir():
-            if not video_dir.is_dir():
+        for sub_dir in frames_dir.iterdir():
+            if not sub_dir.is_dir():
                 continue
-            if video_dir.name in excluded_video_ids:
+            meta_path = sub_dir / "frames.json"
+            if not meta_path.exists():
                 continue
-            meta_path = video_dir / "frames.json"
-            if meta_path.exists():
-                with open(meta_path) as f:
-                    frames_meta = json.load(f)
-                for frame_id, frame_data in frames_meta.items():
-                    fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
-                    vid = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
-                    frames.append({
-                        "id": fid,
-                        "video_id": vid,
-                        **frame_data,
-                    })
+
+            # Categorize this directory
+            if sub_dir.name == "manual_data":
+                source_type = "manual_data"
+            elif sub_dir.name in video_dir_names:
+                source_type = "video"
+            else:
+                source_type = "imports"
+
+            # Always skip video frames; skip others if not in allowed sources
+            if source_type == "video":
+                continue
+            if source_type not in allowed_sources:
+                continue
+
+            with open(meta_path) as f:
+                frames_meta = json.load(f)
+            for frame_id, frame_data in frames_meta.items():
+                fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
+                vid = int(sub_dir.name) if sub_dir.name.lstrip("-").isdigit() else sub_dir.name
+                frames.append({
+                    "id": fid,
+                    "video_id": vid,
+                    **frame_data,
+                })
 
     # Load annotations
     annotations_path = project_path / "labels" / "current" / "annotations.json"
@@ -106,9 +120,7 @@ async def export_dataset(
         with open(annotations_path) as f:
             annotations_meta = json.load(f)
         for ann_id, ann_data in annotations_meta.items():
-            # Filter out unapproved if requested
             if not config.include_unapproved:
-                # Would check frame approval status
                 pass
             annotations.append({
                 "id": int(ann_id),
@@ -123,6 +135,7 @@ async def export_dataset(
         classes=classes,
         format=config.format,
         split_by_video=config.split_by_video,
+        manual_data_split_strategy=config.manual_data_split_strategy,
     )
 
     return DatasetExportResult(**result)

@@ -207,10 +207,7 @@ export const api = {
 
   // Training
   training: {
-    exportDataset: (projectName: string, config?: {
-      format?: string
-      include_unapproved?: boolean
-    }) =>
+    exportDataset: (projectName: string, config?: import('@/types').DatasetExportConfig) =>
       request<{
         format: string
         output_path: string
@@ -303,13 +300,13 @@ export const api = {
       request<import('@/types').InferenceResultMatrix>(
         `/projects/${projectName}/inference/results`
       ),
-    getResult: (projectName: string, runName: string, videoId: string) =>
+    getResult: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       request<import('@/types').InferenceResultSummary & { frames: import('@/types').InferenceResult[] }>(
-        `/projects/${projectName}/inference/results/${runName}/${videoId}`
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`
       ),
-    deleteResult: (projectName: string, runName: string, videoId: string) =>
+    deleteResult: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       request<{ message: string }>(
-        `/projects/${projectName}/inference/results/${runName}/${videoId}`,
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,
         { method: 'DELETE' }
       ),
   },
@@ -405,6 +402,7 @@ export const api = {
         image_count: number
         annotation_count: number
         sample_images: string[]
+        classes: string[]
       }[]>(`/projects/${projectName}/import/datasets`),
     listImages: (projectName: string, videoId: number | string, offset = 0, limit = 50) =>
       request<{
@@ -420,6 +418,24 @@ export const api = {
       ),
     imageUrl: (projectName: string, videoId: number | string, filename: string) =>
       `${API_BASE}/projects/${projectName}/import/image/${videoId}/${filename}`,
+  },
+
+  // Manual data (folder of images at project_root/manual_data)
+  manualData: {
+    sync: (projectName: string) =>
+      request<{ images_found: number; images_added: number; images_removed: number; total: number }>(
+        `/projects/${projectName}/manual-data/sync`,
+        { method: 'POST' }
+      ),
+    listImages: (projectName: string, offset = 0, limit = 500) =>
+      request<{
+        total: number
+        offset: number
+        limit: number
+        images: import('@/types').ManualDataImage[]
+      }>(`/projects/${projectName}/manual-data/images?offset=${offset}&limit=${limit}`),
+    imageUrl: (projectName: string, filename: string) =>
+      `${API_BASE}/projects/${projectName}/manual-data/image/${encodeURIComponent(filename)}`,
   },
 
   // Class management

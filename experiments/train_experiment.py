@@ -238,7 +238,7 @@ def run_inference_on_videos(
     )
 
     config = InferenceConfig(
-        confidence_threshold=0.5,
+        confidence_threshold=0.0,
         frame_interval=1,
         use_tracking=True,
         save_visualizations=True,

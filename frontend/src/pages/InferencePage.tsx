@@ -23,7 +23,11 @@ export default function InferencePage() {
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
-  const [selectedCell, setSelectedCell] = useState<{ run: string; video: string } | null>(null)
+  const [selectedCell, setSelectedCell] = useState<{
+    run: string
+    video: string
+    inferenceId: string
+  } | null>(null)
   const [showRunPanel, setShowRunPanel] = useState(false)
   const [runTarget, setRunTarget] = useState<{ runId: number; videoId: string } | null>(null)
   const [config, setConfig] = useState<Partial<InferenceConfig>>({
@@ -53,9 +57,20 @@ export default function InferencePage() {
   })
 
   const { data: detailResult, isLoading: detailLoading } = useQuery({
-    queryKey: ['inference-result-detail', projectName, selectedCell?.run, selectedCell?.video],
+    queryKey: [
+      'inference-result-detail',
+      projectName,
+      selectedCell?.run,
+      selectedCell?.video,
+      selectedCell?.inferenceId,
+    ],
     queryFn: () =>
-      api.inference.getResult(projectName!, selectedCell!.run, selectedCell!.video),
+      api.inference.getResult(
+        projectName!,
+        selectedCell!.run,
+        selectedCell!.video,
+        selectedCell!.inferenceId,
+      ),
     enabled: !!projectName && !!selectedCell,
   })
 
@@ -93,8 +108,8 @@ export default function InferencePage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: ({ run, video }: { run: string; video: string }) =>
-      api.inference.deleteResult(projectName!, run, video),
+    mutationFn: ({ run, video, inferenceId }: { run: string; video: string; inferenceId: string }) =>
+      api.inference.deleteResult(projectName!, run, video, inferenceId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['inference-results', projectName] })
       setSelectedCell(null)
@@ -169,14 +184,21 @@ export default function InferencePage() {
                     <tr key={run} className="border-b border-border/50">
                       <td className="p-2 font-mono text-xs whitespace-nowrap">{run}</td>
                       {matrix!.videos.map((vid) => {
-                        const result = matrix!.results[run]?.[vid]
+                        const results = matrix!.results[run]?.[vid]
+                        const latest = results?.[0]
                         const isSelected =
                           selectedCell?.run === run && selectedCell?.video === vid
                         return (
                           <td key={vid} className="p-1 text-center">
-                            {result ? (
+                            {latest ? (
                               <button
-                                onClick={() => setSelectedCell({ run, video: vid })}
+                                onClick={() =>
+                                  setSelectedCell({
+                                    run,
+                                    video: vid,
+                                    inferenceId: latest.inference_id,
+                                  })
+                                }
                                 className={`
                                   w-full p-2 rounded-md border transition-colors text-xs
                                   ${isSelected
@@ -187,11 +209,16 @@ export default function InferencePage() {
                               >
                                 <div className="flex items-center justify-center gap-1 text-green-600 dark:text-green-400">
                                   <CheckCircle2 className="h-3 w-3" />
-                                  <span>{result.stats.total_detections}</span>
+                                  <span>{latest.stats.total_detections}</span>
                                 </div>
                                 <div className="text-muted-foreground mt-0.5">
-                                  {result.stats.avg_inference_time_ms.toFixed(0)}ms
+                                  {latest.stats.avg_inference_time_ms.toFixed(0)}ms
                                 </div>
+                                {results!.length > 1 && (
+                                  <div className="text-muted-foreground mt-0.5 text-[10px]">
+                                    {results!.length} runs
+                                  </div>
+                                )}
                               </button>
                             ) : (
                               <div className="p-2 text-muted-foreground/30">&mdash;</div>
@@ -228,7 +255,7 @@ export default function InferencePage() {
               </CardTitle>
               <CardDescription>
                 {detailResult?.created_at
-                  ? `Run on ${new Date(detailResult.created_at).toLocaleString()}`
+                  ? `Run on ${new Date(detailResult.created_at).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' })} SGT`
                   : 'Loading...'}
               </CardDescription>
             </div>
@@ -237,7 +264,11 @@ export default function InferencePage() {
                 variant="outline"
                 size="sm"
                 onClick={() =>
-                  deleteMutation.mutate({ run: selectedCell.run, video: selectedCell.video })
+                  deleteMutation.mutate({
+                    run: selectedCell.run,
+                    video: selectedCell.video,
+                    inferenceId: selectedCell.inferenceId,
+                  })
                 }
                 disabled={deleteMutation.isPending}
                 className="gap-1 text-destructive"
@@ -251,6 +282,55 @@ export default function InferencePage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* Run selector when multiple results exist */}
+            {(() => {
+              const cellResults =
+                matrix?.results[selectedCell.run]?.[selectedCell.video]
+              if (cellResults && cellResults.length > 1) {
+                return (
+                  <div className="mb-4">
+                    <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+                      Inference Runs ({cellResults.length})
+                    </label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {cellResults.map((r) => {
+                        const ts = r.created_at
+                          ? new Date(r.created_at).toLocaleString('en-SG', {
+                              timeZone: 'Asia/Singapore',
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : r.inference_id
+                        return (
+                          <button
+                            key={r.inference_id}
+                            onClick={() =>
+                              setSelectedCell({
+                                ...selectedCell,
+                                inferenceId: r.inference_id,
+                              })
+                            }
+                            className={`
+                              px-2.5 py-1 rounded-md border text-xs transition-colors
+                              ${selectedCell.inferenceId === r.inference_id
+                                ? 'border-primary bg-primary/10 font-medium'
+                                : 'border-border hover:border-primary/50'
+                              }
+                            `}
+                          >
+                            {ts}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              }
+              return null
+            })()}
+
             {detailLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-6 w-6 animate-spin" />
@@ -286,11 +366,16 @@ export default function InferencePage() {
                   <span className="px-2 py-1 bg-muted rounded">
                     conf: {detailResult.config.confidence_threshold}
                   </span>
+                  {detailResult.config.iou_threshold != null && (
+                    <span className="px-2 py-1 bg-muted rounded">
+                      IoU: {detailResult.config.iou_threshold}
+                    </span>
+                  )}
                   <span className="px-2 py-1 bg-muted rounded">
                     interval: {detailResult.config.frame_interval}
                   </span>
                   <span className="px-2 py-1 bg-muted rounded">
-                    tracking: {detailResult.config.tracking ? 'on' : 'off'}
+                    tracking: {detailResult.config.tracking ? detailResult.config.tracking_mode : 'off'}
                   </span>
                 </div>
 

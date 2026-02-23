@@ -1,13 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
-import { motion } from 'framer-motion'
-import { 
-  Folder, 
-  Play, 
-  PenTool, 
-  Cpu, 
-  Settings,
-  ChevronRight
-} from 'lucide-react'
+import { Folder, ChevronRight } from 'lucide-react'
 
 export default function Layout() {
   const location = useLocation()

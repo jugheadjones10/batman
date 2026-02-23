@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_prefix = "BATMAN_"
+        extra = "ignore"  # Allow extra env vars (e.g. ROBOFLOW_API_KEY) without validation error
 
 
 settings = Settings()

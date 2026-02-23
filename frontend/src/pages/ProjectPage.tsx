@@ -1,50 +1,39 @@
-import { useState, useRef } from 'react'
-import { createPortal } from 'react-dom'
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Upload,
-  Video,
   Play,
   PenTool,
   Cpu,
   Plus,
-  Trash2,
   Image,
   Tag,
   Loader2,
-  BarChart3,
-  ChevronRight,
-  Download,
-  ExternalLink,
+  RefreshCw,
   Grid3X3,
+  FolderOpen,
+  Database,
+  Trash2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  SkipBack,
+  SkipForward,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
+import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/Toaster'
-import { formatDuration, formatNumber } from '@/lib/utils'
-import type { Video as VideoType } from '@/types'
 
 export default function ProjectPage() {
   const { projectName } = useParams<{ projectName: string }>()
-  const [uploading, setUploading] = useState(false)
   const [newClass, setNewClass] = useState('')
-  const [showImport, setShowImport] = useState(false)
-  const [importConfig, setImportConfig] = useState({
-    api_key: '',
-    workspace: '',
-    project: '',
-    version: 1,
-  })
-  const [showImageGallery, setShowImageGallery] = useState<number | string | null>(null)
-  const [galleryPage, setGalleryPage] = useState(0)
-  const GALLERY_PAGE_SIZE = 100
   const [renamingClass, setRenamingClass] = useState<string | null>(null)
   const [newClassName, setNewClassName] = useState('')
   const [mergingClasses, setMergingClasses] = useState<string[]>([])
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [expandedDatasets, setExpandedDatasets] = useState<Set<string>>(new Set())
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
@@ -54,9 +43,9 @@ export default function ProjectPage() {
     enabled: !!projectName,
   })
 
-  const { data: videos, isLoading: videosLoading } = useQuery({
-    queryKey: ['videos', projectName],
-    queryFn: () => api.videos.list(projectName!),
+  const { data: manualData, isLoading: manualDataLoading } = useQuery({
+    queryKey: ['manual-data-images', projectName],
+    queryFn: () => api.manualData.listImages(projectName!, 0, 500),
     enabled: !!projectName,
   })
 
@@ -78,23 +67,19 @@ export default function ProjectPage() {
     enabled: !!projectName,
   })
 
-  const { data: galleryImages, isLoading: galleryLoading } = useQuery({
-    queryKey: ['gallery-images', projectName, showImageGallery, galleryPage],
-    queryFn: () => api.import.listImages(projectName!, showImageGallery!, galleryPage * GALLERY_PAGE_SIZE, GALLERY_PAGE_SIZE),
-    enabled: !!projectName && showImageGallery !== null,
-  })
-
-  const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.videos.upload(projectName!, file),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
+  const syncMutation = useMutation({
+    mutationFn: () => api.manualData.sync(projectName!),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
-      toast({ title: 'Video uploaded', type: 'success' })
-      setUploading(false)
+      toast({
+        title: 'Images synced',
+        description: `${data.images_added} added, ${data.images_removed} removed`,
+        type: 'success',
+      })
     },
     onError: (error: Error) => {
-      toast({ title: 'Upload failed', description: error.message, type: 'error' })
-      setUploading(false)
+      toast({ title: 'Sync failed', description: error.message, type: 'error' })
     },
   })
 
@@ -103,76 +88,6 @@ export default function ProjectPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       toast({ title: 'Classes updated', type: 'success' })
-    },
-  })
-
-  const deleteVideoMutation = useMutation({
-    mutationFn: (videoId: number | string) => api.videos.delete(projectName!, videoId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
-      toast({ title: 'Video deleted', type: 'success' })
-    },
-  })
-
-  const [importProgress, setImportProgress] = useState<{
-    active: boolean
-    progress: number
-    message: string
-  }>({ active: false, progress: 0, message: '' })
-
-  const handleImport = async () => {
-    if (!projectName || !importConfig.api_key || !importConfig.workspace || !importConfig.project) {
-      return
-    }
-
-    setImportProgress({ active: true, progress: 0, message: 'Starting import...' })
-
-    try {
-      let finalResult: any = null
-      
-      for await (const update of api.import.fromRoboflowWithProgress(projectName, importConfig)) {
-        setImportProgress({
-          active: true,
-          progress: update.progress,
-          message: update.message,
-        })
-
-        if (update.status === 'complete') {
-          finalResult = update
-        } else if (update.status === 'error') {
-          throw new Error(update.message)
-        }
-      }
-
-      if (finalResult) {
-        queryClient.invalidateQueries({ queryKey: ['project', projectName] })
-        queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })
-        queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
-        toast({
-          title: 'Import successful',
-          description: `${finalResult.images_imported} images, ${finalResult.annotations_imported} annotations imported`,
-          type: 'success',
-        })
-        setShowImport(false)
-        setImportConfig({ api_key: '', workspace: '', project: '', version: 1 })
-      }
-    } catch (error: any) {
-      toast({ title: 'Import failed', description: error.message, type: 'error' })
-    } finally {
-      setImportProgress({ active: false, progress: 0, message: '' })
-    }
-  }
-
-  const deleteDatasetMutation = useMutation({
-    mutationFn: (videoId: number | string) => api.import.deleteDataset(projectName!, videoId),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })
-      toast({ title: 'Dataset deleted', description: data.message, type: 'success' })
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Delete failed', description: error.message, type: 'error' })
     },
   })
 
@@ -197,7 +112,7 @@ export default function ProjectPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })  // Refresh video annotation counts
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
       toast({ title: 'Classes merged', description: data.message, type: 'success' })
       setMergingClasses([])
     },
@@ -211,7 +126,7 @@ export default function ProjectPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })  // Refresh video annotation counts
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
       toast({
         title: 'Class deleted',
         description: `${data.annotations_deleted} annotations removed`,
@@ -223,13 +138,22 @@ export default function ProjectPage() {
     },
   })
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-
-    setUploading(true)
-    uploadMutation.mutate(file)
-  }
+  const deleteDatasetMutation = useMutation({
+    mutationFn: (videoId: number | string) => api.import.deleteDataset(projectName!, videoId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['imported-datasets', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['class-details', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
+      toast({
+        title: 'Dataset deleted',
+        description: `${data.images_deleted} images, ${data.annotations_deleted} annotations removed`,
+        type: 'success',
+      })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Delete failed', description: error.message, type: 'error' })
+    },
+  })
 
   const handleAddClass = () => {
     if (!newClass.trim() || !project) return
@@ -248,6 +172,10 @@ export default function ProjectPage() {
     deleteClassMutation.mutate(className)
   }
 
+  const images = manualData?.images ?? []
+  const totalImages = manualData?.total ?? 0
+  const annotatedCount = images.filter((img) => img.annotation_count > 0).length
+
   if (projectLoading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
@@ -258,7 +186,7 @@ export default function ProjectPage() {
 
   if (!project) {
     return (
-      <div className="container max-w-4xl py-8 px-6">
+      <div className="container max-w-4xl mx-auto py-8 px-6">
         <Card>
           <CardContent className="py-16 text-center">
             <h2 className="text-xl font-semibold mb-2">Project not found</h2>
@@ -272,7 +200,7 @@ export default function ProjectPage() {
   }
 
   return (
-    <div className="container max-w-6xl py-8 px-6 lg:px-8">
+    <div className="container max-w-6xl mx-auto py-8 px-6 lg:px-8">
       {/* Header */}
       <div className="flex items-start justify-between mb-8">
         <div>
@@ -298,84 +226,183 @@ export default function ProjectPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Main content */}
+        {/* Main content - Images */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Videos section */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
                 <CardTitle className="flex items-center gap-2">
-                  <Video className="h-5 w-5" />
-                  Videos
+                  <Image className="h-5 w-5" />
+                  Images
                 </CardTitle>
                 <CardDescription>
-                  {videos?.length || 0} video{(videos?.length || 0) !== 1 ? 's' : ''} in this project
+                  {totalImages > 0
+                    ? `${annotatedCount}/${totalImages} annotated`
+                    : 'Place images in project_root/manual_data/ folder'}
                 </CardDescription>
               </div>
-              <div>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileSelect}
-                  accept="video/*"
-                  className="hidden"
-                />
+              <div className="flex gap-2">
                 <Button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                  className="gap-2"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => syncMutation.mutate()}
+                  disabled={syncMutation.isPending}
+                  className="gap-1"
                 >
-                  {uploading ? (
+                  {syncMutation.isPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Upload className="h-4 w-4" />
+                    <RefreshCw className="h-4 w-4" />
                   )}
-                  Upload Video
+                  Refresh
                 </Button>
+                {totalImages > 0 && (
+                  <Link to={`/projects/${projectName}/annotate`}>
+                    <Button size="sm" className="gap-1">
+                      <PenTool className="h-4 w-4" />
+                      Annotate
+                    </Button>
+                  </Link>
+                )}
               </div>
             </CardHeader>
             <CardContent>
-              {videosLoading ? (
-                <div className="space-y-4">
-                  {[1, 2].map((i) => (
-                    <div key={i} className="h-32 bg-muted animate-pulse rounded-lg" />
+              {manualDataLoading ? (
+                <div className="grid grid-cols-4 gap-2">
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                    <div key={i} className="aspect-square bg-muted animate-pulse rounded-lg" />
                   ))}
                 </div>
-              ) : videos?.length === 0 ? (
+              ) : totalImages === 0 ? (
                 <div className="text-center py-12 border-2 border-dashed border-border rounded-lg">
-                  <Upload className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground mb-4">
-                    No videos yet. Upload your first video to get started.
+                  <FolderOpen className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground mb-2 font-medium">
+                    No images yet
+                  </p>
+                  <p className="text-sm text-muted-foreground mb-4 max-w-md mx-auto">
+                    Place your images (jpg, png, webp, bmp) in the project folder at{' '}
+                    <code className="bg-muted px-1 rounded">manual_data/</code>, then click
+                    Refresh to load them.
                   </p>
                   <Button
                     variant="outline"
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => syncMutation.mutate()}
+                    disabled={syncMutation.isPending}
                     className="gap-2"
                   >
-                    <Upload className="h-4 w-4" />
-                    Upload Video
+                    {syncMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4" />
+                    )}
+                    Scan for images
                   </Button>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {videos?.map((video) => (
-                    <VideoCard
-                      key={video.id}
-                      video={video}
-                      projectName={projectName!}
-                      onDelete={() => deleteVideoMutation.mutate(video.id)}
-                    />
+                <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+                  {images.slice(0, 20).map((img) => (
+                    <div
+                      key={img.frame_id}
+                      className="relative aspect-square rounded-lg overflow-hidden border border-border hover:border-primary/50 transition-colors group"
+                    >
+                      <img
+                        src={api.manualData.imageUrl(projectName!, img.filename)}
+                        alt={img.filename}
+                        className="w-full h-full object-cover"
+                      />
+                      {img.annotation_count > 0 && (
+                        <div
+                          className="absolute top-1 right-1 w-2 h-2 rounded-full bg-green-500"
+                          title={`${img.annotation_count} annotations`}
+                        />
+                      )}
+                    </div>
                   ))}
                 </div>
               )}
             </CardContent>
           </Card>
+
+          {/* Imported Datasets */}
+          {importedDatasets && importedDatasets.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Database className="h-5 w-5" />
+                  Imported Datasets
+                </CardTitle>
+                <CardDescription>
+                  {importedDatasets.length} dataset{importedDatasets.length !== 1 ? 's' : ''} from external sources
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {importedDatasets.map((ds) => (
+                  <div key={ds.video_id} className="group border border-border rounded-lg overflow-hidden">
+                    <div
+                      onClick={() => {
+                        setExpandedDatasets((prev) => {
+                          const next = new Set(prev)
+                          const key = String(ds.video_id)
+                          if (next.has(key)) next.delete(key)
+                          else next.add(key)
+                          return next
+                        })
+                      }}
+                      className="flex items-center gap-3 p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                    >
+                      {expandedDatasets.has(String(ds.video_id)) ? (
+                        <ChevronDown className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{ds.source}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {ds.image_count} images · {ds.annotation_count} annotations
+                        </p>
+                        {ds.classes && ds.classes.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {ds.classes.map((cls) => (
+                              <span
+                                key={cls}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+                              >
+                                {cls}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (confirm(`Delete this imported dataset? (${ds.image_count} images, ${ds.annotation_count} annotations)`)) {
+                            deleteDatasetMutation.mutate(ds.video_id)
+                          }
+                        }}
+                        className="p-1 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+                        title="Delete dataset"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {expandedDatasets.has(String(ds.video_id)) && (
+                      <div className="border-t border-border p-3">
+                        <ImportedDatasetPreview projectName={projectName!} videoId={ds.video_id} totalImages={ds.image_count} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
         </div>
 
         {/* Sidebar */}
         <div className="space-y-6">
           {/* Inference Results Summary */}
-          {inferenceMatrix && (inferenceMatrix.runs.length > 0 || (videos && videos.length > 0)) && (
+          {inferenceMatrix && inferenceMatrix.runs.length > 0 && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -383,16 +410,14 @@ export default function ProjectPage() {
                   Inference
                 </CardTitle>
                 <CardDescription>
-                  {inferenceMatrix.runs.length > 0
-                    ? `${inferenceMatrix.runs.length} run${inferenceMatrix.runs.length !== 1 ? 's' : ''} evaluated on ${inferenceMatrix.videos.length} video${inferenceMatrix.videos.length !== 1 ? 's' : ''}`
-                    : 'No inference results yet'}
+                  {inferenceMatrix.runs.length} run{inferenceMatrix.runs.length !== 1 ? 's' : ''} available
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <Link to={`/projects/${projectName}/inference`}>
                   <Button variant="outline" className="w-full gap-2">
                     <Play className="h-4 w-4" />
-                    {inferenceMatrix.runs.length > 0 ? 'View Results' : 'Run Inference'}
+                    View Results
                   </Button>
                 </Link>
               </CardContent>
@@ -452,7 +477,6 @@ export default function ProjectPage() {
                           : 'border-border hover:border-primary/50'
                       }`}
                     >
-                      {/* Main row */}
                       <div className="flex items-center gap-2 p-2">
                         <span
                           className="w-3 h-3 rounded-full flex-shrink-0"
@@ -462,7 +486,6 @@ export default function ProjectPage() {
                             ][i % 7]
                           }}
                         />
-                        
                         {renamingClass === cls.name ? (
                           <div className="flex-1 flex gap-2">
                             <Input
@@ -494,7 +517,6 @@ export default function ProjectPage() {
                             </span>
                           </>
                         )}
-                        
                         {renamingClass !== cls.name && (
                           <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
                             {mergingClasses.length > 0 && !mergingClasses.includes(cls.name) ? (
@@ -545,36 +567,17 @@ export default function ProjectPage() {
                           </div>
                         )}
                       </div>
-                      
-                      {/* Data sources row */}
                       {cls.annotation_sources && Object.keys(cls.annotation_sources).length > 0 && (
                         <div className="px-2 pb-2 pt-0 flex items-center gap-2 flex-wrap">
                           {Object.entries(cls.annotation_sources).map(([source, count]) => (
                             <span
                               key={source}
                               className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
-                                source === 'roboflow'
-                                  ? 'bg-purple-500/20 text-purple-400'
-                                  : source === 'local_coco'
-                                  ? 'bg-blue-500/20 text-blue-400'
-                                  : source === 'video'
+                                source === 'manual_data'
                                   ? 'bg-green-500/20 text-green-400'
-                                  : source === 'auto'
-                                  ? 'bg-yellow-500/20 text-yellow-400'
                                   : 'bg-gray-500/20 text-gray-400'
                               }`}
                             >
-                              {source === 'roboflow' && (
-                                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-                                </svg>
-                              )}
-                              {source === 'video' && (
-                                <Video className="w-2.5 h-2.5" />
-                              )}
-                              {source === 'auto' && (
-                                <Cpu className="w-2.5 h-2.5" />
-                              )}
                               {source}: {count}
                             </span>
                           ))}
@@ -586,407 +589,104 @@ export default function ProjectPage() {
               )}
             </CardContent>
           </Card>
-
-          {/* Imported Datasets */}
-          {importedDatasets && importedDatasets.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Image className="h-5 w-5" />
-                  Imported Datasets
-                </CardTitle>
-                <CardDescription>
-                  External images added to this project
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {importedDatasets.map((dataset) => (
-                  <div key={dataset.video_id} className="border border-border rounded-lg p-3 overflow-hidden">
-                    <div className="flex items-start gap-2 mb-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className={`text-xs px-2 py-0.5 rounded flex-shrink-0 ${
-                            dataset.source === 'roboflow' 
-                              ? 'bg-purple-500/20 text-purple-400' 
-                              : 'bg-blue-500/20 text-blue-400'
-                          }`}>
-                            {dataset.source}
-                          </span>
-                          <span className="text-sm font-medium">
-                            {dataset.image_count} images
-                          </span>
-                          <span className="text-xs text-muted-foreground">
-                            ({dataset.annotation_count} annotations)
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex gap-1 flex-shrink-0">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs"
-                          onClick={() => {
-                            setGalleryPage(0)
-                            setShowImageGallery(dataset.video_id)
-                          }}
-                        >
-                          View
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                          onClick={() => {
-                            if (confirm(`Delete ${dataset.image_count} imported images?`)) {
-                              deleteDatasetMutation.mutate(dataset.video_id)
-                            }
-                          }}
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    </div>
-                    {/* Sample images */}
-                    <div className="grid grid-cols-3 gap-1">
-                      {dataset.sample_images.slice(0, 6).map((url, i) => (
-                        <img
-                          key={i}
-                          src={`${url.startsWith('/') ? 'http://localhost:8000' : ''}${url}`}
-                          alt={`Sample ${i + 1}`}
-                          className="w-full h-16 object-cover rounded cursor-pointer hover:opacity-80"
-                          onClick={() => {
-                            setGalleryPage(0)
-                            setShowImageGallery(dataset.video_id)
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Image Gallery Modal - rendered via portal to escape stacking context */}
-          {showImageGallery !== null && createPortal(
-            <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-8">
-              <div className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-                <div className="flex items-center justify-between p-4 border-b border-border flex-shrink-0">
-                  <h3 className="font-semibold">
-                    Imported Images {galleryImages && `(${galleryImages.total} total)`}
-                  </h3>
-                  <Button variant="ghost" size="sm" onClick={() => {
-                    setShowImageGallery(null)
-                    setGalleryPage(0)
-                  }}>
-                    ✕
-                  </Button>
-                </div>
-                <div className="p-4 overflow-y-auto overflow-x-hidden flex-1 min-h-0">
-                  {galleryLoading ? (
-                    <div className="flex items-center justify-center py-12">
-                      <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                    </div>
-                  ) : galleryImages ? (
-                    <div className="grid grid-cols-4 gap-2 w-full">
-                      {galleryImages.images.map((img) => (
-                        <div key={img.frame_id} className="relative group">
-                          <img
-                            src={`http://localhost:8000${img.url}`}
-                            alt={img.original_filename}
-                            className="w-full h-24 object-cover rounded"
-                          />
-                          <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded flex items-center justify-center">
-                            <span className="text-xs text-white text-center px-1">
-                              {img.original_filename || `Frame ${img.frame_id}`}
-                            </span>
-                          </div>
-                          {img.split && (
-                            <span className="absolute top-1 right-1 text-[10px] bg-black/50 text-white px-1 rounded">
-                              {img.split}
-                            </span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                {/* Pagination controls */}
-                {galleryImages && galleryImages.total > GALLERY_PAGE_SIZE && (
-                  <div className="flex items-center justify-between p-4 border-t border-border flex-shrink-0">
-                    <span className="text-sm text-muted-foreground">
-                      Showing {galleryPage * GALLERY_PAGE_SIZE + 1}-{Math.min((galleryPage + 1) * GALLERY_PAGE_SIZE, galleryImages.total)} of {galleryImages.total}
-                    </span>
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={galleryPage === 0 || galleryLoading}
-                        onClick={() => setGalleryPage(p => p - 1)}
-                      >
-                        Previous
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={(galleryPage + 1) * GALLERY_PAGE_SIZE >= galleryImages.total || galleryLoading}
-                        onClick={() => setGalleryPage(p => p + 1)}
-                      >
-                        Next
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>,
-            document.body
-          )}
-
-          {/* Import Dataset */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Download className="h-5 w-5" />
-                Import Dataset
-              </CardTitle>
-              <CardDescription>
-                Add images from Roboflow
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {!showImport ? (
-                <Button
-                  variant="outline"
-                  className="w-full gap-2"
-                  onClick={() => setShowImport(true)}
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  Import from Roboflow
-                </Button>
-              ) : (
-                <div className="space-y-3">
-                  <Input
-                    placeholder="API Key"
-                    type="password"
-                    value={importConfig.api_key}
-                    onChange={(e) => setImportConfig({ ...importConfig, api_key: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Workspace (e.g. my-workspace)"
-                    value={importConfig.workspace}
-                    onChange={(e) => setImportConfig({ ...importConfig, workspace: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Project (e.g. my-project)"
-                    value={importConfig.project}
-                    onChange={(e) => setImportConfig({ ...importConfig, project: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Version"
-                    type="number"
-                    min={1}
-                    value={importConfig.version}
-                    onChange={(e) => setImportConfig({ ...importConfig, version: parseInt(e.target.value) || 1 })}
-                  />
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setShowImport(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="flex-1 gap-2 relative overflow-hidden"
-                      onClick={handleImport}
-                      disabled={importProgress.active || !importConfig.api_key || !importConfig.workspace || !importConfig.project}
-                    >
-                      {importProgress.active && (
-                        <div 
-                          className="absolute inset-0 bg-primary/30 transition-all duration-300"
-                          style={{ width: `${importProgress.progress}%` }}
-                        />
-                      )}
-                      <span className="relative flex items-center gap-2">
-                        {importProgress.active ? (
-                          <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            {importProgress.progress}%
-                          </>
-                        ) : (
-                          <>
-                            <Download className="h-4 w-4" />
-                            Import
-                          </>
-                        )}
-                      </span>
-                    </Button>
-                  </div>
-                  {importProgress.active && (
-                    <p className="text-xs text-muted-foreground animate-pulse">
-                      {importProgress.message}
-                    </p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Get your API key at{' '}
-                    <a
-                      href="https://app.roboflow.com/settings/api"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-primary hover:underline"
-                    >
-                      roboflow.com/settings/api
-                    </a>
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
       </div>
     </div>
   )
 }
 
-function VideoCard({
-  video,
-  projectName,
-  onDelete,
-}: {
-  video: VideoType
-  projectName: string
-  onDelete: () => void
-}) {
-  const queryClient = useQueryClient()
-  const { toast } = useToast()
+const PAGE_SIZE = 20
 
-  const extractMutation = useMutation({
-    mutationFn: () => api.videos.extractFrames(projectName, video.id),
-    onSuccess: (frames) => {
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
-      toast({
-        title: 'Frames extracted',
-        description: `${frames.length} frames extracted`,
-        type: 'success',
-      })
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Extraction failed', description: error.message, type: 'error' })
-    },
+function ImportedDatasetPreview({ projectName, videoId, totalImages }: { projectName: string; videoId: number | string; totalImages: number }) {
+  const [page, setPage] = useState(0)
+  const offset = page * PAGE_SIZE
+  const totalPages = Math.max(1, Math.ceil(totalImages / PAGE_SIZE))
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['imported-dataset-images', projectName, videoId, offset],
+    queryFn: () => api.import.listImages(projectName, videoId, offset, PAGE_SIZE),
+    placeholderData: (prev) => prev,
   })
 
-  const toggleTestMutation = useMutation({
-    mutationFn: () =>
-      api.videos.update(projectName, video.id, {
-        exclude_from_training: !video.exclude_from_training,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
-      toast({
-        title: video.exclude_from_training ? 'Included in training' : 'Marked as test-only',
-        type: 'success',
-      })
-    },
-  })
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+        {Array.from({ length: Math.min(PAGE_SIZE, totalImages) }, (_, i) => (
+          <div key={i} className="aspect-square bg-muted animate-pulse rounded" />
+        ))}
+      </div>
+    )
+  }
+
+  if (!data || data.images.length === 0) {
+    return <p className="text-xs text-muted-foreground text-center py-2">No images</p>
+  }
 
   return (
-    <div className="group rounded-lg border border-border hover:border-primary/30 transition-colors overflow-hidden">
-      {/* Video preview row */}
-      <div className="flex items-center gap-4 p-4">
-        <div className="relative w-36 h-24 bg-muted rounded overflow-hidden flex-shrink-0">
-          <video
-            src={api.videos.streamUrl(projectName, video.id)}
-            className="w-full h-full object-cover"
-            muted
-            preload="metadata"
-          />
-          <div className="absolute bottom-1 right-1 px-1.5 py-0.5 bg-black/70 rounded text-xs">
-            {formatDuration(video.duration)}
-          </div>
-          {video.exclude_from_training && (
-            <div className="absolute top-1 left-1 px-1.5 py-0.5 bg-amber-600/90 text-white rounded text-[10px] font-medium">
-              TEST ONLY
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h4 className="font-medium truncate text-lg">{video.filename}</h4>
-          </div>
-          <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
-            <span>{video.width}×{video.height}</span>
-            <span>{video.fps.toFixed(1)} fps</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => toggleTestMutation.mutate()}
-            disabled={toggleTestMutation.isPending}
-            className={`
-              text-xs px-2 py-1 rounded border transition-colors
-              ${video.exclude_from_training
-                ? 'border-amber-500/50 text-amber-600 hover:bg-amber-500/10'
-                : 'border-border text-muted-foreground hover:border-primary/50'
-              }
-            `}
-            title={video.exclude_from_training ? 'Include in training' : 'Mark as test-only'}
+    <div>
+      <div className={cn('grid grid-cols-4 sm:grid-cols-5 gap-2 transition-opacity', isFetching && 'opacity-50')}>
+        {data.images.map((img) => (
+          <div
+            key={img.frame_id}
+            className="relative aspect-square rounded overflow-hidden border border-border"
           >
-            {video.exclude_from_training ? 'Test Only' : 'Training'}
-          </button>
-          {video.frame_count === 0 ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => extractMutation.mutate()}
-              disabled={extractMutation.isPending}
-              className="gap-1"
-            >
-              {extractMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Image className="h-4 w-4" />
-              )}
-              Extract Frames
-            </Button>
-          ) : (
-            <Link to={`/projects/${projectName}/annotate?video=${video.id}`}>
-              <Button size="sm" className="gap-1">
-                <PenTool className="h-4 w-4" />
-                Annotate
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </Link>
-          )}
+            <img
+              src={img.url}
+              alt={img.original_filename}
+              className="w-full h-full object-cover"
+            />
+            {img.split && (
+              <span className="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-black/60 text-white py-0.5">
+                {img.split}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 mt-3">
           <Button
             variant="ghost"
-            size="icon"
-            onClick={onDelete}
-            className="text-muted-foreground hover:text-destructive"
+            size="sm"
+            className="h-7 w-7 p-0"
+            disabled={page === 0}
+            onClick={() => setPage(0)}
           >
-            <Trash2 className="h-4 w-4" />
+            <SkipBack className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            <ChevronLeft className="h-3.5 w-3.5" />
+          </Button>
+          <span className="text-xs font-mono text-muted-foreground min-w-[60px] text-center">
+            {page + 1} / {totalPages}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            disabled={page >= totalPages - 1}
+            onClick={() => setPage(totalPages - 1)}
+          >
+            <SkipForward className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </div>
-
-      {/* Stats row */}
-      <div className="flex items-center gap-6 px-4 py-3 bg-muted/30 border-t border-border text-sm">
-        <div className="flex items-center gap-2">
-          <Image className="h-4 w-4 text-muted-foreground" />
-          <span className="text-muted-foreground">Frames:</span>
-          <span className="font-medium">{formatNumber(video.frame_count)}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-muted-foreground" />
-          <span className="text-muted-foreground">Annotations:</span>
-          <span className="font-medium">{formatNumber(video.annotation_count)}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">Total frames:</span>
-          <span className="font-medium">{formatNumber(video.total_frames)}</span>
-        </div>
-      </div>
+      )}
     </div>
   )
 }

@@ -144,8 +144,19 @@ def get_device_info(device: str) -> dict[str, Any]:
     return info
 
 
+def _categorize_frame_dir(dir_name: str, video_dir_names: set[str]) -> str:
+    """Categorize a frames/ subdirectory as 'manual_data', 'video', or 'imports'."""
+    if dir_name == "manual_data":
+        return "manual_data"
+    if dir_name in video_dir_names:
+        return "video"
+    return "imports"
+
+
 def load_project_data(
-    project_dir: Path, video_id: int | str | None = None
+    project_dir: Path,
+    video_id: int | str | None = None,
+    sources: list[str] | None = None,
 ) -> tuple[dict, dict, list[str], dict]:
     """
     Load project data from Batman project directory.
@@ -156,6 +167,10 @@ def load_project_data(
             - None or "all": Load all frames from all video directories
             - "imports": Load only imported datasets (negative video IDs)
             - int: Load from specific video ID
+        sources: Data source types to include. When set, overrides video_id
+            filtering and uses source-based filtering instead.
+            Valid values: "manual_data", "imports". Video frames are always
+            excluded when sources is set.
 
     Returns:
         Tuple of (frames_meta, annotations_data, class_names, project_config)
@@ -167,7 +182,6 @@ def load_project_data(
     annotations_file = project_dir / "labels" / "current" / "annotations.json"
     project_config_file = project_dir / "project.json"
 
-    # Verify paths exist
     if not frames_base_dir.exists():
         raise FileNotFoundError(f"Frames directory not found: {frames_base_dir}")
     if not annotations_file.exists():
@@ -175,59 +189,63 @@ def load_project_data(
     if not project_config_file.exists():
         raise FileNotFoundError(f"Project config not found: {project_config_file}")
 
-    # Load project config
     with open(project_config_file) as f:
         project_config = json.load(f)
     class_names = project_config.get("classes", [])
 
-    # Load videos metadata for exclude_from_training check
     videos_json = project_dir / "videos" / "videos.json"
     all_videos_meta: dict = {}
     if videos_json.exists():
         with open(videos_json) as f:
             all_videos_meta = json.load(f)
 
-    excluded_video_ids = {
-        vid_id
-        for vid_id, meta in all_videos_meta.items()
-        if meta.get("exclude_from_training", False)
-    }
+    video_dir_names = set(all_videos_meta.keys())
 
-    # Determine which video directories to load
     video_dirs_to_load = []
 
-    if video_id is None or video_id == "all":
-        for video_dir in frames_base_dir.iterdir():
-            if video_dir.is_dir() and (video_dir / "frames.json").exists():
-                if video_dir.name in excluded_video_ids:
+    if sources is not None:
+        # Source-based filtering: always skip video frames
+        allowed_sources = set(sources)
+        for sub_dir in frames_base_dir.iterdir():
+            if not sub_dir.is_dir() or not (sub_dir / "frames.json").exists():
+                continue
+            source_type = _categorize_frame_dir(sub_dir.name, video_dir_names)
+            if source_type == "video":
+                continue
+            if source_type in allowed_sources:
+                video_dirs_to_load.append(sub_dir)
+    elif video_id is None or video_id == "all":
+        excluded_video_ids = {
+            vid_id
+            for vid_id, meta in all_videos_meta.items()
+            if meta.get("exclude_from_training", False)
+        }
+        for sub_dir in frames_base_dir.iterdir():
+            if sub_dir.is_dir() and (sub_dir / "frames.json").exists():
+                if sub_dir.name in excluded_video_ids:
                     continue
-                video_dirs_to_load.append(video_dir)
+                video_dirs_to_load.append(sub_dir)
     elif video_id == "imports":
-        for video_dir in frames_base_dir.iterdir():
-            if not video_dir.is_dir() or not (video_dir / "frames.json").exists():
+        for sub_dir in frames_base_dir.iterdir():
+            if not sub_dir.is_dir() or not (sub_dir / "frames.json").exists():
                 continue
-            if video_dir.name in all_videos_meta:
+            if sub_dir.name in all_videos_meta:
                 continue
-            video_dirs_to_load.append(video_dir)
+            video_dirs_to_load.append(sub_dir)
     else:
-        # Load specific video ID
-        video_dir = frames_base_dir / str(video_id)
-        if not video_dir.exists():
-            raise FileNotFoundError(f"Video directory not found: {video_dir}")
-        video_dirs_to_load.append(video_dir)
-    
+        sub_dir = frames_base_dir / str(video_id)
+        if not sub_dir.exists():
+            raise FileNotFoundError(f"Video directory not found: {sub_dir}")
+        video_dirs_to_load.append(sub_dir)
+
     if not video_dirs_to_load:
-        raise FileNotFoundError(f"No video directories found in {frames_base_dir}")
+        raise FileNotFoundError(f"No matching frame directories found in {frames_base_dir}")
 
-    # Load and merge frames metadata from all directories
     frames_meta = {}
-    for video_dir in video_dirs_to_load:
-        frames_meta_file = video_dir / "frames.json"
-        with open(frames_meta_file) as f:
-            dir_frames = json.load(f)
-            frames_meta.update(dir_frames)
+    for d in video_dirs_to_load:
+        with open(d / "frames.json") as f:
+            frames_meta.update(json.load(f))
 
-    # Load annotations
     with open(annotations_file) as f:
         annotations_data = json.load(f)
 
@@ -422,6 +440,8 @@ def prepare_coco_dataset(
     filter_classes: list[str] | None = None,
     frame_sample_fractions: dict[str, float] | None = None,
     seed: int = 42,
+    sources: list[str] | None = None,
+    manual_data_split_strategy: str = "proportional",
 ) -> DatasetStats:
     """
     Prepare COCO format dataset from Batman project.
@@ -432,12 +452,17 @@ def prepare_coco_dataset(
         train_split: Fraction for training
         val_split: Fraction for validation
         test_split: Fraction for testing
-        video_id: Video ID(s) to process: 'all', 'imports' (default), or specific ID
+        video_id: Video ID(s) to process: 'all', 'imports' (default), or specific ID.
+            Ignored when sources is set.
         clean: Whether to remove existing output directory
         filter_classes: If specified, only include these classes (by name)
         frame_sample_fractions: If specified, sample frames per class.
             Dict mapping class name to fraction (0.0-1.0), e.g. {"person": 0.25, "crane hook": 1.0}
         seed: Random seed for reproducible splits
+        sources: Data source types to include ("manual_data", "imports").
+            When set, overrides video_id. Video frames are always excluded.
+        manual_data_split_strategy: How to distribute manual data across splits.
+            "proportional" (default), "val_only", "train_only", "all_splits".
 
     Returns:
         DatasetStats with counts and class names
@@ -448,12 +473,10 @@ def prepare_coco_dataset(
     """
     set_seed(seed)
 
-    # Load project data
     frames_meta, annotations_data, original_class_names, _ = load_project_data(
-        project_dir, video_id
+        project_dir, video_id, sources=sources
     )
 
-    # Apply class filtering if specified
     if filter_classes:
         invalid_classes = [c for c in filter_classes if c not in original_class_names]
         if invalid_classes:
@@ -464,7 +487,6 @@ def prepare_coco_dataset(
     else:
         class_names = original_class_names
 
-    # Create output directories
     train_dir = output_dir / "train"
     val_dir = output_dir / "valid"
     test_dir = output_dir / "test"
@@ -476,7 +498,6 @@ def prepare_coco_dataset(
     val_dir.mkdir(parents=True, exist_ok=True)
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    # Apply frame sampling if specified
     if frame_sample_fractions:
         all_frame_ids = list(sample_frames_by_class(
             frames_meta,
@@ -489,16 +510,38 @@ def prepare_coco_dataset(
     else:
         all_frame_ids = list(frames_meta.keys())
 
-    # Shuffle and split frames
-    random.shuffle(all_frame_ids)
+    # Separate manual data frames from other frames for split strategy
+    manual_frame_ids = [fid for fid in all_frame_ids if str(fid).startswith("manual_data_")]
+    other_frame_ids = [fid for fid in all_frame_ids if not str(fid).startswith("manual_data_")]
 
-    n_total = len(all_frame_ids)
-    n_train = int(n_total * train_split)
-    n_val = int(n_total * val_split)
+    # Shuffle and split non-manual frames
+    random.shuffle(other_frame_ids)
+    n_other = len(other_frame_ids)
+    n_train = int(n_other * train_split)
+    n_val = int(n_other * val_split)
 
-    train_frame_ids = set(all_frame_ids[:n_train])
-    val_frame_ids = set(all_frame_ids[n_train : n_train + n_val])
-    test_frame_ids = set(all_frame_ids[n_train + n_val :])
+    train_frame_ids = set(other_frame_ids[:n_train])
+    val_frame_ids = set(other_frame_ids[n_train : n_train + n_val])
+    test_frame_ids = set(other_frame_ids[n_train + n_val :])
+
+    # Apply manual data split strategy
+    if manual_frame_ids:
+        random.shuffle(manual_frame_ids)
+        if manual_data_split_strategy == "proportional":
+            n_m = len(manual_frame_ids)
+            n_m_train = int(n_m * train_split)
+            n_m_val = int(n_m * val_split)
+            train_frame_ids.update(manual_frame_ids[:n_m_train])
+            val_frame_ids.update(manual_frame_ids[n_m_train : n_m_train + n_m_val])
+            test_frame_ids.update(manual_frame_ids[n_m_train + n_m_val :])
+        elif manual_data_split_strategy == "val_only":
+            val_frame_ids.update(manual_frame_ids)
+        elif manual_data_split_strategy == "train_only":
+            train_frame_ids.update(manual_frame_ids)
+        elif manual_data_split_strategy == "all_splits":
+            train_frame_ids.update(manual_frame_ids)
+            val_frame_ids.update(manual_frame_ids)
+            test_frame_ids.update(manual_frame_ids)
 
     # Create datasets
     train_images, train_anns = create_coco_split(

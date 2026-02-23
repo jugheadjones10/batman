@@ -73,7 +73,7 @@ class InferenceConfig(BaseModel):
     """Configuration for running inference."""
 
     model_run_id: int
-    confidence_threshold: float = Field(0.5, ge=0, le=1)
+    confidence_threshold: float = Field(0.0, ge=0, le=1)  # 0 = show all; each box labeled with confidence
     iou_threshold: float = Field(0.45, ge=0, le=1)
     max_detections: int = Field(100, ge=1, le=1000)
 
@@ -101,6 +101,10 @@ class DatasetExportConfig(BaseModel):
     format: Literal["yolo", "coco", "both"] = "both"
     include_unapproved: bool = False
     split_by_video: bool = True  # Train/val/test by video, not by frame
+    data_sources: Optional[list[Literal["manual_data", "imports"]]] = None
+    manual_data_split_strategy: Literal[
+        "proportional", "val_only", "train_only", "all_splits"
+    ] = "train_only"
 
 
 class DatasetExportResult(BaseModel):
