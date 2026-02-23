@@ -66,19 +66,31 @@ async def export_dataset(
     if not classes:
         raise HTTPException(status_code=400, detail="No classes defined")
 
-    # Load frames
+    # Determine which video IDs are excluded from training
+    videos_meta_path = project_path / "videos" / "videos.json"
+    excluded_video_ids: set[str] = set()
+    if videos_meta_path.exists():
+        with open(videos_meta_path) as f:
+            videos_meta = json.load(f)
+        excluded_video_ids = {
+            vid_id for vid_id, meta in videos_meta.items()
+            if meta.get("exclude_from_training", False)
+        }
+
+    # Load frames (skip test-only videos)
     frames = []
     frames_dir = project_path / "frames"
     if frames_dir.exists():
         for video_dir in frames_dir.iterdir():
             if not video_dir.is_dir():
                 continue
+            if video_dir.name in excluded_video_ids:
+                continue
             meta_path = video_dir / "frames.json"
             if meta_path.exists():
                 with open(meta_path) as f:
                     frames_meta = json.load(f)
                 for frame_id, frame_data in frames_meta.items():
-                    # frame_id and video_id can be int (legacy) or str (source_key)
                     fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
                     vid = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
                     frames.append({
@@ -602,6 +614,16 @@ async def _run_training(
 
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
+
+        project_config = load_project_config(project_path)
+        class_info = {
+            "classes": project_config.get("classes", []),
+            "num_classes": len(project_config.get("classes", [])),
+            "model": config.base_model,
+        }
+        class_info_path = run_dir / "class_info.json"
+        with open(class_info_path, "w") as f_ci:
+            json.dump(class_info, f_ci, indent=2)
 
         _training_jobs[run_id].status = "completed"
         _training_jobs[run_id].progress = 1.0

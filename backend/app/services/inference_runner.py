@@ -20,6 +20,7 @@ class InferenceRunner:
         self.model_path: Optional[Path] = None
         self.model_type: Optional[str] = None
         self.class_names: list[str] = []
+        self.current_run_name: Optional[str] = None
 
     async def load_model(
         self,

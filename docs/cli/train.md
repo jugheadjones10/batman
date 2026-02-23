@@ -30,6 +30,7 @@ python -m cli.train --project data/projects/MyProject
   {"name": "video-id", "type": "number", "default": -1, "description": "Video ID to process, -1 for imports", "group": "Data Preparation"},
   {"name": "filter-classes", "type": "text", "description": "Only train on these classes (pipe-separated)", "group": "Data Preparation"},
   {"name": "prepare-only", "type": "flag", "description": "Only prepare dataset, do not train", "group": "Data Preparation"},
+  {"name": "max-frames-per-class", "type": "number", "min": 1, "description": "Cap frames per class to this number (random sample, deterministic with seed)", "group": "Data Preparation"},
   {"name": "no-clean", "type": "flag", "description": "Do not remove existing dataset directory", "group": "Data Preparation"},
   {"name": "output-dir", "type": "path", "default": "runs/rfdetr_run", "description": "Output directory for training run", "group": "Training"},
   {"name": "model", "type": "choice", "choices": ["nano", "small", "base", "medium", "large"], "default": "base", "description": "Model architecture size", "group": "Training"},
@@ -126,6 +127,16 @@ Only prepare dataset without training.
 #### `--no-clean`
 
 Don't remove existing dataset directory before preparing.
+
+#### `--max-frames-per-class N`
+
+Cap the number of frames per class to roughly `N` by randomly down-sampling classes that exceed the limit. Classes with fewer than `N` frames are kept as-is. Sampling is deterministic when combined with `--seed` (default 42), so the same command always produces the same split.
+
+```bash
+--max-frames-per-class 300
+```
+
+This is useful for **class balancing** -- if one class has 1500 frames and another has 250, capping at 300 brings them to a similar scale without losing the smaller class.
 
 ### Training Configuration
 
@@ -306,7 +317,20 @@ python -m cli.train \
   --epochs 50
 ```
 
-### Example 4: Prepare Dataset Only
+### Example 4: Class-Balanced Training
+
+Balance classes by capping each to ~300 frames:
+
+```bash
+python -m cli.train \
+  --project data/projects/CraneHook \
+  --max-frames-per-class 300 \
+  --seed 42
+```
+
+The `--seed` value is saved in `training_config.json`, so the exact same dataset can be reproduced by re-running with the same arguments.
+
+### Example 5: Prepare Dataset Only
 
 Prepare dataset without training:
 
@@ -317,7 +341,7 @@ python -m cli.train \
   --prepare-only
 ```
 
-### Example 5: Train on Existing Dataset
+### Example 6: Train on Existing Dataset
 
 Train on pre-prepared COCO dataset:
 
@@ -329,7 +353,7 @@ python -m cli.train \
   --batch-size 8
 ```
 
-### Example 6: Resume Training
+### Example 7: Resume Training
 
 Resume interrupted training:
 
@@ -340,7 +364,7 @@ python -m cli.train \
   --output-dir runs/my_run
 ```
 
-### Example 7: Train and Inference
+### Example 8: Train and Inference
 
 Train and immediately test on images:
 
@@ -353,7 +377,7 @@ python -m cli.train \
   --inference-output results/
 ```
 
-### Example 8: Small GPU (Gradient Accumulation)
+### Example 9: Small GPU (Gradient Accumulation)
 
 Train on limited GPU memory:
 
@@ -365,7 +389,7 @@ python -m cli.train \
   --image-size 512
 ```
 
-### Example 9: Export Trained Model
+### Example 10: Export Trained Model
 
 Export model for deployment:
 

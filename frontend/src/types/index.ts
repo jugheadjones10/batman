@@ -35,6 +35,7 @@ export interface Video {
   has_proxy: boolean
   frame_count: number
   annotation_count: number
+  exclude_from_training: boolean
   created_at: string
 }
 
@@ -170,5 +171,30 @@ export interface InferenceResult {
   timestamp: number
   detections: Detection[]
   inference_time_ms: number
+}
+
+export interface InferenceResultSummary {
+  run_name: string
+  video_id: string
+  created_at: string
+  config: {
+    confidence_threshold: number
+    frame_interval: number
+    tracking: boolean
+    tracking_mode: string
+  }
+  stats: {
+    total_frames: number
+    keyframes: number
+    total_detections: number
+    avg_inference_time_ms: number
+  }
+  has_video: boolean
+}
+
+export interface InferenceResultMatrix {
+  runs: string[]
+  videos: string[]
+  results: Record<string, Record<string, InferenceResultSummary | null>>
 }
 

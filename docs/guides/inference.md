@@ -1,502 +1,208 @@
 # Inference Workflow Guide
 
-Complete guide for running inference with trained RF-DETR models.
+Complete guide for running inference with trained RF-DETR models using the project-centric architecture.
 
 ## Overview
 
-Inference workflow:
-1. **Select Model** - Choose trained checkpoint
-2. **Prepare Input** - Organize images or videos
-3. **Configure Inference** - Set thresholds and options
-4. **Run Inference** - Execute detection
-5. **Review Results** - Analyze outputs
-6. **Optimize Performance** - Tune for speed or accuracy
+All inference is tied to a project. Results are persisted under `{project}/inference/{run_name}/{video_id}/`, enabling you to compare different training runs against different videos and browse results later.
 
-## Step 1: Select Model
+### Workflow
 
-### Find Available Models
+1. **Train a model** -- Complete a training run (CLI, Web UI, or SLURM)
+2. **Select a project** -- Inference requires `--project`
+3. **Choose a run** -- Pick a training run from the project
+4. **Select videos** -- All project videos, specific ones, or test-only
+5. **Run inference** -- Results are persisted automatically
+6. **Browse & compare** -- View results in the Web UI or on disk
 
-```bash
-# List training runs
-ls runs/
+## Project Structure
 
-# Check run details
-cat runs/my_training_run/results.json
-cat runs/my_training_run/training_config.json
+After inference, your project looks like this:
+
+```
+data/projects/CraneHook/
+├── videos/
+│   ├── videos.json         # Video metadata (with exclude_from_training flag)
+│   ├── video_1_clip.mp4
+│   └── video_2_test.mp4
+├── runs/                   # Training artifacts
+│   ├── rfdetr_run_1/
+│   │   ├── checkpoint_best_total.pth
+│   │   ├── class_info.json
+│   │   └── meta.json
+│   └── rfdetr_run_2/
+│       └── ...
+├── inference/              # Inference results (auto-created)
+│   ├── rfdetr_run_1/
+│   │   ├── video_1/
+│   │   │   ├── result.json
+│   │   │   └── detected.mp4
+│   │   └── video_2/
+│   │       └── result.json
+│   └── rfdetr_run_2/
+│       └── video_1/
+│           └── result.json
+└── ...
 ```
 
-### Model Selection Criteria
+## CLI Inference
 
-- **Best mAP**: Use `best.pth` (automatically selected)
-- **Latest**: Use `checkpoint_last.pth`
-- **Specific epoch**: Use `checkpoint_epoch_N.pth`
-
-## Step 2: Prepare Input
-
-### Organize Files
-
-```bash
-# Single file
---input video.mp4
-
-# Multiple files
---input video1.mp4 video2.mp4 video3.mp4
-
-# Wildcards
---input "videos/*.mp4"
---input "images/*.jpg"
-```
-
-### Supported Formats
-
-**Images**: `.jpg`, `.jpeg`, `.png`, `.bmp`  
-**Videos**: `.mp4`, `.avi`, `.mov`, `.mkv`
-
-## Step 3: Configure Inference
-
-### Confidence Threshold
-
-Controls detection sensitivity:
-
-| Threshold | Use Case | Trade-off |
-|-----------|----------|-----------|
-| 0.3-0.4 | High recall needed | More false positives |
-| 0.5 (default) | Balanced | Good starting point |
-| 0.7-0.8 | High precision needed | May miss detections |
-
-### Tracking Options
-
-Enable for videos with moving objects:
-
-```bash
---track                    # Enable tracking
---track-buffer 30         # Keep tracks 30 frames after loss
---track-thresh 0.25       # Lower threshold for association
---match-thresh 0.8        # IoU threshold for matching
-```
-
-### Frame Interval
-
-Process every Nth frame for speed:
-
-```bash
---frame-interval 1        # Every frame (default)
---frame-interval 5        # Every 5th frame
---frame-interval 10       # Every 10th frame
-```
-
-## Step 4: Run Inference
-
-### Local Inference
-
-#### Basic Video Inference
+### Run on All Project Videos
 
 ```bash
 python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --confidence 0.5
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1
 ```
 
-#### With Tracking
+### Run on Test-Only Videos
+
+Videos marked with `exclude_from_training: true` can be targeted specifically:
 
 ```bash
 python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --track \
-  --confidence 0.5 \
-  --track-buffer 30
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --test-only
 ```
 
-#### Fast Processing
+### Run with Tracking
 
 ```bash
 python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --frame-interval 5 \
-  --track
-```
-
-#### Batch Images
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input "images/*.jpg" \
-  --confidence 0.6
-```
-
-### SLURM Cluster Inference
-
-#### Basic Submission
-
-```bash
-./submit_inference.sh \
-  --run my_training_run \
-  --input video.mp4 \
-  --gpu a100-40
-```
-
-#### Multiple Videos
-
-```bash
-./submit_inference.sh \
-  --run my_training_run \
-  --input "videos/*.mp4" \
-  --gpu a100-40 \
-  --track
-```
-
-#### With Custom Classes
-
-```bash
-./submit_inference.sh \
-  --run my_training_run \
-  --project data/projects/MyProject \
-  --input video.mp4 \
-  --gpu a100-40
-```
-
-## Step 5: Review Results
-
-### Output Structure
-
-```
-inference_results/20260128_110804/
-├── detected_video.mp4      # Annotated video
-├── detections.json         # JSON results
-└── metadata.json           # Configuration
-```
-
-### JSON Format
-
-```json
-{
-  "video": "video.mp4",
-  "frames": [
-    {
-      "frame_id": 0,
-      "timestamp": 0.0,
-      "detections": [
-        {
-          "bbox": [x1, y1, x2, y2],
-          "confidence": 0.95,
-          "class_id": 0,
-          "class_name": "person",
-          "track_id": 1
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Analyze Results
-
-```bash
-# View annotated video
-open inference_results/20260128_110804/detected_video.mp4
-
-# Parse JSON
-python -c "
-import json
-with open('inference_results/20260128_110804/detections.json') as f:
-    data = json.load(f)
-    total_detections = sum(len(frame['detections']) for frame in data['frames'])
-    print(f'Total detections: {total_detections}')
-"
-```
-
-## Step 6: Optimize Performance
-
-### For Speed
-
-1. **Skip frames**:
-   ```bash
-   --frame-interval 5 --track
-   ```
-
-2. **Lower resolution**:
-   - Resize videos before inference
-   - Use smaller model (`base` instead of `large`)
-
-3. **Disable visualizations**:
-   ```bash
-   --no-visualizations
-   ```
-
-4. **Use smaller GPU** (cluster):
-   ```bash
-   --gpu a100-40
-   ```
-
-### For Accuracy
-
-1. **Lower confidence**:
-   ```bash
-   --confidence 0.3
-   ```
-
-2. **Process all frames**:
-   ```bash
-   --frame-interval 1
-   ```
-
-3. **Tune tracking**:
-   ```bash
-   --track \
-   --track-thresh 0.2 \
-   --track-buffer 60 \
-   --match-thresh 0.7
-   ```
-
-4. **Use larger model**:
-   - Train with `--model large`
-
-## Common Scenarios
-
-### Scenario 1: Real-time Monitoring
-
-Fast inference for live monitoring:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input camera_feed.mp4 \
-  --frame-interval 10 \
-  --track \
-  --confidence 0.6
-```
-
-### Scenario 2: Offline Analysis
-
-High-quality analysis of recorded footage:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input archive_video.mp4 \
-  --frame-interval 1 \
-  --track \
-  --confidence 0.5 \
-  --track-buffer 60
-```
-
-### Scenario 3: Batch Processing
-
-Process multiple videos:
-
-```bash
-./submit_inference.sh \
-  --run my_training_run \
-  --input "videos/*.mp4" \
-  --gpu a100-40 \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
   --track \
   --frame-interval 5
 ```
 
-### Scenario 4: High Precision Detection
-
-Strict detection with high confidence:
+### Use the Latest Training Run
 
 ```bash
 python -m cli.inference \
-  --run my_training_run \
-  --input important_video.mp4 \
-  --confidence 0.8 \
-  --track
+  --project data/projects/CraneHook \
+  --latest
 ```
 
-### Scenario 5: High Recall Detection
+## SLURM Cluster Inference
 
-Catch all possible detections:
+### Basic Submission
 
 ```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input surveillance.mp4 \
-  --confidence 0.3 \
+./submit_inference.sh \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --gpu a100-40
+```
+
+### Test-Only Videos on Cluster
+
+```bash
+./submit_inference.sh \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --test-only \
   --track \
-  --track-thresh 0.15
+  --gpu a100-40
 ```
 
-## Tracking Deep Dive
+## Web UI Inference
 
-### When to Use Tracking
+The Web UI provides a visual interface for running and browsing inference results.
 
-✅ **Use tracking when:**
-- Processing videos with moving objects
-- Need persistent object IDs
-- Objects may be temporarily occluded
-- Want temporal consistency
+### Running Inference
 
-❌ **Skip tracking when:**
-- Processing individual images
-- Objects don't move between frames
-- Processing speed is critical
+1. Navigate to the **Inference** page for your project
+2. Click **Run Inference**
+3. Select a training run (model)
+4. Select a video
+5. Configure settings (confidence, tracking, etc.)
+6. Click **Run & Save** -- results are persisted automatically
 
-### Tracking Parameters Explained
+### Browsing Results
 
-#### `--track-buffer N`
+The Inference page shows a **runs × videos matrix**:
 
-How long to keep "lost" tracks:
+- Each cell shows whether inference has been run and key stats
+- Click a cell to view detailed results (stats, config, detection timeline)
+- Delete results you no longer need
 
-- **Short (15-30)**: Fast-moving objects, no occlusions
-- **Medium (30-60)**: General purpose, some occlusions
-- **Long (60-90)**: Frequent occlusions, slow objects
+## Managing Test Videos
 
-#### `--track-thresh THRESHOLD`
+You can designate videos as "test-only" so they're excluded from training datasets but available for inference.
 
-Lower threshold for associating detections to tracks:
+### CLI
 
-- **0.15-0.20**: Very permissive (may get false associations)
-- **0.25 (default)**: Balanced
-- **0.30-0.40**: Strict (may lose tracks)
+```bash
+# Add a test video
+python -m cli.videos add --project data/projects/CraneHook --test-only /path/to/test_video.mp4
 
-#### `--match-thresh THRESHOLD`
+# Toggle existing video to test-only
+python -m cli.videos set-test --project data/projects/CraneHook video_2 --on
 
-IoU threshold for matching boxes:
+# List videos (shows [TEST-ONLY] flag)
+python -m cli.videos list --project data/projects/CraneHook
+```
 
-- **0.6-0.7**: Permissive (accept loose matches)
-- **0.8 (default)**: Balanced
-- **0.9-0.95**: Strict (boxes must overlap closely)
+### Web UI
 
-#### `--no-kalman`
+On the Project page, each video card has a **Training / Test Only** toggle button. Click it to change the video's role.
 
-Disable Kalman filter prediction on non-keyframes:
+## Comparing Runs
 
-Use when `--frame-interval > 1` but objects move unpredictably.
+The project-centric structure makes it easy to compare different training runs:
+
+1. Run inference with run A on your test videos
+2. Run inference with run B on the same test videos
+3. Open the Inference page to see the runs × videos matrix
+4. Click cells to compare stats (detection counts, inference time, etc.)
+
+## Checkpoint Resolution
+
+When you specify `--run`, the CLI looks for checkpoints in this order:
+
+1. `checkpoint_best_total.pth`
+2. `checkpoint_best_ema.pth`
+3. `checkpoint_best_regular.pth`
+4. `best.pth`
+5. `checkpoint.pth`
+6. Fallback: newest `.pth` file
+
+Class names are loaded from `class_info.json` in the run directory (authoritative), with fallback to the project's class list.
+
+## Performance Tips
+
+| Goal | Setting |
+|------|---------|
+| Maximum accuracy | `--frame-interval 1` (default) |
+| 5x faster | `--frame-interval 5 --track` |
+| 10x faster | `--frame-interval 10 --track` |
+| High precision | `--confidence 0.7-0.8` |
+| High recall | `--confidence 0.3-0.4` |
 
 ## Troubleshooting
 
 ### No Detections
 
-**Solutions:**
 1. Lower confidence: `--confidence 0.3`
-2. Check class names: `--project` or `--classes`
-3. Verify model: Correct training run
-4. Test on training images
+2. Check class names in the run's `class_info.json`
+3. Verify the correct training run
 
-### Too Many False Positives
+### Tracking Issues
 
-**Solutions:**
-1. Raise confidence: `--confidence 0.7`
-2. Retrain with more data
-3. Check training metrics
-
-### Tracking IDs Switching
-
-**Solutions:**
-1. Increase match threshold: `--match-thresh 0.9`
-2. Reduce track buffer: `--track-buffer 15`
-3. Adjust track threshold: `--track-thresh 0.3`
-
-### Lost Tracks
-
-**Solutions:**
-1. Increase track buffer: `--track-buffer 60`
-2. Lower track threshold: `--track-thresh 0.2`
-3. Lower match threshold: `--match-thresh 0.7`
+- IDs switching: `--match-thresh 0.9`
+- Lost tracks: `--track-buffer 60`
+- Duplicate IDs: `--track-thresh 0.2`
 
 ### Slow Inference
 
-**Solutions:**
-1. Skip frames: `--frame-interval 5`
-2. Disable optimization: `--no-optimize` (if errors)
-3. Use smaller model
-4. Resize video
-
-## Post-Processing
-
-### Extract Statistics
-
-```python
-import json
-
-with open('inference_results/20260128_110804/detections.json') as f:
-    data = json.load(f)
-
-# Count detections per class
-class_counts = {}
-for frame in data['frames']:
-    for det in frame['detections']:
-        class_name = det['class_name']
-        class_counts[class_name] = class_counts.get(class_name, 0) + 1
-
-print(class_counts)
-```
-
-### Filter by Confidence
-
-```python
-high_confidence = []
-for frame in data['frames']:
-    filtered_dets = [d for d in frame['detections'] if d['confidence'] > 0.8]
-    if filtered_dets:
-        high_confidence.append({
-            'frame_id': frame['frame_id'],
-            'detections': filtered_dets
-        })
-```
-
-### Track Analysis
-
-```python
-# Find longest tracks
-track_lengths = {}
-for frame in data['frames']:
-    for det in frame['detections']:
-        track_id = det['track_id']
-        track_lengths[track_id] = track_lengths.get(track_id, 0) + 1
-
-longest_tracks = sorted(track_lengths.items(), key=lambda x: x[1], reverse=True)[:10]
-print(f"Longest tracks: {longest_tracks}")
-```
-
-## Best Practices
-
-### 1. Start with Defaults
-
-```bash
-python -m cli.inference --run my_run --input video.mp4
-```
-
-### 2. Enable Tracking for Videos
-
-```bash
---track
-```
-
-### 3. Tune Confidence Iteratively
-
-Start at 0.5, adjust based on results.
-
-### 4. Use Appropriate GPU
-
-- **Local**: Use available GPU (auto)
-- **Cluster**: A100-40 is cost-effective
-
-### 5. Save JSON for Analysis
-
-Don't skip JSON output:
-
-```bash
-# Saves both video and JSON
-python -m cli.inference --run my_run --input video.mp4
-```
-
-### 6. Monitor Resource Usage
-
-```bash
-# While inference runs
-nvidia-smi -l 1
-```
+- Skip frames: `--frame-interval 5`
+- Don't write video: `--no-video`
+- Use A100-40 on cluster (cost-effective)
 
 ## Related
 
-- **[Inference CLI](../cli/inference.md)** - Command reference
-- **[Submit Inference Script](../scripts/submit-inference.md)** - SLURM inference
-- **[Training Workflow](training.md)** - Train models
-- **[Benchmarking Guide](benchmarking.md)** - Measure performance
+- **[Inference CLI](../cli/inference.md)** -- Command reference
+- **[Video Management CLI](../cli/videos.md)** -- Add/remove project videos
+- **[Submit Inference Script](../scripts/submit-inference.md)** -- SLURM inference
+- **[Training Workflow](training.md)** -- Train models

@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Run RF-DETR inference on images or videos.
+Run RF-DETR inference on project videos.
+
+All inference is project-centric: results are persisted under
+{project}/inference/{run_name}/{video_id}/.
 
 Usage:
-    # Using run name + project for class names
-    python -m cli.inference --run rfdetr_h200_20260120_105925 \\
-        --project data/projects/CraneHook --input video.mp4
+    # Run a training run's model on all project videos
+    python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1
 
-    # Using the latest run
-    python -m cli.inference --latest --project data/projects/CraneHook --input video.mp4
+    # Run on a specific project video
+    python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1 \\
+        --video video_2
 
-    # Using explicit checkpoint path
-    python -m cli.inference --checkpoint runs/my_run/best.pth --input image.jpg
+    # Run on test-only videos
+    python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1 --test-only
 
-    # Video with frame skipping + tracking + Kalman prediction (smooth interpolation)
-    python -m cli.inference --run my_run -p data/projects/MyProject \\
-        --input video.mp4 --frame-interval 3 --track
+    # Use the latest training run
+    python -m cli.inference --project data/projects/CraneHook --latest
 
-    # Skip optimization (faster startup, slower inference)
-    python -m cli.inference --run my_run --input video.mp4 --no-optimize
-
-    # Custom output directory
-    python -m cli.inference --run my_run --input video.mp4 --output results/
+    # With tracking and frame skipping
+    python -m cli.inference --project data/projects/CraneHook --run my_run \\
+        --track --frame-interval 5
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import socket
 import sys
 import time
 from datetime import datetime
@@ -36,12 +35,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
 from loguru import logger
 from tqdm import tqdm
 
 from src.core.inference import (
-    Detection,
     FrameResult,
     InferenceConfig,
     InferenceStats,
@@ -49,435 +46,256 @@ from src.core.inference import (
     draw_detections,
     save_results_json,
 )
+from src.core.project import Project
+from src.core.trainer import find_best_checkpoint
 
 
-RUNS_DIR = Path("runs")
+def resolve_run(project: Project, args) -> tuple[Path, str]:
+    """
+    Resolve checkpoint path and run name from project runs.
 
-
-def find_checkpoint_in_run(run_dir: Path) -> Path | None:
-    """Find the best checkpoint in a run directory."""
-    # Common checkpoint names in order of preference
-    checkpoint_names = [
-        "checkpoint_best_total.pth",
-        "best.pth",
-        "checkpoint_best.pth",
-        "checkpoint_final.pth",
-        "final.pth",
-    ]
-
-    for name in checkpoint_names:
-        checkpoint = run_dir / name
-        if checkpoint.exists():
-            return checkpoint
-
-    # Fallback: find any .pth file
-    pth_files = list(run_dir.glob("*.pth"))
-    if pth_files:
-        # Sort by modification time, newest first
-        pth_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return pth_files[0]
-
-    return None
-
-
-def resolve_checkpoint(args) -> Path:
-    """Resolve checkpoint path from args (--checkpoint, --run, or --latest)."""
-    if args.checkpoint:
-        return args.checkpoint
+    Returns:
+        (checkpoint_path, run_name)
+    """
+    runs_dir = project.runs_dir
+    if not runs_dir.exists() or not any(runs_dir.iterdir()):
+        logger.error(f"No training runs found in {runs_dir}")
+        sys.exit(1)
 
     if args.latest:
-        # Find the most recent run directory
-        if not RUNS_DIR.exists():
-            logger.error(f"Runs directory not found: {RUNS_DIR}")
-            sys.exit(1)
-
-        run_dirs = [d for d in RUNS_DIR.iterdir() if d.is_dir()]
-        if not run_dirs:
-            logger.error(f"No runs found in {RUNS_DIR}")
-            sys.exit(1)
-
-        # Sort by modification time, newest first
+        run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
         run_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
         run_dir = run_dirs[0]
         logger.info(f"Using latest run: {run_dir.name}")
-
-    elif args.run:
-        run_dir = RUNS_DIR / args.run
+    else:
+        run_dir = runs_dir / args.run
         if not run_dir.exists():
             logger.error(f"Run not found: {run_dir}")
             logger.info("Available runs:")
-            if RUNS_DIR.exists():
-                for d in sorted(RUNS_DIR.iterdir()):
-                    if d.is_dir():
-                        logger.info(f"  - {d.name}")
+            for d in sorted(runs_dir.iterdir()):
+                if d.is_dir():
+                    logger.info(f"  - {d.name}")
             sys.exit(1)
 
-    checkpoint = find_checkpoint_in_run(run_dir)
+    checkpoint = find_best_checkpoint(run_dir)
     if checkpoint is None:
         logger.error(f"No checkpoint found in {run_dir}")
         sys.exit(1)
 
-    return checkpoint
+    return checkpoint, run_dir.name
 
 
-def is_video_file(path: Path) -> bool:
-    """Check if path is a video file."""
-    video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
-    return path.suffix.lower() in video_extensions
+def resolve_class_names(project: Project, run_name: str) -> list[str]:
+    """Load class names from class_info.json (authoritative), fallback to project."""
+    class_info_path = project.runs_dir / run_name / "class_info.json"
+    if class_info_path.exists():
+        with open(class_info_path) as f:
+            info = json.load(f)
+        names = info.get("classes", [])
+        if names:
+            return names
+    return project.classes
 
 
-def is_image_file(path: Path) -> bool:
-    """Check if path is an image file."""
-    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
-    return path.suffix.lower() in image_extensions
+def get_target_videos(project: Project, args) -> dict[str, dict]:
+    """Get the videos to run inference on based on args."""
+    if args.video:
+        videos_meta = project.load_videos_meta()
+        vids = {}
+        for vid_id in args.video:
+            if vid_id in videos_meta:
+                vids[vid_id] = videos_meta[vid_id]
+            else:
+                logger.warning(f"Video not found: {vid_id}")
+        if not vids:
+            logger.error("No matching videos found in project")
+            sys.exit(1)
+        return vids
 
+    if args.test_only:
+        vids = project.list_videos(test_only=True)
+        if not vids:
+            logger.error("No test-only videos found (exclude_from_training=true)")
+            sys.exit(1)
+        return vids
 
-def save_inference_config(args: argparse.Namespace, checkpoint: Path, output_dir: Path) -> None:
-    """Save inference configuration to a JSON file for reproducibility."""
-    config = {
-        "command": " ".join(sys.argv),
-        "timestamp": datetime.now().isoformat(),
-        "hostname": socket.gethostname(),
-        "working_directory": str(Path.cwd()),
-        "checkpoint": str(checkpoint),
-        "arguments": {
-            "checkpoint": str(checkpoint),
-            "run": args.run if hasattr(args, "run") else None,
-            "latest": args.latest if hasattr(args, "latest") else False,
-            "input": [str(p) for p in args.input],
-            "output": str(output_dir),
-            "model": args.model,
-            "confidence": args.confidence,
-            "device": args.device,
-            "frame_interval": args.frame_interval,
-            "track": args.track,
-            "no_kalman": args.no_kalman,
-            "track_thresh": args.track_thresh,
-            "track_buffer": args.track_buffer,
-            "match_thresh": args.match_thresh,
-            "optimize": not args.no_optimize,
-            "optimize_compile": args.optimize_compile,
-            "project": str(args.project) if args.project else None,
-            "classes": args.classes,
-        },
-        "environment": {
-            "python_executable": sys.executable,
-            "python_version": sys.version.split()[0],
-        },
-    }
-    
-    # Save to output directory
-    config_path = output_dir / "inference_config.json"
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
-    
-    logger.info(f"Configuration saved to: {config_path}")
-
-
-def process_single_image(
-    engine: RFDETRInference,
-    image_path: Path,
-    output_dir: Path,
-    config: InferenceConfig,
-) -> tuple[int, float]:
-    """
-    Process a single image.
-    
-    Returns:
-        Tuple of (detection_count, inference_time_ms)
-    """
-    # Load image
-    image = Image.open(image_path)
-    image_np = np.array(image)
-    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-    
-    # Run inference
-    t0 = time.time()
-    detections = engine.predict_image(image, config)
-    inference_time = (time.time() - t0) * 1000
-    
-    logger.info(f"  {image_path.name}: {len(detections)} detections in {inference_time:.1f}ms")
-    
-    # Save visualization
-    if config.save_visualizations:
-        annotated = draw_detections(image_bgr, detections, config.visualization_thickness)
-        output_path = output_dir / f"detected_{image_path.name}"
-        cv2.imwrite(str(output_path), annotated)
-    
-    # Save JSON
-    if config.save_json:
-        json_path = output_dir / f"{image_path.stem}_detections.json"
-        save_results_json(
-            [FrameResult(
-                frame_idx=0,
-                timestamp=0,
-                detections=detections,
-                inference_time_ms=inference_time,
-            )],
-            json_path,
-            metadata={"source": str(image_path)},
-        )
-    
-    return len(detections), inference_time
+    vids = project.list_videos()
+    if not vids:
+        logger.error("No videos found in project")
+        sys.exit(1)
+    return vids
 
 
 def process_video(
     engine: RFDETRInference,
     video_path: Path,
-    output_dir: Path,
     config: InferenceConfig,
-    save_video: bool = True,
-) -> InferenceStats:
-    """Process a video file."""
-    
-    # Open video for writing output
+    output_dir: Path,
+) -> tuple[InferenceStats | None, list[FrameResult]]:
+    """Process a video file. Returns (stats, all_results)."""
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
-    
-    # Output video writer
+
     out_video = None
-    if save_video and config.save_visualizations:
-        output_video_path = output_dir / f"detected_{video_path.stem}.mp4"
+    if config.save_visualizations:
+        output_video_path = output_dir / "detected.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out_video = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
-    
-    # Process video
+
     all_results: list[FrameResult] = []
-    pbar = tqdm(total=total_frames, desc=f"Processing {video_path.name}")
-    
+    pbar = tqdm(total=total_frames, desc=f"  {video_path.name}")
+
     def progress_callback(current: int, total: int):
         pbar.update(1)
-    
-    # Run inference generator
+
     cap = cv2.VideoCapture(str(video_path))
-    frame_idx = 0
-    stats = None
-    
+
     for result in engine.predict_video(video_path, config, progress_callback):
         all_results.append(result)
-        
-        # Write annotated frame to video
+
         if out_video is not None:
             cap.set(cv2.CAP_PROP_POS_FRAMES, result.frame_idx)
             ret, frame = cap.read()
             if ret:
                 annotated = draw_detections(frame, result.detections, config.visualization_thickness)
                 out_video.write(annotated)
-    
-    # Get stats from generator return
-    try:
-        # The generator returns stats after completion
-        pass
-    except StopIteration as e:
-        stats = e.value
-    
+
     pbar.close()
     cap.release()
-    
+
     if out_video is not None:
         out_video.release()
-        logger.info(f"  Output video: {output_video_path}")
-    
-    # Calculate stats if not returned
-    if stats is None:
-        inference_times = [r.inference_time_ms for r in all_results if r.is_keyframe]
-        stats = InferenceStats(
-            total_frames=len(all_results),
-            keyframes=sum(1 for r in all_results if r.is_keyframe),
-            total_detections=sum(len(r.detections) for r in all_results),
-            avg_inference_time_ms=np.mean(inference_times) if inference_times else 0,
-            total_time_seconds=0,
-            fps=0,
-        )
-    
-    # Save JSON results
-    if config.save_json:
-        json_path = output_dir / f"{video_path.stem}_detections.json"
-        save_results_json(
-            all_results,
-            json_path,
-            stats=stats,
-            metadata={
-                "source": str(video_path),
-                "fps": fps,
-                "resolution": f"{width}x{height}",
-                "frame_interval": config.frame_interval,
-                "tracking": config.use_tracking,
-                "kalman_prediction": config.use_kalman_prediction,
-            },
-        )
-        logger.info(f"  Results JSON: {json_path}")
-    
-    return stats
+
+    inference_times = [r.inference_time_ms for r in all_results if r.is_keyframe]
+    stats = InferenceStats(
+        total_frames=len(all_results),
+        keyframes=sum(1 for r in all_results if r.is_keyframe),
+        total_detections=sum(len(r.detections) for r in all_results),
+        avg_inference_time_ms=float(np.mean(inference_times)) if inference_times else 0,
+        total_time_seconds=0,
+        fps=0,
+    )
+
+    return stats, all_results
+
+
+def persist_result(
+    project: Project,
+    run_name: str,
+    video_id: str,
+    stats: InferenceStats,
+    all_results: list[FrameResult],
+    config: InferenceConfig,
+) -> None:
+    """Save inference result to project/inference/{run_name}/{video_id}/."""
+    frames_data = []
+    for r in all_results:
+        frames_data.append({
+            "frame_idx": r.frame_idx,
+            "timestamp": r.timestamp,
+            "is_keyframe": r.is_keyframe,
+            "inference_time_ms": r.inference_time_ms,
+            "detections": [
+                {
+                    "bbox": list(d.bbox),
+                    "class_id": d.class_id,
+                    "class_name": d.class_name,
+                    "confidence": d.confidence,
+                    "track_id": d.track_id,
+                }
+                for d in r.detections
+            ],
+        })
+
+    data = {
+        "run_name": run_name,
+        "video_id": video_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "config": {
+            "confidence_threshold": config.confidence_threshold,
+            "frame_interval": config.frame_interval,
+            "tracking": config.use_tracking,
+            "tracking_mode": "bytetrack" if config.use_tracking else "none",
+        },
+        "stats": {
+            "total_frames": stats.total_frames,
+            "keyframes": stats.keyframes,
+            "total_detections": stats.total_detections,
+            "avg_inference_time_ms": stats.avg_inference_time_ms,
+        },
+        "frames": frames_data,
+    }
+
+    result_dir = project.save_inference_result(run_name, video_id, data)
+    logger.info(f"  Result saved: {result_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run RF-DETR inference on images or videos",
+        description="Run RF-DETR inference on project videos",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use a run + project for class names
-  python -m cli.inference --run rfdetr_h200_20260120_105925 \\
-      --project data/projects/CraneHook --input video.mp4
-
-  # Use the latest run
-  python -m cli.inference --latest -p data/projects/CraneHook --input video.mp4
-
-  # Video with tracking + Kalman interpolation
-  python -m cli.inference --run my_run -p data/projects/MyProject \\
-      --input video.mp4 --frame-interval 3 --track
-
-  # Explicit checkpoint + classes
-  python -m cli.inference -c runs/run1/best.pth --classes crane_hook --input image.jpg
-
-Notes:
-  - Use --run <name> to auto-find checkpoint in runs/<name>/
-  - Use --project to load class names from a Batman project
-  - Use --latest to use the most recent run
-  - Model optimization (enabled by default) may take a few seconds at startup
-  - When using --frame-interval > 1 with --track, Kalman prediction smoothly
-    interpolates bounding boxes between keyframes (disable with --no-kalman)
+  python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1
+  python -m cli.inference --project data/projects/CraneHook --latest
+  python -m cli.inference --project data/projects/CraneHook --run my_run --video video_2
+  python -m cli.inference --project data/projects/CraneHook --run my_run --test-only
+  python -m cli.inference --project data/projects/CraneHook --run my_run --track --frame-interval 5
         """,
     )
-    
-    # Model checkpoint (one of these required)
-    checkpoint_group = parser.add_mutually_exclusive_group(required=True)
-    checkpoint_group.add_argument(
-        "--checkpoint", "-c",
-        type=Path,
-        help="Path to trained model checkpoint",
-    )
-    checkpoint_group.add_argument(
-        "--run", "-r",
-        type=str,
-        help="Run name (looks for checkpoint in runs/<name>/)",
-    )
-    checkpoint_group.add_argument(
-        "--latest",
-        action="store_true",
-        help="Use the most recent run in runs/",
-    )
 
-    # Input
-    parser.add_argument(
-        "--input", "-i",
-        type=Path,
-        nargs="+",
-        required=True,
-        help="Input image(s) or video file(s)",
-    )
-    
-    # Output
-    parser.add_argument(
-        "--output", "-o",
-        type=Path,
-        default=Path("inference_results"),
-        help="Output directory (default: inference_results)",
-    )
-    parser.add_argument(
-        "--no-visualizations",
-        action="store_true",
-        help="Don't save annotated images/videos",
-    )
-    parser.add_argument(
-        "--no-json",
-        action="store_true",
-        help="Don't save JSON detection results",
-    )
-    
-    # Model
-    parser.add_argument(
-        "--model",
-        choices=["base", "large"],
-        default="base",
-        help="Model size (default: base)",
-    )
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="Device: cuda, mps, cpu, or auto (default: auto)",
-    )
-    
-    # Detection
-    parser.add_argument(
-        "--confidence", "-t",
-        type=float,
-        default=0.5,
-        help="Confidence threshold (default: 0.5)",
-    )
-    
-    # Optimization
-    parser.add_argument(
-        "--no-optimize",
-        action="store_true",
-        help="Don't optimize model for inference (skip optimize_for_inference())",
-    )
-    parser.add_argument(
-        "--optimize-compile",
-        action="store_true",
-        help="Use JIT compilation for optimization (may fail on some systems)",
-    )
-
-    # Video options
-    parser.add_argument(
-        "--frame-interval", "-n",
-        type=int,
-        default=1,
-        help="Run inference every N frames (default: 1 = all frames)",
-    )
-    parser.add_argument(
-        "--track",
-        action="store_true",
-        help="Enable ByteTrack tracking between frames",
-    )
-    parser.add_argument(
-        "--no-kalman",
-        action="store_true",
-        help="Disable Kalman prediction on non-keyframes (only with --track)",
-    )
-    parser.add_argument(
-        "--track-thresh",
-        type=float,
-        default=0.25,
-        help="ByteTrack: detection threshold for tracking (default: 0.25)",
-    )
-    parser.add_argument(
-        "--track-buffer",
-        type=int,
-        default=30,
-        help="ByteTrack: frames to keep lost tracks (default: 30)",
-    )
-    parser.add_argument(
-        "--match-thresh",
-        type=float,
-        default=0.8,
-        help="ByteTrack: IoU threshold for matching (default: 0.8)",
-    )
-    
-    # Classes
     parser.add_argument(
         "--project", "-p",
         type=Path,
-        help="Load class names from a Batman project (e.g., data/projects/MyProject)",
+        required=True,
+        help="Path to Batman project (required)",
     )
-    parser.add_argument(
-        "--classes",
-        type=str,
-        nargs="+",
-        help="Override class names (alternative to --project)",
-    )
-    
+
+    run_group = parser.add_mutually_exclusive_group(required=True)
+    run_group.add_argument("--run", "-r", type=str, help="Training run name")
+    run_group.add_argument("--latest", action="store_true", help="Use the most recent training run")
+
+    parser.add_argument("--video", "-v", type=str, nargs="+", help="Specific video source_key(s) to process")
+    parser.add_argument("--test-only", action="store_true", help="Only run on videos with exclude_from_training=true")
+
+    parser.add_argument("--model", choices=["base", "large"], default="base", help="Model size (default: base)")
+    parser.add_argument("--device", default="auto", help="Device: cuda, mps, cpu, or auto")
+    parser.add_argument("--confidence", "-t", type=float, default=0.5, help="Confidence threshold (default: 0.5)")
+
+    parser.add_argument("--no-optimize", action="store_true", help="Skip model optimization")
+    parser.add_argument("--optimize-compile", action="store_true", help="Use JIT compilation")
+
+    parser.add_argument("--frame-interval", "-n", type=int, default=1, help="Inference every N frames (default: 1)")
+    parser.add_argument("--track", action="store_true", help="Enable ByteTrack tracking")
+    parser.add_argument("--no-kalman", action="store_true", help="Disable Kalman prediction on non-keyframes")
+    parser.add_argument("--track-thresh", type=float, default=0.25, help="ByteTrack detection threshold")
+    parser.add_argument("--track-buffer", type=int, default=30, help="Frames to keep lost tracks")
+    parser.add_argument("--match-thresh", type=float, default=0.8, help="ByteTrack IoU threshold")
+
+    parser.add_argument("--no-video", action="store_true", help="Don't save annotated output video")
+
     args = parser.parse_args()
-    
-    # Create output directory
-    args.output.mkdir(parents=True, exist_ok=True)
-    
-    # Build config
+
+    if not args.project.exists():
+        logger.error(f"Project not found: {args.project}")
+        sys.exit(1)
+
+    project = Project.load(args.project)
+    logger.info(f"Project: {project.name} ({len(project.classes)} classes)")
+
+    checkpoint, run_name = resolve_run(project, args)
+    class_names = resolve_class_names(project, run_name)
+    logger.info(f"Run: {run_name}")
+    logger.info(f"Checkpoint: {checkpoint}")
+    logger.info(f"Classes: {class_names}")
+
+    videos = get_target_videos(project, args)
+    logger.info(f"Videos to process: {len(videos)}")
+
     config = InferenceConfig(
         confidence_threshold=args.confidence,
         device=args.device,
@@ -489,31 +307,10 @@ Notes:
         track_thresh=args.track_thresh,
         track_buffer=args.track_buffer,
         match_thresh=args.match_thresh,
-        save_visualizations=not args.no_visualizations,
-        save_json=not args.no_json,
+        save_visualizations=not args.no_video,
+        save_json=False,
     )
-    
-    # Resolve checkpoint path
-    checkpoint = resolve_checkpoint(args)
-    
-    # Save configuration for reproducibility
-    save_inference_config(args, checkpoint, args.output)
 
-    # Resolve class names
-    class_names = None
-    if args.classes:
-        class_names = args.classes
-    elif args.project:
-        from src.core import Project
-
-        if not args.project.exists():
-            logger.error(f"Project not found: {args.project}")
-            sys.exit(1)
-        project = Project.load(args.project)
-        class_names = project.classes
-        logger.info(f"Loaded {len(class_names)} classes from project: {project.name}")
-
-    # Initialize engine
     logger.info(f"Loading model from {checkpoint}")
     engine = RFDETRInference(
         checkpoint=checkpoint,
@@ -525,41 +322,28 @@ Notes:
         optimize=config.optimize,
         optimize_compile=config.optimize_compile,
     )
-    
-    logger.info(f"Classes: {engine.class_names}")
-    
-    # Process inputs
+
     total_detections = 0
-    total_time = 0
-    
-    for input_path in args.input:
-        if not input_path.exists():
-            logger.warning(f"Input not found: {input_path}")
+    for video_id, vid_meta in videos.items():
+        video_path = Path(vid_meta["original_path"])
+        if not video_path.exists():
+            logger.warning(f"Video file not found: {video_path}")
             continue
-        
-        if is_video_file(input_path):
-            logger.info(f"\nProcessing video: {input_path}")
-            stats = process_video(engine, input_path, args.output, config)
-            
-            logger.info(f"  Total frames: {stats.total_frames}")
-            logger.info(f"  Keyframes (inference): {stats.keyframes}")
-            logger.info(f"  Total detections: {stats.total_detections}")
-            logger.info(f"  Avg inference time: {stats.avg_inference_time_ms:.1f}ms")
-            
+
+        output_dir = project.inference_dir / run_name / video_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"\nProcessing: {vid_meta['filename']} ({video_id})")
+        stats, all_results = process_video(engine, video_path, config, output_dir)
+
+        if stats:
+            persist_result(project, run_name, video_id, stats, all_results, config)
+            logger.info(f"  Frames: {stats.total_frames}, Detections: {stats.total_detections}, Avg: {stats.avg_inference_time_ms:.1f}ms")
             total_detections += stats.total_detections
-            
-        elif is_image_file(input_path):
-            logger.info(f"\nProcessing image: {input_path}")
-            count, time_ms = process_single_image(engine, input_path, args.output, config)
-            total_detections += count
-            total_time += time_ms
-            
-        else:
-            logger.warning(f"Unsupported file type: {input_path}")
-    
+
     logger.info(f"\n{'='*50}")
     logger.info(f"Total detections: {total_detections}")
-    logger.info(f"Results saved to: {args.output}")
+    logger.info(f"Results saved under: {project.inference_dir / run_name}")
 
 
 if __name__ == "__main__":

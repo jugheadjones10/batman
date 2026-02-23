@@ -17,6 +17,7 @@ import {
   ChevronRight,
   Download,
   ExternalLink,
+  Grid3X3,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -68,6 +69,12 @@ export default function ProjectPage() {
   const { data: classDetails } = useQuery({
     queryKey: ['class-details', projectName],
     queryFn: () => api.classes.getDetails(projectName!),
+    enabled: !!projectName,
+  })
+
+  const { data: inferenceMatrix } = useQuery({
+    queryKey: ['inference-results', projectName],
+    queryFn: () => api.inference.listResults(projectName!),
     enabled: !!projectName,
   })
 
@@ -367,6 +374,31 @@ export default function ProjectPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          {/* Inference Results Summary */}
+          {inferenceMatrix && (inferenceMatrix.runs.length > 0 || (videos && videos.length > 0)) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Grid3X3 className="h-5 w-5" />
+                  Inference
+                </CardTitle>
+                <CardDescription>
+                  {inferenceMatrix.runs.length > 0
+                    ? `${inferenceMatrix.runs.length} run${inferenceMatrix.runs.length !== 1 ? 's' : ''} evaluated on ${inferenceMatrix.videos.length} video${inferenceMatrix.videos.length !== 1 ? 's' : ''}`
+                    : 'No inference results yet'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Link to={`/projects/${projectName}/inference`}>
+                  <Button variant="outline" className="w-full gap-2">
+                    <Play className="h-4 w-4" />
+                    {inferenceMatrix.runs.length > 0 ? 'View Results' : 'Run Inference'}
+                  </Button>
+                </Link>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Classes */}
           <Card>
             <CardHeader>
@@ -843,6 +875,20 @@ function VideoCard({
     },
   })
 
+  const toggleTestMutation = useMutation({
+    mutationFn: () =>
+      api.videos.update(projectName, video.id, {
+        exclude_from_training: !video.exclude_from_training,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['videos', projectName] })
+      toast({
+        title: video.exclude_from_training ? 'Included in training' : 'Marked as test-only',
+        type: 'success',
+      })
+    },
+  })
+
   return (
     <div className="group rounded-lg border border-border hover:border-primary/30 transition-colors overflow-hidden">
       {/* Video preview row */}
@@ -857,10 +903,17 @@ function VideoCard({
           <div className="absolute bottom-1 right-1 px-1.5 py-0.5 bg-black/70 rounded text-xs">
             {formatDuration(video.duration)}
           </div>
+          {video.exclude_from_training && (
+            <div className="absolute top-1 left-1 px-1.5 py-0.5 bg-amber-600/90 text-white rounded text-[10px] font-medium">
+              TEST ONLY
+            </div>
+          )}
         </div>
 
         <div className="flex-1 min-w-0">
-          <h4 className="font-medium truncate text-lg">{video.filename}</h4>
+          <div className="flex items-center gap-2">
+            <h4 className="font-medium truncate text-lg">{video.filename}</h4>
+          </div>
           <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
             <span>{video.width}×{video.height}</span>
             <span>{video.fps.toFixed(1)} fps</span>
@@ -868,6 +921,20 @@ function VideoCard({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => toggleTestMutation.mutate()}
+            disabled={toggleTestMutation.isPending}
+            className={`
+              text-xs px-2 py-1 rounded border transition-colors
+              ${video.exclude_from_training
+                ? 'border-amber-500/50 text-amber-600 hover:bg-amber-500/10'
+                : 'border-border text-muted-foreground hover:border-primary/50'
+              }
+            `}
+            title={video.exclude_from_training ? 'Include in training' : 'Mark as test-only'}
+          >
+            {video.exclude_from_training ? 'Test Only' : 'Training'}
+          </button>
           {video.frame_count === 0 ? (
             <Button
               variant="outline"

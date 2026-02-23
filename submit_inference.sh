@@ -1,13 +1,17 @@
 #!/bin/bash
 #===============================================================================
-# Submit RF-DETR Inference Job to SLURM
+# Submit RF-DETR Inference Job to SLURM (Project-Centric)
 #===============================================================================
 #
+# All inference is project-centric: --project is required.
+# Results are saved under {project}/inference/{run_name}/{video_id}/.
+#
 # Usage:
-#   ./submit_inference.sh --run rfdetr_h200_20260120_105925 --project data/projects/CraneHook --input video.mp4
-#   ./submit_inference.sh --latest --project data/projects/CraneHook --input video.mp4
-#   ./submit_inference.sh --checkpoint runs/my_run/best.pth --input images/*.jpg
-#   ./submit_inference.sh --run my_run -p data/projects/MyProject --input video.mp4 --frame-interval 5 --track
+#   ./submit_inference.sh --project data/projects/CraneHook --run rfdetr_run_1
+#   ./submit_inference.sh --project data/projects/CraneHook --latest
+#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --video video_2
+#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --test-only
+#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --track --frame-interval 5
 #
 # GPU Options:
 #   --gpu=TYPE    GPU type (h200, h100-96, h100-47, a100-80, a100-40, nv)
@@ -23,23 +27,22 @@ set -e
 GPU_TYPE="a100-40"
 PARTITION=""
 TIME="04:00:00"
-CHECKPOINT=""
 RUN=""
 LATEST=false
 PROJECT=""
-INPUT_FILES=""
-OUTPUT_DIR=""
+VIDEO=""
+TEST_ONLY=false
 MODEL="base"
 CONFIDENCE=0.5
 FRAME_INTERVAL=1
 TRACK=false
 NO_KALMAN=false
 NO_OPTIMIZE=false
+NO_VIDEO=false
 TRACK_THRESH=0.25
 TRACK_BUFFER=30
 MATCH_THRESH=0.8
 DRY_RUN=false
-CLASSES=""
 EXTRA_ARGS=""
 
 #-------------------------------------------------------------------------------
@@ -48,32 +51,31 @@ EXTRA_ARGS=""
 show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Model Selection (one required):"
-    echo "  --run=NAME           Run name (auto-finds checkpoint in runs/<name>/)"
-    echo "  --latest             Use the most recent run in runs/"
-    echo "  --checkpoint=PATH    Explicit path to model checkpoint"
-    echo ""
-    echo "Class Names (recommended):"
-    echo "  --project=PATH, -p   Load class names from a Batman project"
-    echo "  --classes=NAMES      Manually specify class names (space-separated)"
-    echo ""
     echo "Required:"
-    echo "  --input=FILES        Input image(s) or video file(s)"
+    echo "  --project=PATH, -p   Path to Batman project"
+    echo ""
+    echo "Run Selection (one required):"
+    echo "  --run=NAME           Training run name from project/runs/"
+    echo "  --latest             Use the most recent run"
+    echo ""
+    echo "Video Selection (optional):"
+    echo "  --video=ID           Specific video source_key(s) (space-separated)"
+    echo "  --test-only          Only run on test-only videos"
     echo ""
     echo "GPU Options:"
     echo "  --gpu=TYPE           GPU type (default: a100-40)"
-    echo "  --time=HH:MM:SS      Time limit (default: 04:00:00)"
+    echo "  --time=HH:MM:SS     Time limit (default: 04:00:00)"
     echo ""
     echo "Inference Options:"
-    echo "  --output=PATH        Output directory (default: inference_results/<timestamp>)"
     echo "  --model=SIZE         Model size: base, large (default: base)"
     echo "  --confidence=N       Confidence threshold (default: 0.5)"
-    echo "  --no-optimize        Skip model optimization (faster startup)"
+    echo "  --no-optimize        Skip model optimization"
     echo ""
     echo "Video Options:"
     echo "  --frame-interval=N   Run inference every N frames (default: 1)"
     echo "  --track              Enable ByteTrack tracking"
     echo "  --no-kalman          Disable Kalman prediction on non-keyframes"
+    echo "  --no-video           Don't save annotated output video"
     echo "  --track-thresh=N     ByteTrack detection threshold (default: 0.25)"
     echo "  --track-buffer=N     Frames to keep lost tracks (default: 30)"
     echo "  --match-thresh=N     IoU threshold for matching (default: 0.8)"
@@ -83,14 +85,9 @@ show_help() {
     echo "  --help               Show this help"
     echo ""
     echo "Examples:"
-    echo "  # Use run name + project for classes"
-    echo "  $0 --run rfdetr_h200_20260120_105925 --project data/projects/CraneHook --input video.mp4"
-    echo ""
-    echo "  # Use latest run with tracking"
-    echo "  $0 --latest -p data/projects/CraneHook --input video.mp4 --frame-interval 5 --track"
-    echo ""
-    echo "  # Explicit checkpoint"
-    echo "  $0 --checkpoint runs/run1/best.pth --classes crane_hook --input video.mp4"
+    echo "  $0 --project data/projects/CraneHook --run rfdetr_run_1"
+    echo "  $0 --project data/projects/CraneHook --latest --track --frame-interval 5"
+    echo "  $0 --project data/projects/CraneHook --run my_run --test-only"
     exit 0
 }
 
@@ -102,17 +99,14 @@ while [[ $# -gt 0 ]]; do
         --partition)       PARTITION="$2"; shift 2 ;;
         --time=*)          TIME="${1#*=}"; shift ;;
         --time)            TIME="$2"; shift 2 ;;
-        --checkpoint=*|-c=*) CHECKPOINT="${1#*=}"; shift ;;
-        --checkpoint|-c)   CHECKPOINT="$2"; shift 2 ;;
         --run=*|-r=*)      RUN="${1#*=}"; shift ;;
         --run|-r)          RUN="$2"; shift 2 ;;
         --latest)          LATEST=true; shift ;;
         --project=*|-p=*)  PROJECT="${1#*=}"; shift ;;
         --project|-p)      PROJECT="$2"; shift 2 ;;
-        --input=*|-i=*)    INPUT_FILES="${1#*=}"; shift ;;
-        --input|-i)        INPUT_FILES="$2"; shift 2 ;;
-        --output=*|-o=*)   OUTPUT_DIR="${1#*=}"; shift ;;
-        --output|-o)       OUTPUT_DIR="$2"; shift 2 ;;
+        --video=*|-v=*)    VIDEO="${1#*=}"; shift ;;
+        --video|-v)        VIDEO="$2"; shift 2 ;;
+        --test-only)       TEST_ONLY=true; shift ;;
         --model=*)         MODEL="${1#*=}"; shift ;;
         --model)           MODEL="$2"; shift 2 ;;
         --confidence=*|-t=*) CONFIDENCE="${1#*=}"; shift ;;
@@ -122,92 +116,69 @@ while [[ $# -gt 0 ]]; do
         --track)           TRACK=true; shift ;;
         --no-kalman)       NO_KALMAN=true; shift ;;
         --no-optimize)     NO_OPTIMIZE=true; shift ;;
+        --no-video)        NO_VIDEO=true; shift ;;
         --track-thresh=*)  TRACK_THRESH="${1#*=}"; shift ;;
         --track-thresh)    TRACK_THRESH="$2"; shift 2 ;;
         --track-buffer=*)  TRACK_BUFFER="${1#*=}"; shift ;;
         --track-buffer)    TRACK_BUFFER="$2"; shift 2 ;;
         --match-thresh=*)  MATCH_THRESH="${1#*=}"; shift ;;
         --match-thresh)    MATCH_THRESH="$2"; shift 2 ;;
-        --classes=*)       CLASSES="${1#*=}"; shift ;;
-        --classes)         CLASSES="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         show_help ;;
         *)                 EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
 
-# Validate: must have one of --checkpoint, --run, or --latest
-if [ -z "$CHECKPOINT" ] && [ -z "$RUN" ] && [ "$LATEST" = false ]; then
-    echo "Error: Must specify one of --checkpoint, --run, or --latest"
+# Validate: --project is required
+if [ -z "$PROJECT" ]; then
+    echo "Error: --project is required"
     exit 1
 fi
 
-if [ -z "$INPUT_FILES" ]; then
-    echo "Error: --input is required"
+# Validate: must have one of --run or --latest
+if [ -z "$RUN" ] && [ "$LATEST" = false ]; then
+    echo "Error: Must specify --run or --latest"
     exit 1
-fi
-
-# Generate output directory if not specified
-if [ -z "$OUTPUT_DIR" ]; then
-    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    OUTPUT_DIR="inference_results/${TIMESTAMP}"
 fi
 
 #-------------------------------------------------------------------------------
 # GPU Configuration
 #-------------------------------------------------------------------------------
 case $GPU_TYPE in
-    h200)
-        PARTITION="${PARTITION:-gpu}"
-        GRES="gpu:h200:1"
-        ;;
-    h100-96)
-        PARTITION="${PARTITION:-gpu-long}"
-        GRES="gpu:h100-96:1"
-        ;;
-    h100-47)
-        PARTITION="${PARTITION:-gpu-long}"
-        GRES="gpu:h100-47:1"
-        ;;
-    a100-80)
-        PARTITION="${PARTITION:-gpu-long}"
-        GRES="gpu:a100-80:1"
-        ;;
-    a100-40)
-        PARTITION="${PARTITION:-gpu-long}"
-        GRES="gpu:a100-40:1"
-        ;;
-    nv)
-        PARTITION="${PARTITION:-gpu-short}"
-        GRES="gpu:nv:1"
-        ;;
-    *)
-        echo "Unknown GPU type: $GPU_TYPE"
-        exit 1
-        ;;
+    h200)       PARTITION="${PARTITION:-gpu}";       GRES="gpu:h200:1" ;;
+    h100-96)    PARTITION="${PARTITION:-gpu-long}";   GRES="gpu:h100-96:1" ;;
+    h100-47)    PARTITION="${PARTITION:-gpu-long}";   GRES="gpu:h100-47:1" ;;
+    a100-80)    PARTITION="${PARTITION:-gpu-long}";   GRES="gpu:a100-80:1" ;;
+    a100-40)    PARTITION="${PARTITION:-gpu-long}";   GRES="gpu:a100-40:1" ;;
+    nv)         PARTITION="${PARTITION:-gpu-short}";  GRES="gpu:nv:1" ;;
+    *)          echo "Unknown GPU type: $GPU_TYPE"; exit 1 ;;
 esac
 
 #-------------------------------------------------------------------------------
-# Build Model Selection Argument
+# Build Python Arguments
 #-------------------------------------------------------------------------------
-MODEL_ARG=""
-if [ -n "$CHECKPOINT" ]; then
-    MODEL_ARG="--checkpoint ${CHECKPOINT}"
-elif [ -n "$RUN" ]; then
-    MODEL_ARG="--run ${RUN}"
+RUN_ARG=""
+if [ -n "$RUN" ]; then
+    RUN_ARG="--run ${RUN}"
 elif [ "$LATEST" = true ]; then
-    MODEL_ARG="--latest"
+    RUN_ARG="--latest"
 fi
 
-#-------------------------------------------------------------------------------
-# Build Class Names Argument
-#-------------------------------------------------------------------------------
-CLASS_ARG=""
-if [ -n "$PROJECT" ]; then
-    CLASS_ARG="--project ${PROJECT}"
-elif [ -n "$CLASSES" ]; then
-    CLASS_ARG="--classes ${CLASSES}"
+VIDEO_ARG=""
+if [ -n "$VIDEO" ]; then
+    VIDEO_ARG="--video ${VIDEO}"
 fi
+
+TRACK_ARGS=""
+if [ "$TRACK" = true ]; then
+    TRACK_ARGS="--track --track-thresh ${TRACK_THRESH} --track-buffer ${TRACK_BUFFER} --match-thresh ${MATCH_THRESH}"
+fi
+
+OPT_FLAGS=""
+[ "$NO_KALMAN" = true ] && OPT_FLAGS="$OPT_FLAGS --no-kalman"
+[ "$NO_OPTIMIZE" = true ] && OPT_FLAGS="$OPT_FLAGS --no-optimize"
+[ "$NO_VIDEO" = true ] && OPT_FLAGS="$OPT_FLAGS --no-video"
+[ "$TEST_ONLY" = true ] && OPT_FLAGS="$OPT_FLAGS --test-only"
 
 #-------------------------------------------------------------------------------
 # Create SLURM Script
@@ -226,76 +197,37 @@ cat > "$SLURM_SCRIPT" << SLURM_EOF
 #SBATCH --output=logs/slurm_%j_inference.out
 #SBATCH --error=logs/slurm_%j_inference.err
 
-# Start total timer
 TOTAL_START=\$(date +%s)
 
 echo "============================================================"
-echo "RF-DETR Inference Job"
+echo "RF-DETR Inference Job (Project-Centric)"
 echo "============================================================"
 echo "Job ID:       \$SLURM_JOB_ID"
 echo "Node:         \$SLURMD_NODENAME"
 echo "GPU:          ${GPU_TYPE}"
+echo "Project:      ${PROJECT}"
 echo "Started:      \$(date)"
 echo "============================================================"
 echo ""
 
-# Navigate to project directory
 cd ~/batman
-
-# Activate virtual environment
 source .venv/bin/activate
 
-# Prevent OpenBLAS threading issues
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 
-# Show GPU info
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
 echo ""
-echo "Inference Configuration:"
-echo "  Model:          ${MODEL_ARG}"
-echo "  Project:        ${PROJECT:-none}"
-echo "  Input:          ${INPUT_FILES}"
-echo "  Output:         ${OUTPUT_DIR}"
-echo "  Model size:     RF-DETR ${MODEL}"
-echo "  Confidence:     ${CONFIDENCE}"
-echo "  Frame interval: ${FRAME_INTERVAL}"
-echo "  Tracking:       ${TRACK}"
-echo "  Kalman:         $([ "$NO_KALMAN" = true ] && echo "disabled" || echo "enabled")"
-echo "  Optimization:   $([ "$NO_OPTIMIZE" = true ] && echo "disabled" || echo "enabled")"
-echo ""
-
-SLURM_EOF
-
-# Build tracking arguments
-TRACK_ARGS=""
-if [ "$TRACK" = true ]; then
-    TRACK_ARGS="--track --track-thresh ${TRACK_THRESH} --track-buffer ${TRACK_BUFFER} --match-thresh ${MATCH_THRESH}"
-fi
-
-# Build optional flags
-OPT_FLAGS=""
-if [ "$NO_KALMAN" = true ]; then
-    OPT_FLAGS="$OPT_FLAGS --no-kalman"
-fi
-if [ "$NO_OPTIMIZE" = true ]; then
-    OPT_FLAGS="$OPT_FLAGS --no-optimize"
-fi
-
-# Add the inference command
-cat >> "$SLURM_SCRIPT" << EOF
 echo "Starting inference..."
 echo ""
 
-# Start inference timer
 INFERENCE_START=\$(date +%s)
 
 python3 -m cli.inference \\
-    ${MODEL_ARG} \\
-    ${CLASS_ARG} \\
-    --input ${INPUT_FILES} \\
-    --output ${OUTPUT_DIR} \\
+    --project ${PROJECT} \\
+    ${RUN_ARG} \\
+    ${VIDEO_ARG} \\
     --model ${MODEL} \\
     --confidence ${CONFIDENCE} \\
     --frame-interval ${FRAME_INTERVAL} \\
@@ -304,45 +236,38 @@ python3 -m cli.inference \\
     --device cuda \\
     ${EXTRA_ARGS}
 
-# End inference timer
 INFERENCE_END=\$(date +%s)
 INFERENCE_ELAPSED=\$((INFERENCE_END - INFERENCE_START))
-
-# End total timer
 TOTAL_END=\$(date +%s)
 TOTAL_ELAPSED=\$((TOTAL_END - TOTAL_START))
-
-# Calculate setup time
 SETUP_ELAPSED=\$((INFERENCE_START - TOTAL_START))
 
 echo ""
 echo "============================================================"
 echo "Timing Summary"
 echo "============================================================"
-echo "Setup time (env + model load): \${SETUP_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((SETUP_ELAPSED/3600)) \$((SETUP_ELAPSED%3600/60)) \$((SETUP_ELAPSED%60))))"
-echo "Inference time:                \${INFERENCE_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((INFERENCE_ELAPSED/3600)) \$((INFERENCE_ELAPSED%3600/60)) \$((INFERENCE_ELAPSED%60))))"
-echo "Total time:                    \${TOTAL_ELAPSED}s (\$(printf '%02d:%02d:%02d' \$((TOTAL_ELAPSED/3600)) \$((TOTAL_ELAPSED%3600/60)) \$((TOTAL_ELAPSED%60))))"
+echo "Setup time:     \${SETUP_ELAPSED}s"
+echo "Inference time: \${INFERENCE_ELAPSED}s"
+echo "Total time:     \${TOTAL_ELAPSED}s"
 echo "============================================================"
-echo ""
-echo "Inference complete!"
-echo "Results saved to: ${OUTPUT_DIR}"
+echo "Inference complete! Results under: ${PROJECT}/inference/"
 echo "Finished: \$(date)"
 echo "============================================================"
-EOF
+SLURM_EOF
 
 #-------------------------------------------------------------------------------
 # Submit or Display
 #-------------------------------------------------------------------------------
 echo "============================================================"
-echo "RF-DETR Inference Job"
+echo "RF-DETR Inference Job (Project-Centric)"
 echo "============================================================"
 echo "GPU:          ${GPU_TYPE}"
 echo "Partition:    ${PARTITION}"
 echo "Time limit:   ${TIME}"
-echo "Model:        ${MODEL_ARG}"
-echo "Project:      ${PROJECT:-none}"
-echo "Input:        ${INPUT_FILES}"
-echo "Output:       ${OUTPUT_DIR}"
+echo "Project:      ${PROJECT}"
+echo "Run:          ${RUN_ARG}"
+echo "Video:        ${VIDEO:-all project videos}"
+echo "Test-only:    ${TEST_ONLY}"
 echo "Frame interval: ${FRAME_INTERVAL}"
 echo "Tracking:     ${TRACK}"
 echo "============================================================"
@@ -354,7 +279,6 @@ if [ "$DRY_RUN" = true ]; then
     cat "$SLURM_SCRIPT"
     echo "============================================================"
 else
-    # Submit job
     JOB_ID=$(sbatch "$SLURM_SCRIPT" | awk '{print $4}')
     echo ""
     echo "Job submitted: $JOB_ID"
@@ -365,5 +289,4 @@ else
     echo "  tail -f logs/slurm_${JOB_ID}_inference.err"
 fi
 
-# Cleanup
 rm -f "$SLURM_SCRIPT"

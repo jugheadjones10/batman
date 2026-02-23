@@ -152,19 +152,12 @@ except SystemExit:
 
 def find_best_checkpoint(output_dir: Path) -> Path:
     """Find the best checkpoint in the output directory."""
-    candidates = [
-        "checkpoint_best_total.pth",
-        "checkpoint_best_ema.pth",
-        "checkpoint_best_regular.pth",
-        "checkpoint.pth",
-    ]
+    from src.core.trainer import find_best_checkpoint as _find
 
-    for name in candidates:
-        path = output_dir / name
-        if path.exists():
-            return path
-
-    raise FileNotFoundError(f"No checkpoint found in {output_dir}")
+    result = _find(output_dir)
+    if result is None:
+        raise FileNotFoundError(f"No checkpoint found in {output_dir}")
+    return result
 
 
 def load_training_metrics(output_dir: Path) -> dict:

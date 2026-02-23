@@ -1,99 +1,52 @@
 # Submit Inference Script
 
-Submit RF-DETR inference jobs to SLURM clusters for processing images and videos.
+Submit RF-DETR inference jobs to SLURM clusters. All inference is **project-centric** -- `--project` is required and results are saved under `{project}/inference/`.
 
 ## Basic Usage
 
 ```bash
-./submit_inference.sh --run my_training_run --input video.mp4
+./submit_inference.sh --project data/projects/CraneHook --run rfdetr_run_1
 ```
-
-## Command Builder
-
-<div class="command-builder-widget" data-tool="submit_inference" data-params='[
-  {"name": "run", "type": "text", "description": "Run name", "group": "Model"},
-  {"name": "latest", "type": "flag", "description": "Use latest run", "group": "Model"},
-  {"name": "checkpoint", "type": "path", "description": "Checkpoint path", "group": "Model"},
-  {"name": "project", "type": "path", "description": "Load class names from project", "group": "Model"},
-  {"name": "classes", "type": "text", "description": "Manual class names", "group": "Model"},
-  {"name": "input", "type": "text", "required": true, "description": "Input files", "group": "Input"},
-  {"name": "gpu", "type": "choice", "choices": ["h200", "h100-96", "h100-47", "a100-80", "a100-40", "nv"], "default": "a100-40", "description": "GPU type", "group": "GPU"},
-  {"name": "time", "type": "text", "default": "04:00:00", "description": "Time limit", "group": "GPU"},
-  {"name": "output", "type": "path", "description": "Output directory (auto-generated)", "group": "Output"},
-  {"name": "model", "type": "choice", "choices": ["base", "large"], "default": "base", "description": "Model size", "group": "Inference"},
-  {"name": "confidence", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.05, "description": "Confidence threshold", "group": "Inference"},
-  {"name": "no-optimize", "type": "flag", "description": "Skip model optimization", "group": "Inference"},
-  {"name": "frame-interval", "type": "number", "default": 1, "min": 1, "description": "Process every N frames", "group": "Video"},
-  {"name": "track", "type": "flag", "description": "Enable ByteTrack", "group": "Tracking"},
-  {"name": "no-kalman", "type": "flag", "description": "Disable Kalman prediction", "group": "Tracking"},
-  {"name": "track-thresh", "type": "number", "default": 0.25, "min": 0, "max": 1, "step": 0.05, "description": "Track detection threshold", "group": "Tracking"},
-  {"name": "track-buffer", "type": "number", "default": 30, "min": 1, "description": "Lost track buffer", "group": "Tracking"},
-  {"name": "match-thresh", "type": "number", "default": 0.8, "min": 0, "max": 1, "step": 0.05, "description": "IoU match threshold", "group": "Tracking"},
-  {"name": "dry-run", "type": "flag", "description": "Show script without submitting", "group": "Other"}
-]'></div>
 
 ## Parameters
 
-### Model Selection (Choose One)
+### Required
+
+#### `--project=PATH` or `-p=PATH`
+
+Path to Batman project. All runs and videos are resolved from this project.
+
+```bash
+--project data/projects/CraneHook
+```
+
+### Run Selection (Choose One)
 
 #### `--run=NAME` or `-r=NAME`
 
-Run name to auto-find checkpoint.
+Training run name from `{project}/runs/`.
 
 ```bash
-./submit_inference.sh -r=rfdetr_h100_20260120_105925 --input video.mp4
+-r rfdetr_run_1
 ```
 
 #### `--latest`
 
 Use the most recent training run.
 
-```bash
-./submit_inference.sh --latest --input video.mp4
-```
+### Video Selection (Optional)
 
-#### `--checkpoint=PATH` or `-c=PATH`
+#### `--video=ID` or `-v=ID`
 
-Explicit checkpoint path.
+Specific video source_key(s). Without this, all project videos are processed.
 
 ```bash
-./submit_inference.sh -c=runs/my_run/best.pth --input video.mp4
+--video video_2
 ```
 
-### Class Names (Recommended)
+#### `--test-only`
 
-#### `--project=PATH` or `-p=PATH`
-
-Load class names from Batman project.
-
-```bash
-./submit_inference.sh --run my_run --project data/projects/MyProject --input video.mp4
-```
-
-#### `--classes=NAMES`
-
-Manually specify class names (space-separated).
-
-```bash
-./submit_inference.sh --run my_run --classes "person car bicycle" --input video.mp4
-```
-
-### Input (Required)
-
-#### `--input=FILES` or `-i=FILES`
-
-Input image(s) or video file(s). Supports multiple files and wildcards.
-
-```bash
-# Single video
---input=video.mp4
-
-# Multiple videos
---input="video1.mp4 video2.mp4"
-
-# Wildcards
---input="videos/*.mp4"
-```
+Only run on videos with `exclude_from_training: true`.
 
 ### GPU Options
 
@@ -104,7 +57,7 @@ GPU type to use.
 - **Default**: `a100-40`
 - **Choices**: `h200`, `h100-96`, `h100-47`, `a100-80`, `a100-40`, `nv`
 
-For inference, `a100-40` is typically sufficient and cost-effective.
+For inference, `a100-40` is typically sufficient.
 
 #### `--time=LIMIT`
 
@@ -112,41 +65,29 @@ Time limit in format `HH:MM:SS`.
 
 - **Default**: `04:00:00`
 
-### Output
-
-#### `--output=PATH` or `-o=PATH`
-
-Output directory for results.
-
-- **Default**: Auto-generated as `inference_results/{TIMESTAMP}/`
-
 ### Inference Options
 
 #### `--model=SIZE`
 
-Model architecture size.
-
-- **Choices**: `base`, `large`
-- **Default**: `base`
+Model architecture size: `base` or `large` (default: `base`).
 
 #### `--confidence=THRESHOLD`
 
-Detection confidence threshold.
-
-- **Default**: `0.5`
-- **Range**: `0.0` to `1.0`
+Detection confidence threshold (default: `0.5`).
 
 #### `--no-optimize`
 
-Skip model optimization (use if encountering errors).
+Skip model optimization.
 
 ### Video Options
 
 #### `--frame-interval=N` or `-n=N`
 
-Run inference every N frames.
+Run inference every N frames (default: `1`).
 
-- **Default**: `1` (every frame)
+#### `--no-video`
+
+Don't save annotated output video.
 
 ### Tracking Options
 
@@ -160,21 +101,15 @@ Disable Kalman filter prediction on non-keyframes.
 
 #### `--track-thresh=THRESHOLD`
 
-ByteTrack detection threshold.
-
-- **Default**: `0.25`
+ByteTrack detection threshold (default: `0.25`).
 
 #### `--track-buffer=N`
 
-Frames to keep lost tracks.
-
-- **Default**: `30`
+Frames to keep lost tracks (default: `30`).
 
 #### `--match-thresh=THRESHOLD`
 
-IoU threshold for matching.
-
-- **Default**: `0.8`
+IoU threshold for matching (default: `0.8`).
 
 ### Other
 
@@ -184,232 +119,96 @@ Show generated SLURM script without submitting.
 
 ## Examples
 
-### Example 1: Basic Inference
-
-Run inference on a video:
+### Run on All Project Videos
 
 ```bash
 ./submit_inference.sh \
-  --run my_training_run \
-  --input video.mp4
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1
 ```
 
-### Example 2: With Tracking
-
-Enable tracking for temporal consistency:
+### With Tracking
 
 ```bash
 ./submit_inference.sh \
-  --run my_training_run \
-  --input video.mp4 \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
   --track \
-  --confidence 0.6
+  --frame-interval 5
 ```
 
-### Example 3: Multiple Videos
-
-Process multiple videos:
+### Test-Only Videos
 
 ```bash
 ./submit_inference.sh \
-  --run my_training_run \
-  --input "video1.mp4 video2.mp4 video3.mp4" \
-  --track \
-  --gpu a100-80
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --test-only
 ```
 
-### Example 4: Batch Images
-
-Process all images in a directory:
+### Specific Video
 
 ```bash
 ./submit_inference.sh \
-  --run my_training_run \
-  --input "images/*.jpg" \
-  --confidence 0.7
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --video video_2
 ```
 
-### Example 5: Fast Processing
-
-Skip frames for faster processing:
+### Latest Run
 
 ```bash
 ./submit_inference.sh \
-  --run my_training_run \
-  --input video.mp4 \
-  --frame-interval 5 \
-  --track
-```
-
-### Example 6: Custom Classes
-
-Override class names:
-
-```bash
-./submit_inference.sh \
-  --checkpoint model.pth \
-  --input video.mp4 \
-  --classes "crane_hook crane_boom crane_cable"
-```
-
-### Example 7: Latest Run
-
-Use most recent training automatically:
-
-```bash
-./submit_inference.sh \
+  --project data/projects/CraneHook \
   --latest \
-  --input video.mp4 \
   --track
 ```
 
-### Example 8: Dry Run
+### Dry Run
 
 Preview SLURM script:
 
 ```bash
 ./submit_inference.sh \
-  --run my_run \
-  --input video.mp4 \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
   --dry-run
 ```
 
 ## Output
 
-### Job Submission
-
-```bash
-$ ./submit_inference.sh --run my_run --input video.mp4
-
-Submitted batch job 123457
-Job ID: 123457
-Output directory: inference_results/20260128_110804/
-Log file: logs/job_123457.log
-
-To monitor:
-  tail -f logs/job_123457.log
-  squeue -j 123457
-```
-
-### Generated Files
+Results are saved under the project:
 
 ```
-inference_results/20260128_110804/
-├── detected_video.mp4     # Annotated video
-├── detections.json        # Detection results
-└── metadata.json          # Run metadata
-
-logs/
-└── job_123457.log        # SLURM job log
+data/projects/CraneHook/inference/
+└── rfdetr_run_1/
+    ├── video_1/
+    │   ├── result.json
+    │   └── detected.mp4
+    └── video_2/
+        └── result.json
 ```
 
-### Timing Summary
-
-Log includes timing breakdown:
-
-```
-=== Timing Summary ===
-Setup time: 3.45s
-Inference time: 45.23s
-Total time: 48.68s
-```
-
-## Monitoring
-
-### View Job Status
+### Job Monitoring
 
 ```bash
 # List your jobs
 squeue -u $USER
 
-# Check specific job
-squeue -j 123457
-```
-
-### Follow Logs
-
-```bash
-# Real-time log monitoring
-tail -f logs/job_123457.log
-
-# View full log
-cat logs/job_123457.log
+# Follow logs
+tail -f logs/slurm_<JOB_ID>_inference.out
 ```
 
 ## Best Practices
 
-### 1. Use Cost-Effective GPU
-
-For inference, `a100-40` is usually sufficient:
-
-```bash
-./submit_inference.sh --gpu a100-40 ...
-```
-
-### 2. Enable Tracking for Videos
-
-Tracking improves consistency:
-
-```bash
-./submit_inference.sh --track ...
-```
-
-### 3. Skip Frames for Speed
-
-Process every 5th frame with prediction:
-
-```bash
-./submit_inference.sh --frame-interval 5 --track ...
-```
-
-### 4. Specify Classes
-
-Always provide class names:
-
-```bash
-./submit_inference.sh --project data/projects/MyProject ...
-# or
-./submit_inference.sh --classes "person car" ...
-```
-
-### 5. Batch Multiple Videos
-
-Submit one job for multiple videos:
-
-```bash
-./submit_inference.sh --input "videos/*.mp4" ...
-```
-
-## Troubleshooting
-
-### No Detections
-
-- Lower confidence: `--confidence 0.3`
-- Check class names match training
-- Verify checkpoint is correct
-
-### Slow Processing
-
-- Skip frames: `--frame-interval 5`
-- Use smaller GPU: `--gpu a100-40`
-- Disable optimization: `--no-optimize` (try as last resort)
-
-### Out of Memory
-
-- Reduce batch processing (not configurable in inference)
-- Use smaller GPU: `--gpu a100-40`
-
-### Job Timeout
-
-Increase time limit:
-
-```bash
-./submit_inference.sh --time 08:00:00 ...
-```
+1. **Use cost-effective GPU**: `--gpu a100-40` is sufficient for inference
+2. **Enable tracking for videos**: `--track`
+3. **Skip frames for speed**: `--frame-interval 5 --track`
+4. **Use `--test-only`** to focus on evaluation videos
+5. **Preview with `--dry-run`** before submitting
 
 ## Related
 
-- **[Inference CLI](../cli/inference.md)** - Local inference
-- **[Submit Training](submit-train.md)** - Train models
-- **[Submit Benchmark](submit-benchmark.md)** - Benchmark performance
-- **[Inference Workflow](../guides/inference.md)** - Complete guide
+- **[Inference CLI](../cli/inference.md)** -- Local inference reference
+- **[Submit Training](submit-train.md)** -- Train models on cluster
+- **[Inference Workflow](../guides/inference.md)** -- Complete guide

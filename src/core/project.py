@@ -109,6 +109,10 @@ class Project:
         return self.path / "imports"
 
     @property
+    def inference_dir(self) -> Path:
+        return self.path / "inference"
+
+    @property
     def config_path(self) -> Path:
         return self.path / "project.json"
 
@@ -218,6 +222,7 @@ class Project:
         (project_path / "exports").mkdir()
         (project_path / "runs").mkdir()
         (project_path / "imports").mkdir()
+        (project_path / "inference").mkdir()
 
         # Initialize empty annotations
         annotations_path = project_path / "labels" / "current" / "annotations.json"
@@ -353,6 +358,114 @@ class Project:
         self.save_imports_metadata(imports_meta)
         
         return import_id
+
+    # -------------------------------------------------------------------------
+    # Video metadata
+    # -------------------------------------------------------------------------
+
+    def load_videos_meta(self) -> dict[str, Any]:
+        """Load videos metadata from videos/videos.json."""
+        meta_path = self.videos_dir / "videos.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                return json.load(f)
+        return {}
+
+    def save_videos_meta(self, videos_meta: dict[str, Any]) -> None:
+        """Save videos metadata to videos/videos.json."""
+        self.videos_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = self.videos_dir / "videos.json"
+        with open(meta_path, "w") as f:
+            json.dump(videos_meta, f, indent=2)
+
+    def get_video_path(self, video_id: str) -> Path | None:
+        """Get the original file path for a video by its source_key."""
+        videos_meta = self.load_videos_meta()
+        if video_id in videos_meta:
+            p = Path(videos_meta[video_id]["original_path"])
+            return p if p.exists() else None
+        return None
+
+    def list_videos(self, *, test_only: bool = False) -> dict[str, Any]:
+        """
+        Return video metadata, optionally filtered.
+
+        Args:
+            test_only: If True, return only videos with exclude_from_training=True.
+        """
+        videos_meta = self.load_videos_meta()
+        if test_only:
+            return {
+                k: v for k, v in videos_meta.items()
+                if v.get("exclude_from_training", False)
+            }
+        return videos_meta
+
+    # -------------------------------------------------------------------------
+    # Inference results
+    # -------------------------------------------------------------------------
+
+    def list_inference_results(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """
+        List all persisted inference results.
+
+        Returns:
+            Dict mapping (run_name, video_id) to summary metadata
+            (loaded from the top-level fields of each result.json, excluding
+            the heavy 'frames' list).
+        """
+        results: dict[tuple[str, str], dict[str, Any]] = {}
+        if not self.inference_dir.exists():
+            return results
+        for run_dir in self.inference_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            for video_dir in run_dir.iterdir():
+                if not video_dir.is_dir():
+                    continue
+                result_path = video_dir / "result.json"
+                if result_path.exists():
+                    with open(result_path) as f:
+                        data = json.load(f)
+                    summary = {k: v for k, v in data.items() if k != "frames"}
+                    results[(run_dir.name, video_dir.name)] = summary
+        return results
+
+    def get_inference_result(self, run_name: str, video_id: str) -> dict[str, Any] | None:
+        """Load a full inference result (including per-frame detections)."""
+        result_path = self.inference_dir / run_name / video_id / "result.json"
+        if result_path.exists():
+            with open(result_path) as f:
+                return json.load(f)
+        return None
+
+    def save_inference_result(self, run_name: str, video_id: str, data: dict[str, Any]) -> Path:
+        """
+        Persist an inference result to disk.
+
+        Returns:
+            Path to the result directory.
+        """
+        result_dir = self.inference_dir / run_name / video_id
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_path = result_dir / "result.json"
+        with open(result_path, "w") as f:
+            json.dump(data, f, indent=2)
+        return result_dir
+
+    def delete_inference_result(self, run_name: str, video_id: str) -> bool:
+        """Delete a persisted inference result. Returns True if it existed."""
+        import shutil
+
+        result_dir = self.inference_dir / run_name / video_id
+        if result_dir.exists():
+            shutil.rmtree(result_dir)
+            # Clean up empty run dir
+            run_dir = self.inference_dir / run_name
+            if run_dir.exists() and not any(run_dir.iterdir()):
+                run_dir.rmdir()
+            return True
+        return False
 
     def __repr__(self) -> str:
         return f"Project(name={self.name!r}, path={self.path}, classes={len(self.classes)}, frames={self.frame_count})"

@@ -1,47 +1,37 @@
-import { useState, useRef } from 'react'
+import { useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { motion } from 'framer-motion'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Play,
-  Pause,
-  Download,
   Settings,
   Loader2,
   Zap,
-  BarChart3,
   Video,
+  Trash2,
+  X,
+  Grid3X3,
+  CheckCircle2,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Progress } from '@/components/ui/Progress'
 import { useToast } from '@/components/ui/Toaster'
-import { formatDuration } from '@/lib/utils'
-import type { InferenceConfig, InferenceResult, Video as VideoType } from '@/types'
+import type { InferenceConfig } from '@/types'
 
 export default function InferencePage() {
   const { projectName } = useParams<{ projectName: string }>()
   const { toast } = useToast()
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const queryClient = useQueryClient()
 
-  const [selectedVideoId, setSelectedVideoId] = useState<number | null>(null)
-  const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
-  const [isRunning, setIsRunning] = useState(false)
-  const [results, setResults] = useState<InferenceResult[]>([])
+  const [selectedCell, setSelectedCell] = useState<{ run: string; video: string } | null>(null)
+  const [showRunPanel, setShowRunPanel] = useState(false)
+  const [runTarget, setRunTarget] = useState<{ runId: number; videoId: string } | null>(null)
   const [config, setConfig] = useState<Partial<InferenceConfig>>({
     confidence_threshold: 0.5,
     iou_threshold: 0.45,
     enable_tracking: true,
     tracking_mode: 'visible_only',
-    detection_interval: 5, // Detect every 5 frames (5x faster)
-  })
-
-  const { data: project } = useQuery({
-    queryKey: ['project', projectName],
-    queryFn: () => api.projects.get(projectName!),
-    enabled: !!projectName,
+    detection_interval: 5,
   })
 
   const { data: videos } = useQuery({
@@ -56,34 +46,44 @@ export default function InferencePage() {
     enabled: !!projectName,
   })
 
+  const { data: matrix, isLoading: matrixLoading } = useQuery({
+    queryKey: ['inference-results', projectName],
+    queryFn: () => api.inference.listResults(projectName!),
+    enabled: !!projectName,
+  })
+
+  const { data: detailResult, isLoading: detailLoading } = useQuery({
+    queryKey: ['inference-result-detail', projectName, selectedCell?.run, selectedCell?.video],
+    queryFn: () =>
+      api.inference.getResult(projectName!, selectedCell!.run, selectedCell!.video),
+    enabled: !!projectName && !!selectedCell,
+  })
+
   const completedRuns = runs?.filter((r) => r.status === 'completed') || []
 
   const loadModelMutation = useMutation({
     mutationFn: (runId: number) => api.inference.loadModel(projectName!, runId),
-    onSuccess: () => {
-      toast({ title: 'Model loaded', type: 'success' })
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Failed to load model', description: error.message, type: 'error' })
-    },
   })
 
   const runInferenceMutation = useMutation({
-    mutationFn: () =>
-      api.inference.runOnVideo(projectName!, selectedVideoId!, {
-        model_run_id: selectedRunId!,
+    mutationFn: async ({ runId, videoId }: { runId: number; videoId: string }) => {
+      await loadModelMutation.mutateAsync(runId)
+      return api.inference.runOnVideo(projectName!, videoId, {
+        model_run_id: runId,
         confidence_threshold: config.confidence_threshold || 0.5,
         iou_threshold: config.iou_threshold || 0.45,
         max_detections: 100,
         enable_tracking: config.enable_tracking ?? true,
         tracking_mode: config.tracking_mode || 'visible_only',
-        detection_interval: config.detection_interval || 5, // Detect every 5 frames for speed
-      }),
-    onSuccess: (data) => {
-      setResults(data.results)
+        detection_interval: config.detection_interval || 5,
+      })
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['inference-results', projectName] })
+      setShowRunPanel(false)
       toast({
-        title: 'Inference complete',
-        description: `${data.processed_frames} frames at ${data.avg_fps.toFixed(1)} FPS`,
+        title: 'Inference complete & saved',
+        description: `${data.total_frames} frames at ${data.avg_fps.toFixed(1)} FPS`,
         type: 'success',
       })
     },
@@ -92,340 +92,347 @@ export default function InferencePage() {
     },
   })
 
-  const exportMutation = useMutation({
-    mutationFn: () =>
-      api.inference.exportVideo(projectName!, selectedVideoId!, {
-        model_run_id: selectedRunId!,
-        confidence_threshold: config.confidence_threshold || 0.5,
-        iou_threshold: config.iou_threshold || 0.45,
-        max_detections: 100,
-        enable_tracking: config.enable_tracking ?? true,
-        tracking_mode: config.tracking_mode || 'visible_only',
-        detection_interval: config.detection_interval || 5,
-      }),
-    onSuccess: (data) => {
-      toast({
-        title: 'Video exported',
-        description: `Saved to ${data.output_path}`,
-        type: 'success',
-      })
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Export failed', description: error.message, type: 'error' })
+  const deleteMutation = useMutation({
+    mutationFn: ({ run, video }: { run: string; video: string }) =>
+      api.inference.deleteResult(projectName!, run, video),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['inference-results', projectName] })
+      setSelectedCell(null)
+      toast({ title: 'Result deleted', type: 'success' })
     },
   })
 
-  const handleLoadModel = async (runId: number) => {
-    setSelectedRunId(runId)
-    await loadModelMutation.mutateAsync(runId)
-  }
+  const videoFilename = useCallback(
+    (videoId: string) => {
+      const v = videos?.find((vid) => String(vid.id) === videoId)
+      return v?.filename || videoId
+    },
+    [videos]
+  )
 
-  const handleRunInference = async () => {
-    if (!selectedVideoId || !selectedRunId) {
-      toast({ title: 'Select video and model first', type: 'error' })
-      return
-    }
-
-    setIsRunning(true)
-    await runInferenceMutation.mutateAsync()
-    setIsRunning(false)
-  }
-
-  const selectedVideo = videos?.find((v) => v.id === selectedVideoId)
-
-  // Draw detections on canvas
-  const drawDetections = (frame: InferenceResult) => {
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!video || !canvas || !ctx) return
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
-
-    frame.detections.forEach((det) => {
-      const color = colors[det.class_id % colors.length]
-
-      // Convert normalized coords to pixel coords
-      const x = (det.box.x - det.box.width / 2) * canvas.width
-      const y = (det.box.y - det.box.height / 2) * canvas.height
-      const w = det.box.width * canvas.width
-      const h = det.box.height * canvas.height
-
-      ctx.strokeStyle = color
-      ctx.lineWidth = 2
-      ctx.strokeRect(x, y, w, h)
-
-      // Label
-      const label = det.track_id
-        ? `[${det.track_id}] ${det.class_name} ${(det.confidence * 100).toFixed(0)}%`
-        : `${det.class_name} ${(det.confidence * 100).toFixed(0)}%`
-
-      ctx.font = '12px JetBrains Mono'
-      const metrics = ctx.measureText(label)
-      ctx.fillStyle = color
-      ctx.fillRect(x, y - 18, metrics.width + 8, 18)
-      ctx.fillStyle = '#000'
-      ctx.fillText(label, x + 4, y - 5)
-    })
-  }
+  const hasResults = matrix && matrix.runs.length > 0 && matrix.videos.length > 0
 
   return (
-    <div className="container max-w-6xl py-8 px-6 lg:px-8">
+    <div className="container max-w-7xl py-8 px-6 lg:px-8">
       <div className="flex items-start justify-between mb-8">
         <div>
           <h1 className="font-display text-3xl font-bold flex items-center gap-3">
-            <Play className="h-8 w-8 text-primary" />
-            Inference
+            <Grid3X3 className="h-8 w-8 text-primary" />
+            Inference Results
           </h1>
           <p className="text-muted-foreground mt-1">
-            Run your trained model on videos
+            Run trained models on project videos &mdash; results are saved automatically
           </p>
         </div>
+        <Button onClick={() => setShowRunPanel(true)} className="gap-2">
+          <Play className="h-4 w-4" />
+          Run Inference
+        </Button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Video preview */}
-        <div className="lg:col-span-2">
-          <Card>
-            <CardContent className="p-0">
-              <div className="relative aspect-video bg-black rounded-t-lg overflow-hidden">
-                {selectedVideo ? (
-                  <>
-                    <video
-                      ref={videoRef}
-                      src={api.videos.streamUrl(projectName!, selectedVideo.id)}
-                      className="w-full h-full object-contain"
-                      controls
-                    />
-                    <canvas
-                      ref={canvasRef}
-                      width={selectedVideo.width}
-                      height={selectedVideo.height}
-                      className="absolute inset-0 w-full h-full pointer-events-none"
-                      style={{ objectFit: 'contain' }}
-                    />
-                  </>
+      {/* Results Matrix */}
+      {matrixLoading ? (
+        <Card>
+          <CardContent className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </CardContent>
+        </Card>
+      ) : hasResults ? (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Runs × Videos</CardTitle>
+            <CardDescription>
+              Click a cell to view detailed results
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr>
+                    <th className="p-2 text-left border-b border-border font-medium text-muted-foreground">
+                      Run
+                    </th>
+                    {matrix!.videos.map((vid) => (
+                      <th
+                        key={vid}
+                        className="p-2 text-center border-b border-border font-medium text-muted-foreground max-w-[140px] truncate"
+                        title={videoFilename(vid)}
+                      >
+                        {videoFilename(vid)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {matrix!.runs.map((run) => (
+                    <tr key={run} className="border-b border-border/50">
+                      <td className="p-2 font-mono text-xs whitespace-nowrap">{run}</td>
+                      {matrix!.videos.map((vid) => {
+                        const result = matrix!.results[run]?.[vid]
+                        const isSelected =
+                          selectedCell?.run === run && selectedCell?.video === vid
+                        return (
+                          <td key={vid} className="p-1 text-center">
+                            {result ? (
+                              <button
+                                onClick={() => setSelectedCell({ run, video: vid })}
+                                className={`
+                                  w-full p-2 rounded-md border transition-colors text-xs
+                                  ${isSelected
+                                    ? 'border-primary bg-primary/10'
+                                    : 'border-border hover:border-primary/50 hover:bg-muted/50'
+                                  }
+                                `}
+                              >
+                                <div className="flex items-center justify-center gap-1 text-green-600 dark:text-green-400">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  <span>{result.stats.total_detections}</span>
+                                </div>
+                                <div className="text-muted-foreground mt-0.5">
+                                  {result.stats.avg_inference_time_ms.toFixed(0)}ms
+                                </div>
+                              </button>
+                            ) : (
+                              <div className="p-2 text-muted-foreground/30">&mdash;</div>
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="mb-6">
+          <CardContent className="py-12 text-center text-muted-foreground">
+            <Grid3X3 className="h-12 w-12 mx-auto mb-3 opacity-30" />
+            <p className="text-lg font-medium">No inference results yet</p>
+            <p className="text-sm mt-1">
+              Click "Run Inference" to evaluate a trained model on your videos
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Detail Panel */}
+      {selectedCell && (
+        <Card className="mb-6">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle>
+                {selectedCell.run} → {videoFilename(selectedCell.video)}
+              </CardTitle>
+              <CardDescription>
+                {detailResult?.created_at
+                  ? `Run on ${new Date(detailResult.created_at).toLocaleString()}`
+                  : 'Loading...'}
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  deleteMutation.mutate({ run: selectedCell.run, video: selectedCell.video })
+                }
+                disabled={deleteMutation.isPending}
+                className="gap-1 text-destructive"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedCell(null)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {detailLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+              </div>
+            ) : detailResult ? (
+              <div className="space-y-4">
+                {/* Stats row */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-3 bg-muted/50 rounded-lg">
+                    <div className="text-xs text-muted-foreground">Total Frames</div>
+                    <div className="text-lg font-semibold">{detailResult.stats.total_frames}</div>
+                  </div>
+                  <div className="p-3 bg-muted/50 rounded-lg">
+                    <div className="text-xs text-muted-foreground">Keyframes</div>
+                    <div className="text-lg font-semibold">{detailResult.stats.keyframes}</div>
+                  </div>
+                  <div className="p-3 bg-muted/50 rounded-lg">
+                    <div className="text-xs text-muted-foreground">Total Detections</div>
+                    <div className="text-lg font-semibold">
+                      {detailResult.stats.total_detections}
+                    </div>
+                  </div>
+                  <div className="p-3 bg-muted/50 rounded-lg">
+                    <div className="text-xs text-muted-foreground">Avg Inference</div>
+                    <div className="text-lg font-semibold">
+                      {detailResult.stats.avg_inference_time_ms.toFixed(1)}ms
+                    </div>
+                  </div>
+                </div>
+
+                {/* Config */}
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="px-2 py-1 bg-muted rounded">
+                    conf: {detailResult.config.confidence_threshold}
+                  </span>
+                  <span className="px-2 py-1 bg-muted rounded">
+                    interval: {detailResult.config.frame_interval}
+                  </span>
+                  <span className="px-2 py-1 bg-muted rounded">
+                    tracking: {detailResult.config.tracking ? 'on' : 'off'}
+                  </span>
+                </div>
+
+                {/* Detection timeline */}
+                {detailResult.frames && detailResult.frames.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium mb-2">Detection Timeline</h4>
+                    <div className="h-16 flex items-end gap-px bg-muted/30 rounded p-1 overflow-hidden">
+                      {detailResult.frames.map((frame, i) => {
+                        const maxDet = Math.max(
+                          1,
+                          ...detailResult.frames.map((f: { detections: unknown[] }) => f.detections.length)
+                        )
+                        const height = (frame.detections.length / maxDet) * 100
+                        return (
+                          <div
+                            key={i}
+                            className="flex-1 min-w-[1px] bg-primary/60 rounded-t hover:bg-primary transition-colors"
+                            style={{ height: `${Math.max(height, 2)}%` }}
+                            title={`Frame ${frame.frame_number}: ${frame.detections.length} detections`}
+                          />
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Run Inference Slide-over */}
+      {showRunPanel && (
+        <div className="fixed inset-0 z-50 bg-black/40" onClick={() => setShowRunPanel(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-full max-w-md bg-background border-l border-border shadow-xl overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-semibold">Run Inference</h2>
+                <Button variant="ghost" size="sm" onClick={() => setShowRunPanel(false)}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+
+              {/* Select run */}
+              <div className="mb-6">
+                <label className="text-sm font-medium mb-2 block">
+                  <Zap className="h-4 w-4 inline mr-1" />
+                  Model (Training Run)
+                </label>
+                {completedRuns.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No trained models available</p>
                 ) : (
-                  <div className="flex items-center justify-center h-full text-muted-foreground">
-                    <p>Select a video to preview</p>
+                  <div className="space-y-2">
+                    {completedRuns.map((run) => (
+                      <button
+                        key={run.id}
+                        onClick={() =>
+                          setRunTarget((prev) => ({ ...prev!, runId: run.id }))
+                        }
+                        className={`
+                          w-full p-3 rounded-lg border text-left transition-colors
+                          ${runTarget?.runId === run.id
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border hover:border-primary/50'
+                          }
+                        `}
+                      >
+                        <div className="font-medium text-sm">{run.name}</div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                          <span>{run.base_model}</span>
+                          {run.metrics?.mAP50 && (
+                            <span>• mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
 
-              {/* Controls */}
-              <div className="p-4 border-t border-border">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Button
-                      onClick={handleRunInference}
-                      disabled={!selectedVideoId || !selectedRunId || isRunning}
-                      className="gap-2"
-                    >
-                      {isRunning ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Play className="h-4 w-4" />
-                      )}
-                      Run Inference
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => exportMutation.mutate()}
-                      disabled={!selectedVideoId || !selectedRunId || exportMutation.isPending}
-                      className="gap-2"
-                    >
-                      {exportMutation.isPending ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Download className="h-4 w-4" />
-                      )}
-                      Export Video
-                    </Button>
-                  </div>
-
-                  {results.length > 0 && (
-                    <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <BarChart3 className="h-4 w-4" />
-                        {results.length} frames
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Zap className="h-4 w-4" />
-                        {(results.reduce((acc, r) => acc + r.inference_time_ms, 0) / results.length).toFixed(1)}ms avg
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Results */}
-          {results.length > 0 && (
-            <Card className="mt-6">
-              <CardHeader>
-                <CardTitle>Detection Results</CardTitle>
-                <CardDescription>
-                  {results.reduce((acc, r) => acc + r.detections.length, 0)} total detections
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="h-32 overflow-y-auto">
-                  <div className="flex gap-1">
-                    {results.map((frame) => (
-                      <div
-                        key={frame.frame_number}
-                        className="w-1 bg-primary/30 hover:bg-primary transition-colors cursor-pointer"
-                        style={{ height: `${Math.min(frame.detections.length * 10, 100)}%` }}
-                        onClick={() => {
-                          if (videoRef.current) {
-                            videoRef.current.currentTime = frame.timestamp
-                          }
-                          drawDetections(frame)
-                        }}
-                        title={`Frame ${frame.frame_number}: ${frame.detections.length} detections`}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-
-        {/* Sidebar */}
-        <div className="space-y-6">
-          {/* Video selector */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Video className="h-5 w-5" />
-                Select Video
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <select
-                value={selectedVideoId || ''}
-                onChange={(e) => setSelectedVideoId(Number(e.target.value) || null)}
-                className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
-              >
-                <option value="">Select a video...</option>
-                {videos?.map((video) => (
-                  <option key={video.id} value={video.id}>
-                    {video.filename}
-                  </option>
-                ))}
-              </select>
-            </CardContent>
-          </Card>
-
-          {/* Model selector */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Zap className="h-5 w-5" />
-                Select Model
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {completedRuns.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">
-                  No trained models available
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {completedRuns.map((run) => (
-                    <button
-                      key={run.id}
-                      onClick={() => handleLoadModel(run.id)}
-                      className={`
-                        w-full p-3 rounded-lg border text-left transition-colors
-                        ${selectedRunId === run.id
-                          ? 'border-primary bg-primary/10'
-                          : 'border-border hover:border-primary/50'
-                        }
-                      `}
-                    >
-                      <div className="font-medium text-sm">{run.name}</div>
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                        <span>{run.base_model}</span>
-                        {run.metrics?.mAP50 && (
-                          <span>• mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
-                        )}
-                      </div>
-                    </button>
+              {/* Select video */}
+              <div className="mb-6">
+                <label className="text-sm font-medium mb-2 block">
+                  <Video className="h-4 w-4 inline mr-1" />
+                  Video
+                </label>
+                <select
+                  value={runTarget?.videoId || ''}
+                  onChange={(e) =>
+                    setRunTarget((prev) => ({ runId: prev?.runId || 0, videoId: e.target.value }))
+                  }
+                  className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                >
+                  <option value="">Select a video...</option>
+                  {videos?.map((video) => (
+                    <option key={video.id} value={String(video.id)}>
+                      {video.filename}
+                      {video.exclude_from_training ? ' [TEST]' : ''}
+                    </option>
                   ))}
+                </select>
+              </div>
+
+              {/* Settings */}
+              <div className="mb-6 space-y-4">
+                <h3 className="text-sm font-medium flex items-center gap-1">
+                  <Settings className="h-4 w-4" /> Settings
+                </h3>
+                <div>
+                  <label className="text-sm mb-1 block">
+                    Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={(config.confidence_threshold || 0.5) * 100}
+                    onChange={(e) =>
+                      setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
+                    }
+                    className="w-full"
+                  />
                 </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Settings */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Settings className="h-5 w-5" />
-                Settings
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div>
-                <label className="text-sm font-medium mb-2 block">
-                  Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
-                </label>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={(config.confidence_threshold || 0.5) * 100}
-                  onChange={(e) =>
-                    setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
-                  }
-                  className="w-full"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm font-medium mb-2 block">
-                  IoU Threshold: {((config.iou_threshold || 0.45) * 100).toFixed(0)}%
-                </label>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={(config.iou_threshold || 0.45) * 100}
-                  onChange={(e) =>
-                    setConfig({ ...config, iou_threshold: Number(e.target.value) / 100 })
-                  }
-                  className="w-full"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm font-medium mb-2 block">
-                  Detection Interval: every {config.detection_interval || 5} frames
-                </label>
-                <input
-                  type="range"
-                  min={1}
-                  max={15}
-                  value={config.detection_interval || 5}
-                  onChange={(e) =>
-                    setConfig({ ...config, detection_interval: Number(e.target.value) })
-                  }
-                  className="w-full"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  {config.detection_interval === 1 
-                    ? 'Max accuracy (slowest)'
-                    : `${config.detection_interval}x faster, uses tracking between detections`
-                  }
-                </p>
-              </div>
-
-              <div>
+                <div>
+                  <label className="text-sm mb-1 block">
+                    Detection Interval: every {config.detection_interval || 5} frames
+                  </label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={15}
+                    value={config.detection_interval || 5}
+                    onChange={(e) =>
+                      setConfig({ ...config, detection_interval: Number(e.target.value) })
+                    }
+                    className="w-full"
+                  />
+                </div>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -437,26 +444,39 @@ export default function InferencePage() {
                 </label>
               </div>
 
-              {config.enable_tracking && (
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Tracking Mode</label>
-                  <select
-                    value={config.tracking_mode}
-                    onChange={(e) =>
-                      setConfig({ ...config, tracking_mode: e.target.value as any })
-                    }
-                    className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
-                  >
-                    <option value="visible_only">Visible Only</option>
-                    <option value="occlusion_tolerant">Occlusion Tolerant</option>
-                  </select>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+              {/* Run Button */}
+              <Button
+                className="w-full gap-2"
+                disabled={
+                  !runTarget?.runId ||
+                  !runTarget?.videoId ||
+                  runInferenceMutation.isPending ||
+                  loadModelMutation.isPending
+                }
+                onClick={() => {
+                  if (runTarget?.runId && runTarget?.videoId) {
+                    runInferenceMutation.mutate({
+                      runId: runTarget.runId,
+                      videoId: runTarget.videoId,
+                    })
+                  }
+                }}
+              >
+                {runInferenceMutation.isPending || loadModelMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                {loadModelMutation.isPending
+                  ? 'Loading model...'
+                  : runInferenceMutation.isPending
+                  ? 'Running inference...'
+                  : 'Run & Save'}
+              </Button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
-

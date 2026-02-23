@@ -39,6 +39,35 @@ import torch
 from PIL import Image
 
 
+CHECKPOINT_SEARCH_ORDER = [
+    "checkpoint_best_total.pth",
+    "checkpoint_best_ema.pth",
+    "checkpoint_best_regular.pth",
+    "best.pth",
+    "checkpoint.pth",
+]
+
+
+def find_best_checkpoint(run_dir: Path) -> Path | None:
+    """
+    Find the best checkpoint in a run directory.
+
+    Searches using a canonical order; falls back to the newest .pth file.
+    Returns None if no checkpoint is found.
+    """
+    for name in CHECKPOINT_SEARCH_ORDER:
+        path = run_dir / name
+        if path.exists():
+            return path
+
+    pth_files = list(run_dir.glob("*.pth"))
+    if pth_files:
+        pth_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return pth_files[0]
+
+    return None
+
+
 @dataclass
 class DatasetStats:
     """Statistics about a prepared dataset."""
@@ -151,26 +180,34 @@ def load_project_data(
         project_config = json.load(f)
     class_names = project_config.get("classes", [])
 
+    # Load videos metadata for exclude_from_training check
+    videos_json = project_dir / "videos" / "videos.json"
+    all_videos_meta: dict = {}
+    if videos_json.exists():
+        with open(videos_json) as f:
+            all_videos_meta = json.load(f)
+
+    excluded_video_ids = {
+        vid_id
+        for vid_id, meta in all_videos_meta.items()
+        if meta.get("exclude_from_training", False)
+    }
+
     # Determine which video directories to load
     video_dirs_to_load = []
-    
+
     if video_id is None or video_id == "all":
-        # Load all video directories
         for video_dir in frames_base_dir.iterdir():
             if video_dir.is_dir() and (video_dir / "frames.json").exists():
+                if video_dir.name in excluded_video_ids:
+                    continue
                 video_dirs_to_load.append(video_dir)
     elif video_id == "imports":
-        # Load only imports: dirs that are not in videos.json (not uploaded videos)
-        videos_meta = {}
-        videos_json = project_dir / "videos" / "videos.json"
-        if videos_json.exists():
-            with open(videos_json) as f:
-                videos_meta = json.load(f)
         for video_dir in frames_base_dir.iterdir():
-            if not video_dir.is_dir() or (video_dir / "frames.json").exists() is False:
+            if not video_dir.is_dir() or not (video_dir / "frames.json").exists():
                 continue
-            if video_dir.name in videos_meta:
-                continue  # Skip uploaded videos (video_1, 1, etc.)
+            if video_dir.name in all_videos_meta:
+                continue
             video_dirs_to_load.append(video_dir)
     else:
         # Load specific video ID
@@ -614,19 +651,10 @@ class RFDETRTrainer:
 
     def _find_best_checkpoint(self, output_dir: Path) -> Path:
         """Find the best checkpoint in the output directory."""
-        candidates = [
-            "checkpoint_best_total.pth",
-            "checkpoint_best_ema.pth",
-            "checkpoint_best_regular.pth",
-            "checkpoint.pth",
-        ]
-
-        for name in candidates:
-            path = output_dir / name
-            if path.exists():
-                return path
-
-        raise FileNotFoundError(f"No checkpoint found in {output_dir}")
+        result = find_best_checkpoint(output_dir)
+        if result is None:
+            raise FileNotFoundError(f"No checkpoint found in {output_dir}")
+        return result
 
     def predict(self, image: Path | Image.Image | np.ndarray, threshold: float = 0.5) -> Any:
         """

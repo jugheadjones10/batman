@@ -10,6 +10,7 @@ import aiofiles
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from backend.app.api.projects import get_project_path, load_project_config, save_project_config
 from backend.app.models.video import (
@@ -46,7 +47,6 @@ async def list_videos(project_name: str):
 
         for vid_id, vid_data in videos_meta.items():
             annotation_count = _count_video_annotations(project_path, vid_id)
-            # id: string for API (video_1 or 1)
             vid_id_out = vid_id if isinstance(vid_id, str) and not vid_id.isdigit() else int(vid_id)
 
             videos.append(
@@ -61,6 +61,7 @@ async def list_videos(project_name: str):
                     has_proxy=vid_data.get("has_proxy", False),
                     frame_count=vid_data.get("frame_count", 0),
                     annotation_count=annotation_count,
+                    exclude_from_training=vid_data.get("exclude_from_training", False),
                     created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
                 )
             )
@@ -73,6 +74,7 @@ async def upload_video(
     project_name: str,
     file: UploadFile = File(...),
     create_proxy: bool = True,
+    exclude_from_training: bool = False,
 ):
     """Upload a video to the project."""
     project_path = get_project_path(project_name)
@@ -137,6 +139,7 @@ async def upload_video(
         "total_frames": info["total_frames"],
         "has_proxy": proxy_path is not None and proxy_path.exists(),
         "frame_count": 0,
+        "exclude_from_training": exclude_from_training,
         "created_at": now.isoformat(),
     }
 
@@ -189,6 +192,47 @@ async def get_video(project_name: str, video_id: str):
         has_proxy=vid_data.get("has_proxy", False),
         frame_count=vid_data.get("frame_count", 0),
         annotation_count=annotation_count,
+        exclude_from_training=vid_data.get("exclude_from_training", False),
+        created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
+    )
+
+
+class VideoUpdateRequest(BaseModel):
+    exclude_from_training: Optional[bool] = None
+
+
+@router.patch("/{video_id}", response_model=VideoInfo)
+async def update_video(project_name: str, video_id: str, update: VideoUpdateRequest):
+    """Update video metadata (e.g. toggle exclude_from_training)."""
+    project_path = get_project_path(project_name)
+    videos_meta = await _load_videos_meta(project_path)
+
+    if video_id not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if update.exclude_from_training is not None:
+        videos_meta[video_id]["exclude_from_training"] = update.exclude_from_training
+
+    meta_path = project_path / "videos" / "videos.json"
+    with open(meta_path, "w") as f:
+        json.dump(videos_meta, f, indent=2)
+
+    vid_data = videos_meta[video_id]
+    annotation_count = _count_video_annotations(project_path, video_id)
+    vid_id_out = video_id if not video_id.isdigit() else int(video_id)
+
+    return VideoInfo(
+        id=vid_id_out,
+        filename=vid_data["filename"],
+        width=vid_data["width"],
+        height=vid_data["height"],
+        fps=vid_data["fps"],
+        duration=vid_data["duration"],
+        total_frames=vid_data["total_frames"],
+        has_proxy=vid_data.get("has_proxy", False),
+        frame_count=vid_data.get("frame_count", 0),
+        annotation_count=annotation_count,
+        exclude_from_training=vid_data.get("exclude_from_training", False),
         created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
     )
 

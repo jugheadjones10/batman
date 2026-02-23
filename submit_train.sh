@@ -35,7 +35,8 @@ LR="1e-4"
 PATIENCE=10
 PROJECT_DIR="data/projects/One"
 # Where to write the prepared COCO dataset (train/val/test splits); used as input for training
-OUTPUT_DATASET="datasets/rfdetr_coco"
+# Empty = auto: ${PROJECT_DIR}/exports/coco
+OUTPUT_DATASET=""
 # Where to write the training run (checkpoints, logs). Empty = auto: runs/rfdetr_<gpu>_<timestamp>
 OUTPUT_DIR=""
 # Model size: nano (~3M) | small (~10M) | base (~28M) | medium (~48M) | large (~76M). base = balanced speed/accuracy
@@ -45,6 +46,9 @@ DRY_RUN=false
 PREPARE_ONLY=false
 NUM_GPUS=1
 FILTER_CLASSES=""
+MAX_FRAMES_PER_CLASS=""
+INFER_AFTER=false
+INFER_TEST_ONLY=false
 EXTRA_ARGS=""
 
 #-------------------------------------------------------------------------------
@@ -76,10 +80,15 @@ show_help() {
     echo "  --output-dir=PATH   Output directory for run"
     echo "  --filter-classes=NAMES  Only train on specific classes (pipe-separated)"
     echo "                          Example: --filter-classes='crane hook|crane-hook'"
+    echo "  --max-frames-per-class=N  Cap frames per class (random sample, deterministic)"
     echo ""
     echo "SLURM Options:"
     echo "  --partition=NAME    SLURM partition (auto-detected if not set)"
     echo "  --time=HH:MM:SS     Time limit (default: 24:00:00)"
+    echo ""
+    echo "Post-training Inference:"
+    echo "  --infer-after       Run inference on project videos after training"
+    echo "  --infer-test-only   With --infer-after, only run on test-only videos"
     echo ""
     echo "Other:"
     echo "  --prepare-only      Only prepare dataset, don't train"
@@ -105,7 +114,10 @@ while [[ $# -gt 0 ]]; do
         --model=*)      MODEL="${arg#*=}"; shift ;;
         --time=*)       TIME="${arg#*=}"; shift ;;
         --filter-classes=*) FILTER_CLASSES="${arg#*=}"; shift ;;
+        --max-frames-per-class=*) MAX_FRAMES_PER_CLASS="${arg#*=}"; shift ;;
         --prepare-only) PREPARE_ONLY=true; shift ;;
+        --infer-after)  INFER_AFTER=true; shift ;;
+        --infer-test-only) INFER_TEST_ONLY=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --help|-h)      show_help ;;
         *)              EXTRA_ARGS="$EXTRA_ARGS $arg"; shift ;;
@@ -203,10 +215,15 @@ if [ -z "$BATCH_SIZE" ]; then
     BATCH_SIZE=$DEFAULT_BATCH
 fi
 
-# Generate output directory
+# Generate output directory (under project by default)
 if [ -z "$OUTPUT_DIR" ]; then
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    OUTPUT_DIR="runs/rfdetr_${GPU_TYPE}_${TIMESTAMP}"
+    OUTPUT_DIR="${PROJECT_DIR}/runs/rfdetr_${GPU_TYPE}_${TIMESTAMP}"
+fi
+
+# Generate dataset output directory (under project by default)
+if [ -z "$OUTPUT_DATASET" ]; then
+    OUTPUT_DATASET="${PROJECT_DIR}/exports/coco"
 fi
 
 # Generate job name
@@ -298,6 +315,11 @@ if [ -n "${FILTER_CLASSES}" ]; then
     FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
 fi
 
+MAX_FRAMES_ARG=""
+if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
+    MAX_FRAMES_ARG="--max-frames-per-class ${MAX_FRAMES_PER_CLASS}"
+fi
+
 # Add the training command
 if [ "$PREPARE_ONLY" = true ]; then
     cat >> "$SLURM_SCRIPT" << EOF
@@ -309,6 +331,7 @@ python3 -m cli.train \\
     --output-dataset ${OUTPUT_DATASET} \\
     --prepare-only \\
     ${FILTER_ARG} \\
+    ${MAX_FRAMES_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -339,12 +362,6 @@ echo "Starting training..."
 
 EOF
 
-    # Build the command with proper quoting for filter-classes
-    FILTER_ARG=""
-    if [ -n "${FILTER_CLASSES}" ]; then
-        FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
-    fi
-
     # Add the training command with proper quoting
     if [ "$NUM_GPUS" -gt 1 ]; then
         cat >> "$SLURM_SCRIPT" << EOF
@@ -364,6 +381,7 @@ torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
     --device cuda \\
     --num-workers 8 \\
     ${FILTER_ARG} \\
+    ${MAX_FRAMES_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
@@ -383,14 +401,52 @@ python3 -m cli.train \\
     --device cuda \\
     --num-workers 8 \\
     ${FILTER_ARG} \\
+    ${MAX_FRAMES_ARG} \\
     ${EXTRA_ARGS}
 
 EOF
     fi
 fi
 
-cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
+# Add post-training inference if requested
+if [ "$INFER_AFTER" = true ] && [ "$PREPARE_ONLY" != true ]; then
+    INFER_CLI_FLAGS="--latest --device cuda"
+    if [ "$INFER_TEST_ONLY" = true ]; then
+        INFER_CLI_FLAGS="$INFER_CLI_FLAGS --test-only"
+    fi
+
+    cat >> "$SLURM_SCRIPT" << EOF
+TRAIN_EXIT=\$?
+
+if [ \$TRAIN_EXIT -ne 0 ]; then
+    echo ""
+    echo "Training failed (exit code \$TRAIN_EXIT), skipping inference"
+    echo "============================================================"
+    echo "Job completed at: \$(date)"
+    echo "Exit code: \$TRAIN_EXIT"
+    echo "============================================================"
+    exit \$TRAIN_EXIT
+fi
+
+echo ""
+echo "============================================================"
+echo "Post-Training Inference"
+echo "============================================================"
+echo ""
+
+python3 -m cli.inference \\
+    --project ${PROJECT_DIR} \\
+    ${INFER_CLI_FLAGS}
+
+EXIT_CODE=\$?
+EOF
+else
+    cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
 EXIT_CODE=$?
+SLURM_EOF
+fi
+
+cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
 
 echo ""
 echo "============================================================"
@@ -414,7 +470,17 @@ echo "GRES:         ${SLURM_GRES}"
 echo "Memory:       ${MEM}"
 echo "Time:         ${TIME}"
 echo "Batch Size:   ${BATCH_SIZE}"
+if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
+echo "Max frames/class: ${MAX_FRAMES_PER_CLASS}"
+fi
 echo "Output Dir:   ${OUTPUT_DIR}"
+if [ "$INFER_AFTER" = true ]; then
+    if [ "$INFER_TEST_ONLY" = true ]; then
+        echo "Infer After:  yes (test-only videos)"
+    else
+        echo "Infer After:  yes (all videos)"
+    fi
+fi
 echo "============================================================"
 echo ""
 

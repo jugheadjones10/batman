@@ -1,86 +1,75 @@
 # Inference CLI
 
-Run RF-DETR inference on images or videos with object tracking and visualization.
+Run RF-DETR inference on project videos with object tracking and visualization. All inference is **project-centric** -- results are persisted under `{project}/inference/{run_name}/{video_id}/`.
 
 ## Overview
 
 The inference CLI provides:
 
-- Detection on single images or videos
+- Project-centric inference: `--project` is required
+- Runs resolve from the project's `runs/` directory
+- Results automatically saved to `{project}/inference/`
 - ByteTrack object tracking with Kalman filtering
-- Configurable confidence thresholds
-- Model optimization for faster inference
-- JSON output for programmatic analysis
-- Visual annotations with bounding boxes and IDs
+- Configurable confidence thresholds and frame intervals
+- Test-only video filtering via `--test-only`
 
 ## Basic Usage
 
 ```bash
-# Inference on a video
-python -m cli.inference --run my_training_run --input video.mp4
+# Run a training run's model on all project videos
+python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1
 
-# Inference on images
-python -m cli.inference --checkpoint model.pth --input img1.jpg img2.jpg
+# Run on a specific video
+python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1 \
+    --video video_2
+
+# Run on test-only videos
+python -m cli.inference --project data/projects/CraneHook --run rfdetr_run_1 --test-only
+
+# Use the latest training run
+python -m cli.inference --project data/projects/CraneHook --latest
 ```
-
-## Command Builder
-
-<div class="command-builder-widget" data-tool="inference" data-params='[
-  {"name": "checkpoint", "type": "path", "required": false, "description": "Path to checkpoint file", "group": "Model"},
-  {"name": "run", "type": "text", "required": false, "description": "Run name (auto-finds checkpoint)", "group": "Model"},
-  {"name": "latest", "type": "flag", "description": "Use the most recent run", "group": "Model"},
-  {"name": "model", "type": "choice", "choices": ["base", "large"], "default": "base", "description": "Model architecture", "group": "Model"},
-  {"name": "device", "type": "choice", "choices": ["auto", "cuda", "mps", "cpu"], "default": "auto", "description": "Device for inference", "group": "Model"},
-  {"name": "input", "type": "text", "required": true, "description": "Input image(s) or video file(s)", "group": "Input"},
-  {"name": "output", "type": "path", "default": "inference_results", "description": "Output directory", "group": "Output"},
-  {"name": "no-visualizations", "type": "flag", "description": "Do not save annotated images/videos", "group": "Output"},
-  {"name": "no-json", "type": "flag", "description": "Do not save JSON detection results", "group": "Output"},
-  {"name": "confidence", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.05, "description": "Confidence threshold", "group": "Detection"},
-  {"name": "no-optimize", "type": "flag", "description": "Do not optimize model", "group": "Optimization"},
-  {"name": "optimize-compile", "type": "flag", "description": "Use JIT compilation", "group": "Optimization"},
-  {"name": "frame-interval", "type": "number", "default": 1, "min": 1, "description": "Run inference every N frames", "group": "Video"},
-  {"name": "track", "type": "flag", "description": "Enable ByteTrack tracking", "group": "Tracking"},
-  {"name": "no-kalman", "type": "flag", "description": "Disable Kalman prediction", "group": "Tracking"},
-  {"name": "track-thresh", "type": "number", "default": 0.25, "min": 0, "max": 1, "step": 0.05, "description": "ByteTrack detection threshold", "group": "Tracking"},
-  {"name": "track-buffer", "type": "number", "default": 30, "min": 1, "description": "Frames to keep lost tracks", "group": "Tracking"},
-  {"name": "match-thresh", "type": "number", "default": 0.8, "min": 0, "max": 1, "step": 0.05, "description": "ByteTrack IoU threshold", "group": "Tracking"},
-  {"name": "project", "type": "path", "description": "Load class names from project", "group": "Classes"},
-  {"name": "classes", "type": "text", "description": "Override class names", "group": "Classes"}
-]'></div>
 
 ## Parameters
 
-### Model Selection (Choose One)
+### Required
 
-#### `--checkpoint PATH` or `-c PATH`
+#### `--project PATH` or `-p PATH`
 
-Path to model checkpoint file.
+Path to the Batman project. All runs and videos are resolved from this project.
 
 ```bash
--c runs/my_run/best.pth
+-p data/projects/CraneHook
 ```
+
+### Run Selection (Choose One)
 
 #### `--run NAME` or `-r NAME`
 
-Run name to auto-find checkpoint.
+Training run name. Resolves checkpoint from `{project}/runs/{name}/`.
 
 ```bash
--r rfdetr_h100_20260120_105925
+-r rfdetr_run_1
 ```
-
-The tool searches for checkpoints in `runs/<name>/` with names:
-
-- `best.pth`
-- `checkpoint_best.pth`
-- `model.pth`
 
 #### `--latest`
 
-Use the most recent training run.
+Use the most recent training run in the project.
+
+### Video Selection (Optional)
+
+#### `--video ID` or `-v ID`
+
+Specific video source_key(s) to process. Without this flag, all project videos are processed.
 
 ```bash
---latest
+--video video_2
+--video video_1 video_3
 ```
+
+#### `--test-only`
+
+Only run on videos marked with `exclude_from_training: true`.
 
 ### Model Configuration
 
@@ -98,40 +87,6 @@ Device for inference.
 - **Choices**: `auto`, `cuda`, `mps`, `cpu`
 - **Default**: `auto`
 
-### Input
-
-#### `--input FILES` or `-i FILES` (Required)
-
-Input image(s) or video file(s). Supports multiple files and wildcards.
-
-```bash
-# Single file
---input video.mp4
-
-# Multiple files
---input video1.mp4 video2.mp4
-
-# Wildcards
---input "videos/*.mp4"
---input "images/*.jpg"
-```
-
-### Output
-
-#### `--output PATH` or `-o PATH`
-
-Output directory for results.
-
-- **Default**: `inference_results`
-
-#### `--no-visualizations`
-
-Skip saving annotated images/videos (JSON only).
-
-#### `--no-json`
-
-Skip saving JSON detection results (visualizations only).
-
 ### Detection
 
 #### `--confidence THRESHOLD` or `-t THRESHOLD`
@@ -140,8 +95,6 @@ Confidence threshold for detections.
 
 - **Default**: `0.5`
 - **Range**: `0.0` to `1.0`
-- **Lower values**: More detections, more false positives
-- **Higher values**: Fewer detections, fewer false positives
 
 ### Optimization
 
@@ -160,7 +113,10 @@ Enable PyTorch JIT compilation for additional speedup.
 Run inference every N frames (for faster processing).
 
 - **Default**: `1` (every frame)
-- **Example**: `-n 5` (every 5th frame)
+
+#### `--no-video`
+
+Don't save annotated output video.
 
 ### Tracking Options
 
@@ -168,191 +124,74 @@ Run inference every N frames (for faster processing).
 
 Enable ByteTrack object tracking.
 
-!!! note
-Tracking provides temporal consistency and assigns persistent IDs to objects.
-
 #### `--no-kalman`
 
-Disable Kalman filter prediction on non-keyframes.
-
-Only applies when using `--frame-interval > 1` with `--track`.
+Disable Kalman filter prediction on non-keyframes. Only applies when using `--frame-interval > 1` with `--track`.
 
 #### `--track-thresh THRESHOLD`
 
 Detection confidence threshold for tracking.
 
 - **Default**: `0.25`
-- **Lower than `--confidence`** to associate low-confidence detections
 
 #### `--track-buffer N`
 
 Number of frames to keep lost tracks before deletion.
 
 - **Default**: `30`
-- **Higher values**: More persistent tracks across occlusions
 
 #### `--match-thresh THRESHOLD`
 
 IoU threshold for matching detections to tracks.
 
 - **Default**: `0.8`
-- **Range**: `0.0` to `1.0`
-
-### Class Names
-
-#### `--project PATH` or `-p PATH`
-
-Load class names from Batman project.
-
-```bash
--p data/projects/MyProject
-```
-
-#### `--classes NAMES`
-
-Manually specify class names (comma-separated).
-
-```bash
---classes "person,car,bicycle"
-```
-
-## Examples
-
-### Example 1: Basic Video Inference
-
-Run inference on a video with default settings:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4
-```
-
-### Example 2: Video with Tracking
-
-Enable tracking for temporal consistency:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --track \
-  --confidence 0.6
-```
-
-### Example 3: Fast Processing (Skip Frames)
-
-Process every 5th frame with Kalman prediction:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --frame-interval 5 \
-  --track
-```
-
-### Example 4: Multiple Videos
-
-Process multiple videos:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video1.mp4 video2.mp4 video3.mp4 \
-  --track
-```
-
-### Example 5: Image Batch
-
-Process all images in a directory:
-
-```bash
-python -m cli.inference \
-  --checkpoint runs/my_run/best.pth \
-  --input "images/*.jpg" \
-  --confidence 0.7
-```
-
-### Example 6: High Confidence, Persistent Tracking
-
-Strict detection with long track memory:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --track \
-  --confidence 0.8 \
-  --track-thresh 0.3 \
-  --track-buffer 60 \
-  --match-thresh 0.7
-```
-
-### Example 7: Custom Classes
-
-Override class names:
-
-```bash
-python -m cli.inference \
-  --checkpoint model.pth \
-  --input video.mp4 \
-  --classes "crane_hook,crane_boom,crane_cable"
-```
-
-### Example 8: JSON Output Only
-
-Skip visualizations, save only JSON:
-
-```bash
-python -m cli.inference \
-  --run my_training_run \
-  --input video.mp4 \
-  --no-visualizations
-```
-
-### Example 9: Use Latest Run
-
-Automatically use the most recent training run:
-
-```bash
-python -m cli.inference \
-  --latest \
-  --input video.mp4 \
-  --track
-```
 
 ## Output Structure
 
-Inference creates this structure:
+Results are saved under the project's `inference/` directory:
 
 ```
-inference_results/
-  └── 20260128_143022/        # Timestamp
-      ├── detected_video.mp4  # Annotated video
-      ├── detections.json     # JSON detections
-      └── frames/             # Individual frames (if images)
-          ├── img1_detected.jpg
-          └── img2_detected.jpg
+data/projects/CraneHook/
+└── inference/
+    └── rfdetr_run_1/
+        ├── video_1/
+        │   ├── result.json       # Config + stats + per-frame detections
+        │   └── detected.mp4      # Annotated video (if --no-video not set)
+        └── video_2/
+            └── result.json
 ```
 
-### JSON Format
-
-Detections are saved in this format:
+### result.json Format
 
 ```json
 {
-  "video": "video.mp4",
+  "run_name": "rfdetr_run_1",
+  "video_id": "video_1",
+  "created_at": "2026-02-20T...",
+  "config": {
+    "confidence_threshold": 0.5,
+    "frame_interval": 1,
+    "tracking": true,
+    "tracking_mode": "bytetrack"
+  },
+  "stats": {
+    "total_frames": 300,
+    "keyframes": 60,
+    "total_detections": 1500,
+    "avg_inference_time_ms": 45.2
+  },
   "frames": [
     {
-      "frame_id": 0,
+      "frame_idx": 0,
       "timestamp": 0.0,
+      "is_keyframe": true,
+      "inference_time_ms": 42.1,
       "detections": [
         {
           "bbox": [x1, y1, x2, y2],
           "confidence": 0.95,
           "class_id": 0,
-          "class_name": "person",
+          "class_name": "crane_hook",
           "track_id": 1
         }
       ]
@@ -361,101 +200,75 @@ Detections are saved in this format:
 }
 ```
 
-## Tracking Explained
+## Examples
 
-### ByteTrack Algorithm
+### Run on All Videos
 
-ByteTrack uses a two-stage association:
+```bash
+python -m cli.inference \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1
+```
 
-1. **High-confidence detections** (≥ `--confidence`) → Match to existing tracks
-2. **Low-confidence detections** (≥ `--track-thresh`) → Match to remaining tracks
+### With Tracking and Frame Skipping
 
-This recovers objects during partial occlusions.
+```bash
+python -m cli.inference \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --track \
+  --frame-interval 5
+```
 
-### Kalman Filter Prediction
+### Test-Only Videos
 
-When using `--frame-interval > 1`:
+```bash
+python -m cli.inference \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --test-only
+```
 
-- **Keyframes** (every N frames): Run detection
-- **Non-keyframes**: Predict box positions using Kalman filter
-- Use `--no-kalman` to disable prediction (shows keyframes only)
+### High Confidence, Persistent Tracking
 
-### Track Lifecycle
-
-1. **New detection** → Create tentative track
-2. **Matched in consecutive frames** → Confirm track (assign ID)
-3. **Not matched** → Mark as lost, keep for `--track-buffer` frames
-4. **Matched again** → Recover track (reuse ID)
-5. **Lost too long** → Delete track
+```bash
+python -m cli.inference \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --track \
+  --confidence 0.8 \
+  --track-thresh 0.3 \
+  --track-buffer 60
+```
 
 ## Performance Tips
 
-### 1. Enable Tracking for Videos
-
-Tracking improves consistency and helps with partial occlusions:
-
-```bash
---track --track-buffer 30
-```
-
-### 2. Skip Frames for Faster Processing
-
-Process every Nth frame with prediction:
-
-```bash
---frame-interval 5 --track
-```
-
-### 3. Optimize Confidence Thresholds
-
-- **Start with 0.5**: Good balance
-- **High precision needed**: 0.7-0.8
-- **High recall needed**: 0.3-0.4
-
-### 4. Tune Tracking Parameters
-
-For objects that disappear frequently:
-
-```bash
---track-buffer 60 --match-thresh 0.7
-```
-
-### 5. Use Model Optimization
-
-Model optimization is enabled by default. Disable only if errors occur:
-
-```bash
---no-optimize
-```
+1. **Enable Tracking for Videos**: `--track --track-buffer 30`
+2. **Skip Frames for Speed**: `--frame-interval 5 --track`
+3. **Tune Confidence**: Start at 0.5, adjust based on results
+4. **Use Model Optimization**: Enabled by default (disable with `--no-optimize` only on errors)
 
 ## Troubleshooting
 
 ### No Detections
 
-- **Lower confidence**: `--confidence 0.3`
-- **Check class names**: Ensure `--classes` or `--project` matches training
-- **Verify model**: Check checkpoint is from correct training run
-
-### False Positives
-
-- **Raise confidence**: `--confidence 0.7`
-- **Check training quality**: Review training metrics
+- Lower confidence: `--confidence 0.3`
+- Verify class names match training (check `class_info.json` in run directory)
+- Confirm correct training run
 
 ### Tracking Issues
 
-- **IDs switching**: Increase `--match-thresh 0.9`
-- **Lost tracks**: Increase `--track-buffer 60`
-- **Duplicate IDs**: Lower `--track-thresh 0.2`
+- IDs switching: Increase `--match-thresh 0.9`
+- Lost tracks: Increase `--track-buffer 60`
 
 ### Slow Inference
 
-- **Skip frames**: `--frame-interval 5`
-- **Reduce resolution**: Resize video before inference
-- **Use smaller model**: Train with `--model base` instead of `large`
+- Skip frames: `--frame-interval 5`
+- Use `--no-video` to skip writing annotated output
 
 ## Related
 
-- **[Training CLI](train.md)** - Train models
-- **[Benchmark CLI](benchmark-latency.md)** - Measure performance
-- **[Submit Inference Script](../scripts/submit-inference.md)** - SLURM inference
-- **[Inference Workflow Guide](../guides/inference.md)** - Complete workflow
+- **[Training CLI](train.md)** -- Train models
+- **[Submit Inference Script](../scripts/submit-inference.md)** -- SLURM inference
+- **[Inference Workflow Guide](../guides/inference.md)** -- Complete workflow
+- **[Video Management CLI](videos.md)** -- Add/remove project videos

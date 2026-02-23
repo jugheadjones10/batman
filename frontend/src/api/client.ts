@@ -86,6 +86,11 @@ export const api = {
       ),
     getFrames: (projectName: string, videoId: number | string) =>
       request<import('@/types').Frame[]>(`/projects/${projectName}/videos/${videoId}/frames`),
+    update: (projectName: string, videoId: number | string, data: { exclude_from_training?: boolean }) =>
+      request<import('@/types').Video>(`/projects/${projectName}/videos/${videoId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
     delete: (projectName: string, videoId: number | string) =>
       request<{ message: string }>(`/projects/${projectName}/videos/${videoId}`, {
         method: 'DELETE',
@@ -294,6 +299,19 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(config),
       }),
+    listResults: (projectName: string) =>
+      request<import('@/types').InferenceResultMatrix>(
+        `/projects/${projectName}/inference/results`
+      ),
+    getResult: (projectName: string, runName: string, videoId: string) =>
+      request<import('@/types').InferenceResultSummary & { frames: import('@/types').InferenceResult[] }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}`
+      ),
+    deleteResult: (projectName: string, runName: string, videoId: string) =>
+      request<{ message: string }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}`,
+        { method: 'DELETE' }
+      ),
   },
 
   // Import
