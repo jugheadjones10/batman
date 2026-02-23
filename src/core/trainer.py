@@ -410,21 +410,34 @@ def sample_frames_by_class(
             if class_name in frames_by_class:
                 frames_by_class[class_name].add(frame_id)
 
-    # Sample frames for each class according to the specified fractions
+    # Sample frames for each class according to the specified fractions.
+    # Manual data frames (prefixed "manual_data_") are always preserved;
+    # the sampling cap is applied only to non-manual frames.
     sampled_frames: set[str] = set()
 
     for class_name in class_names:
         fraction = sample_fractions.get(class_name, 1.0)
-        class_frames = list(frames_by_class[class_name])
+        all_class_frames = frames_by_class[class_name]
 
         if fraction >= 1.0:
-            # Include all frames for this class
-            sampled_frames.update(class_frames)
+            sampled_frames.update(all_class_frames)
+            continue
+
+        manual = [fid for fid in all_class_frames if str(fid).startswith("manual_data_")]
+        non_manual = [fid for fid in all_class_frames if not str(fid).startswith("manual_data_")]
+
+        # Always keep every manual frame
+        sampled_frames.update(manual)
+
+        # Desired total ≈ fraction * all_frames; fill remainder from non-manual
+        target_total = max(1, int(len(all_class_frames) * fraction))
+        n_from_non_manual = max(0, target_total - len(manual))
+
+        if n_from_non_manual >= len(non_manual):
+            sampled_frames.update(non_manual)
         else:
-            # Sample the specified fraction
-            n_sample = max(1, int(len(class_frames) * fraction))
-            random.shuffle(class_frames)
-            sampled_frames.update(class_frames[:n_sample])
+            random.shuffle(non_manual)
+            sampled_frames.update(non_manual[:n_from_non_manual])
 
     return sampled_frames
 

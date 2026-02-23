@@ -173,13 +173,20 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
         active_classes = filter_classes if filter_classes else class_names
         frame_sample_fractions = {}
         cap = args.max_frames_per_class
-        print(f"\n  Max frames per class: {cap}")
+        print(f"\n  Max frames per class: {cap} (manual data always included)")
         for cls in active_classes:
-            n = len(frames_by_class.get(cls, set()))
+            all_fids = frames_by_class.get(cls, set())
+            n = len(all_fids)
+            n_manual = sum(1 for fid in all_fids if str(fid).startswith("manual_data_"))
             frac = min(1.0, cap / n) if n > 0 else 1.0
             frame_sample_fractions[cls] = frac
-            sampled = int(n * frac) if frac < 1.0 else n
-            print(f"    {cls}: {n} frames -> {sampled} ({frac:.2%})")
+            # Manual frames are always kept; cap reduces non-manual frames
+            n_non_manual = n - n_manual
+            target_non_manual = max(0, cap - n_manual)
+            sampled_non_manual = min(n_non_manual, target_non_manual)
+            sampled = n_manual + (sampled_non_manual if frac < 1.0 else n_non_manual)
+            manual_note = f" ({n_manual} manual, always kept)" if n_manual else ""
+            print(f"    {cls}: {n} frames -> {sampled}{manual_note}")
 
     # Prepare dataset
     stats = prepare_coco_dataset(
