@@ -106,7 +106,11 @@ export default function TrainingPage() {
   const trainMutation = useMutation({
     mutationFn: () =>
       api.training.start(projectName!, {
-        name: runName || `run_${Date.now()}`,
+        name: runName || (() => {
+          const d = new Date()
+          const pad = (n: number) => String(n).padStart(2, '0')
+          return `rfdetr_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+        })(),
         label_iteration_id: project?.current_iteration || 0,
         config,
       }),

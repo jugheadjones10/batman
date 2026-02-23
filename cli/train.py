@@ -525,7 +525,8 @@ Examples:
         if args.output_dataset is None:
             args.output_dataset = args.project / "exports" / "coco"
         if args.output_dir is None:
-            args.output_dir = args.project / "runs" / "rfdetr_run"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            args.output_dir = args.project / "runs" / f"rfdetr_{timestamp}"
     else:
         if args.output_dataset is None:
             args.output_dataset = Path("datasets/rfdetr_coco")
