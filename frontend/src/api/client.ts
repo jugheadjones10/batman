@@ -427,13 +427,20 @@ export const api = {
         `/projects/${projectName}/manual-data/sync`,
         { method: 'POST' }
       ),
-    listImages: (projectName: string, offset = 0, limit = 500) =>
-      request<{
+    listDatasets: (projectName: string) =>
+      request<{ datasets: import('@/types').ManualDataset[] }>(
+        `/projects/${projectName}/manual-data/datasets`
+      ),
+    listImages: (projectName: string, offset = 0, limit = 500, dataset?: string) => {
+      const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+      if (dataset) params.set('dataset', dataset)
+      return request<{
         total: number
         offset: number
         limit: number
         images: import('@/types').ManualDataImage[]
-      }>(`/projects/${projectName}/manual-data/images?offset=${offset}&limit=${limit}`),
+      }>(`/projects/${projectName}/manual-data/images?${params}`)
+    },
     imageUrl: (projectName: string, filename: string) =>
       `${API_BASE}/projects/${projectName}/manual-data/image/${encodeURIComponent(filename)}`,
   },

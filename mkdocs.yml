@@ -34,10 +34,13 @@ nav:
       - Create Side-by-Side Video: cli/create-sidebyside-video.md
       - Import Data: cli/importer.md
       - Manage Classes: cli/classes.md
+      - Manage Videos: cli/videos.md
   - SLURM Scripts:
       - Overview: scripts/index.md
       - Submit Training: scripts/submit-train.md
+      - Run Training (Local): scripts/run-training.md
       - Submit Inference: scripts/submit-inference.md
+      - Run Inference (Local): scripts/run-inference.md
       - Submit Benchmark: scripts/submit-benchmark.md
       - Development Server: scripts/run-dev.md
   - Guides:

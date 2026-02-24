@@ -42,10 +42,17 @@ export interface Video {
 export interface ManualDataImage {
   filename: string
   frame_id: string
+  dataset: string
   width: number
   height: number
   annotation_count: number
   url: string
+}
+
+export interface ManualDataset {
+  name: string
+  source_key: string
+  image_count: number
 }
 
 export interface Frame {

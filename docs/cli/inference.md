@@ -271,4 +271,4 @@ python -m cli.inference \
 - **[Training CLI](train.md)** -- Train models
 - **[Submit Inference Script](../scripts/submit-inference.md)** -- SLURM inference
 - **[Inference Workflow Guide](../guides/inference.md)** -- Complete workflow
-- **[Video Management CLI](videos.md)** -- Add/remove project videos
+- **[Video Management CLI](videos.md)** - Add/remove project videos

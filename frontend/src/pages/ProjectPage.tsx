@@ -34,6 +34,7 @@ export default function ProjectPage() {
   const [newClassName, setNewClassName] = useState('')
   const [mergingClasses, setMergingClasses] = useState<string[]>([])
   const [expandedDatasets, setExpandedDatasets] = useState<Set<string>>(new Set())
+  const [selectedDataset, setSelectedDataset] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
@@ -43,9 +44,15 @@ export default function ProjectPage() {
     enabled: !!projectName,
   })
 
+  const { data: manualDatasets } = useQuery({
+    queryKey: ['manual-data-datasets', projectName],
+    queryFn: () => api.manualData.listDatasets(projectName!),
+    enabled: !!projectName,
+  })
+
   const { data: manualData, isLoading: manualDataLoading } = useQuery({
-    queryKey: ['manual-data-images', projectName],
-    queryFn: () => api.manualData.listImages(projectName!, 0, 500),
+    queryKey: ['manual-data-images', projectName, selectedDataset],
+    queryFn: () => api.manualData.listImages(projectName!, 0, 500, selectedDataset ?? undefined),
     enabled: !!projectName,
   })
 
@@ -71,6 +78,7 @@ export default function ProjectPage() {
     mutationFn: () => api.manualData.sync(projectName!),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['manual-data-datasets', projectName] })
       queryClient.invalidateQueries({ queryKey: ['project', projectName] })
       toast({
         title: 'Images synced',
@@ -299,6 +307,36 @@ export default function ProjectPage() {
                   </Button>
                 </div>
               ) : (
+                <div className="space-y-3">
+                  {manualDatasets && manualDatasets.datasets.length > 1 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        onClick={() => setSelectedDataset(null)}
+                        className={cn(
+                          'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                          selectedDataset === null
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:text-foreground'
+                        )}
+                      >
+                        All ({manualDatasets.datasets.reduce((s, d) => s + d.image_count, 0)})
+                      </button>
+                      {manualDatasets.datasets.map((ds) => (
+                        <button
+                          key={ds.source_key}
+                          onClick={() => setSelectedDataset(ds.name)}
+                          className={cn(
+                            'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                            selectedDataset === ds.name
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-muted text-muted-foreground hover:text-foreground'
+                          )}
+                        >
+                          {ds.name === '(root)' ? 'Root' : ds.name} ({ds.image_count})
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
                   {images.slice(0, 20).map((img) => (
                     <div
@@ -306,7 +344,7 @@ export default function ProjectPage() {
                       className="relative aspect-square rounded-lg overflow-hidden border border-border hover:border-primary/50 transition-colors group"
                     >
                       <img
-                        src={api.manualData.imageUrl(projectName!, img.filename)}
+                        src={img.url}
                         alt={img.filename}
                         className="w-full h-full object-cover"
                       />
@@ -318,6 +356,7 @@ export default function ProjectPage() {
                       )}
                     </div>
                   ))}
+                </div>
                 </div>
               )}
             </CardContent>
@@ -573,7 +612,7 @@ export default function ProjectPage() {
                             <span
                               key={source}
                               className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
-                                source === 'manual_data'
+                                source === 'manual_data' || source.startsWith('manual_data__')
                                   ? 'bg-green-500/20 text-green-400'
                                   : 'bg-gray-500/20 text-gray-400'
                               }`}

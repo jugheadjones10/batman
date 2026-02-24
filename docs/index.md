@@ -1,12 +1,12 @@
 # Batman Documentation
 
-**Manual Image Annotation → Fine-Tune Real-Time Detector**
+**Local Video Auto-Label → Human Correct → Fine-Tune Real-Time Detector**
 
 Welcome to the Batman documentation! This guide covers all CLI tools, SLURM scripts, and workflows for training real-time object detectors.
 
 ## What is Batman?
 
-Batman is a localhost application that turns annotated images into a fine-tuned real-time detector. You place images in a project's `manual_data/` folder, draw bounding boxes in a Label Studio-style UI, and fine-tune base models (YOLO11 or RF-DETR) for fast inference. It provides a streamlined annotation workflow and training pipeline.
+Batman is a localhost application for video auto-labeling, human correction, and fine-tuning real-time object detectors. It uses SAM3 for auto-labeling with text prompts, provides a Roboflow-style review UI for corrections, and fine-tunes RF-DETR models for fast inference. You can also place images in a project's `manual_data/` folder for manual annotation.
 
 ## Quick Links
 
@@ -34,9 +34,10 @@ Batman is a localhost application that turns annotated images into a fine-tuned 
 
 ## Key Features
 
+- **Auto-labeling with SAM3**: Text prompts, exemplar prompting, and tracking
 - **Manual Data Folder**: Place images in `project_root/manual_data/` and sync to load
-- **Label Studio-style Annotation UI**: Draw bounding boxes, assign classes, navigate with thumbnails
-- **Model Fine-tuning**: Train YOLO11 or RF-DETR on your labeled data
+- **Roboflow-style Review UI**: Human-in-the-loop correction of labels
+- **Model Fine-tuning**: Train RF-DETR models on your labeled data
 - **Real-time Inference**: Test models with live tracking overlay
 - **GPU Benchmarking**: Test performance across different GPU types
 - **SLURM Integration**: Submit jobs to HPC clusters easily
@@ -71,7 +72,8 @@ batman/
 ├── cli/                    # Command-line tools
 ├── backend/               # FastAPI backend
 ├── frontend/              # React frontend
-├── src/                   # Core libraries
+├── src/core/              # Core libraries
+├── experiments/           # Experiment framework (Hydra)
 ├── scripts/               # Utility scripts
 ├── data/                  # Project data
 └── docs/                  # This documentation

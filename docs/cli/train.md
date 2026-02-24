@@ -23,16 +23,20 @@ python -m cli.train --project data/projects/MyProject
   {"name": "project", "type": "path", "required": false, "description": "Path to Batman project directory", "group": "Input"},
   {"name": "dataset", "type": "path", "required": false, "description": "Path to existing COCO format dataset", "group": "Input"},
   {"name": "checkpoint", "type": "path", "required": false, "description": "Path to trained checkpoint for inference/export", "group": "Input"},
-  {"name": "output-dataset", "type": "path", "default": "datasets/rfdetr_coco", "description": "Output directory for prepared COCO dataset", "group": "Data Preparation"},
+  {"name": "output-dataset", "type": "path", "description": "Output directory for prepared COCO dataset (default: {project}/exports/coco)", "group": "Data Preparation"},
   {"name": "train-split", "type": "number", "default": 0.70, "min": 0, "max": 1, "step": 0.05, "description": "Training data fraction", "group": "Data Preparation"},
   {"name": "val-split", "type": "number", "default": 0.15, "min": 0, "max": 1, "step": 0.05, "description": "Validation data fraction", "group": "Data Preparation"},
   {"name": "test-split", "type": "number", "default": 0.15, "min": 0, "max": 1, "step": 0.05, "description": "Test data fraction", "group": "Data Preparation"},
-  {"name": "video-id", "type": "number", "default": -1, "description": "Video ID to process, -1 for imports", "group": "Data Preparation"},
+  {"name": "video-id", "type": "text", "default": "imports", "description": "Video ID(s): all, imports (default), or specific ID", "group": "Data Preparation"},
   {"name": "filter-classes", "type": "text", "description": "Only train on these classes (pipe-separated)", "group": "Data Preparation"},
   {"name": "prepare-only", "type": "flag", "description": "Only prepare dataset, do not train", "group": "Data Preparation"},
   {"name": "max-frames-per-class", "type": "number", "min": 1, "description": "Cap frames per class to this number (random sample, deterministic with seed)", "group": "Data Preparation"},
   {"name": "no-clean", "type": "flag", "description": "Do not remove existing dataset directory", "group": "Data Preparation"},
-  {"name": "output-dir", "type": "path", "default": "runs/rfdetr_run", "description": "Output directory for training run", "group": "Training"},
+  {"name": "sources", "type": "text", "description": "Data sources (comma-separated): manual_data,imports. Overrides --video-id.", "group": "Data Preparation"},
+  {"name": "manual-split-strategy", "type": "choice", "choices": ["proportional", "val_only", "train_only", "all_splits"], "default": "train_only", "description": "How to distribute manual data across splits", "group": "Data Preparation"},
+  {"name": "manual-datasets", "type": "text", "description": "Only include these manual subdatasets (comma-separated). Use (root) for root-level images.", "group": "Data Preparation"},
+  {"name": "exclude-manual-datasets", "type": "text", "description": "Exclude these manual subdatasets (comma-separated). Mutually exclusive with --manual-datasets.", "group": "Data Preparation"},
+  {"name": "output-dir", "type": "path", "description": "Output directory for training run (default: {project}/runs/rfdetr_run)", "group": "Training"},
   {"name": "model", "type": "choice", "choices": ["nano", "small", "base", "medium", "large"], "default": "base", "description": "Model architecture size", "group": "Training"},
   {"name": "epochs", "type": "number", "default": 50, "min": 1, "description": "Number of training epochs", "group": "Training"},
   {"name": "batch-size", "type": "number", "default": 8, "min": 1, "description": "Batch size", "group": "Training"},
@@ -44,11 +48,10 @@ python -m cli.train --project data/projects/MyProject
   {"name": "resume", "type": "path", "description": "Resume training from checkpoint", "group": "Training"},
   {"name": "grad-accum", "type": "number", "default": 1, "min": 1, "description": "Gradient accumulation steps", "group": "Training"},
   {"name": "mps-fallback", "type": "flag", "description": "Enable MPS CPU fallback", "group": "Training"},
-  {"name": "inference", "type": "text", "description": "Run inference on image(s) after training", "group": "Inference"},
-  {"name": "confidence", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.05, "description": "Detection confidence threshold", "group": "Inference"},
-  {"name": "inference-output", "type": "path", "description": "Output directory for annotated images", "group": "Inference"},
+  {"name": "infer-after", "type": "flag", "description": "Run inference on project videos after training", "group": "Post-training Inference"},
+  {"name": "infer-test-only", "type": "flag", "description": "With --infer-after, only run on test-only videos", "group": "Post-training Inference"},
   {"name": "export", "type": "path", "description": "Export model to directory", "group": "Export"},
-  {"name": "classes", "type": "text", "description": "Class names for inference/export", "group": "General"},
+  {"name": "classes", "type": "text", "description": "Class names for export (space-separated)", "group": "General"},
   {"name": "seed", "type": "number", "default": 42, "description": "Random seed", "group": "General"}
 ]'></div>
 
@@ -77,7 +80,7 @@ python -m cli.train --dataset datasets/my_coco_dataset
 Path to trained checkpoint (for inference or export only).
 
 ```bash
-python -m cli.train --checkpoint runs/my_run/best.pth --inference img.jpg
+python -m cli.train --checkpoint runs/my_run/best.pth --export exports/my_model
 ```
 
 ### Data Preparation
@@ -86,7 +89,7 @@ python -m cli.train --checkpoint runs/my_run/best.pth --inference img.jpg
 
 Output directory for prepared COCO dataset.
 
-- **Default**: `datasets/rfdetr_coco`
+- **Default**: `None` (auto: `{project}/exports/coco` when using `--project`)
 
 #### `--train-split FRACTION`
 
@@ -108,9 +111,10 @@ Fraction of data for testing.
 
 #### `--video-id ID`
 
-Video ID to process. Use `-1` for imported frames.
+Video ID(s) to process. Accepts `'all'`, `'imports'` (default), or a specific video ID.
 
-- **Default**: `-1`
+- **Default**: `imports`
+- **Type**: `str`
 
 #### `--filter-classes CLASSES`
 
@@ -128,6 +132,48 @@ Only prepare dataset without training.
 
 Don't remove existing dataset directory before preparing.
 
+#### `--sources TYPES`
+
+Data sources to include (comma-separated). Valid values: `manual_data`, `imports`. When set, overrides `--video-id` and always excludes video frames.
+
+```bash
+--sources manual_data
+--sources manual_data,imports
+```
+
+#### `--manual-split-strategy STRATEGY`
+
+How to distribute manual data across train/val/test splits.
+
+- **Choices**: `proportional`, `val_only`, `train_only`, `all_splits`
+- **Default**: `train_only`
+
+| Strategy | Behavior |
+| --- | --- |
+| `train_only` | All manual data goes to train split |
+| `val_only` | All manual data goes to validation split |
+| `proportional` | Distribute across all splits proportionally |
+| `all_splits` | Include manual data in every split |
+
+#### `--manual-datasets NAMES`
+
+Only include specific manual data subdatasets (comma-separated). Subdatasets correspond to subdirectories inside `manual_data/`. Use `(root)` to include root-level images. Mutually exclusive with `--exclude-manual-datasets`.
+
+```bash
+--manual-datasets crane_closeups,worker_shots
+--manual-datasets "(root),crane_closeups"
+```
+
+#### `--exclude-manual-datasets NAMES`
+
+Exclude specific manual data subdatasets (comma-separated). All other manual datasets are included. Mutually exclusive with `--manual-datasets`.
+
+```bash
+--exclude-manual-datasets negative_examples
+```
+
+See [Manual Data Subdatasets](#manual-data-subdatasets) below for the directory layout.
+
 #### `--max-frames-per-class N`
 
 Cap the number of frames per class to roughly `N` by randomly down-sampling classes that exceed the limit. Classes with fewer than `N` frames are kept as-is. Sampling is deterministic when combined with `--seed` (default 42), so the same command always produces the same split.
@@ -144,7 +190,7 @@ This is useful for **class balancing** -- if one class has 1500 frames and anoth
 
 Output directory for training run (checkpoints, logs, configs).
 
-- **Default**: `runs/rfdetr_run`
+- **Default**: `None` (auto: `{project}/runs/rfdetr_run` when using `--project`)
 
 #### `--model SIZE`
 
@@ -231,27 +277,15 @@ Gradient accumulation steps (for effective larger batch size).
 
 Enable MPS CPU fallback for unsupported operations (macOS).
 
-### Inference (Post-Training)
+### Post-training Inference
 
-#### `--inference IMAGES`
+#### `--infer-after`
 
-Run inference on image(s) after training.
+Run inference on project videos after training completes. Requires `--project`.
 
-```bash
---inference "img1.jpg img2.jpg"
---inference "path/to/images/*.jpg"
-```
+#### `--infer-test-only`
 
-#### `--confidence THRESHOLD`
-
-Detection confidence threshold.
-
-- **Default**: `0.5`
-- **Range**: `0.0` to `1.0`
-
-#### `--inference-output PATH`
-
-Output directory for annotated images.
+With `--infer-after`, only run inference on videos marked with `exclude_from_training=true`.
 
 ### Export
 
@@ -267,10 +301,10 @@ Export trained model to directory.
 
 #### `--classes NAMES`
 
-Class names for inference/export (when not using project).
+Class names for export (when not using project). Space-separated.
 
 ```bash
---classes "person,car,bicycle"
+--classes person car bicycle
 ```
 
 #### `--seed N`
@@ -364,17 +398,25 @@ python -m cli.train \
   --output-dir runs/my_run
 ```
 
-### Example 8: Train and Inference
+### Example 8: Train and Run Inference
 
-Train and immediately test on images:
+Train and immediately run inference on project videos:
 
 ```bash
 python -m cli.train \
   --project data/projects/MyProject \
   --epochs 30 \
-  --inference "test_images/*.jpg" \
-  --confidence 0.6 \
-  --inference-output results/
+  --infer-after
+```
+
+To only infer on test-only videos:
+
+```bash
+python -m cli.train \
+  --project data/projects/MyProject \
+  --epochs 30 \
+  --infer-after \
+  --infer-test-only
 ```
 
 ### Example 9: Small GPU (Gradient Accumulation)
@@ -397,7 +439,7 @@ Export model for deployment:
 python -m cli.train \
   --checkpoint runs/my_run/best.pth \
   --export exports/my_model_v1 \
-  --classes "person,car,bicycle"
+  --classes person car bicycle
 ```
 
 ## Output Structure
@@ -488,6 +530,62 @@ python -m cli.train --project data/projects/MyProject --prepare-only
 # Train multiple configurations
 python -m cli.train --dataset datasets/rfdetr_coco --model base --epochs 50
 python -m cli.train --dataset datasets/rfdetr_coco --model large --epochs 100
+```
+
+## Manual Data Subdatasets
+
+The `manual_data/` folder supports subdirectories to organize images into named datasets. Root-level images remain as the default dataset for backward compatibility.
+
+### Directory Layout
+
+```
+manual_data/
+  image_a.jpg                      # Root-level -> dataset "(root)"
+  crane_closeups/
+    img1.jpg                       # Subdataset "crane_closeups"
+    img2.jpg
+  worker_shots/
+    img3.jpg                       # Subdataset "worker_shots"
+```
+
+After syncing, each subdirectory gets its own `frames.json`:
+
+```
+frames/
+  manual_data/                     # Root-level images
+    frames.json
+  manual_data__crane_closeups/     # Subdataset
+    frames.json
+  manual_data__worker_shots/       # Subdataset
+    frames.json
+```
+
+### Including Specific Datasets
+
+```bash
+# Only use crane_closeups and worker_shots manual datasets
+python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data,imports \
+  --manual-datasets crane_closeups,worker_shots
+```
+
+### Excluding Specific Datasets
+
+```bash
+# Use all manual datasets except negative_examples
+python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data,imports \
+  --exclude-manual-datasets negative_examples
+```
+
+### Including Root-Level Images
+
+To include root-level images (those directly in `manual_data/`, not in a subdirectory), use the special name `(root)`:
+
+```bash
+--manual-datasets "(root),crane_closeups"
 ```
 
 ## Related

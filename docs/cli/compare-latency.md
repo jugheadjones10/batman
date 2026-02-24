@@ -7,7 +7,7 @@ Compare latency benchmark results across multiple GPUs and generate comparison t
 The compare CLI:
 - Aggregates benchmark results from multiple runs
 - Generates comparison tables with statistics
-- Identifies which GPUs meet real-time requirements
+- Identifies which GPUs meet real-time requirements (30fps, 60fps)
 - Supports text and markdown output formats
 
 ## Basic Usage
@@ -74,43 +74,47 @@ Output format.
 ### Console Output (Text)
 
 ```
-=== Latency Benchmark Comparison ===
+========================================================================================================================
+GPU LATENCY COMPARISON
+========================================================================================================================
+Benchmark Mode: video
 
-Model: base (640x640)
-Runs: 100 per GPU
+GPU Type     GPU Name                       Mean      P50       P95       P99       FPS     30fps  60fps
+------------------------------------------------------------------------------------------------------------------------
+h100-96      NVIDIA H100 96GB               8.5ms     8.3ms     9.1ms     9.8ms     117.6   yes    yes
+a100-80      NVIDIA A100 80GB               10.2ms    10.0ms    11.0ms    11.5ms    98.0    yes    yes
+a100-40      NVIDIA A100 40GB               12.8ms    12.5ms    13.8ms    14.2ms    78.1    yes    no
+========================================================================================================================
 
-GPU          Mean (ms)  Median (ms)  P95 (ms)  P99 (ms)  FPS    30fps  60fps  120fps
-----------------------------------------------------------------------------------
-h100-96      8.5        8.3          9.1       9.8       117.6  ✓      ✓      ✗
-a100-80      10.2       10.0         11.0      11.5      98.0   ✓      ✓      ✗
-a100-40      12.8       12.5         13.8      14.2      78.1   ✓      ✓      ✗
+DETAILED STATISTICS
+------------------------------------------------------------------------------------------------------------------------
 
-Real-time capable @ 30fps: h100-96, a100-80, a100-40
-Real-time capable @ 60fps: h100-96, a100-80, a100-40
-Real-time capable @ 120fps: (none)
-
-Fastest GPU: h100-96 (8.5 ms/frame, 117.6 FPS)
+H100-96 - NVIDIA H100 96GB
+  Latency:
+    Mean:   8.50 ms  (+/- 0.40 ms)
+    Min:    7.90 ms
+    Max:    10.20 ms
+    P50:    8.30 ms
+    P95:    9.10 ms
+    P99:    9.80 ms
+  Throughput: 117.6 FPS
+  Real-time:
+    30 FPS: YES
+    60 FPS: YES
 ```
 
 ### Markdown Output
 
 ```markdown
-# Latency Benchmark Comparison
+# GPU Latency Comparison
 
-**Model**: base (640x640)  
-**Runs**: 100 per GPU
+## Summary
 
-| GPU | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) | FPS | 30fps | 60fps | 120fps |
-|-----|-----------|-------------|----------|----------|-----|-------|-------|--------|
-| h100-96 | 8.5 | 8.3 | 9.1 | 9.8 | 117.6 | ✓ | ✓ | ✗ |
-| a100-80 | 10.2 | 10.0 | 11.0 | 11.5 | 98.0 | ✓ | ✓ | ✗ |
-| a100-40 | 12.8 | 12.5 | 13.8 | 14.2 | 78.1 | ✓ | ✓ | ✗ |
-
-**Real-time capable @ 30fps**: h100-96, a100-80, a100-40  
-**Real-time capable @ 60fps**: h100-96, a100-80, a100-40  
-**Real-time capable @ 120fps**: (none)
-
-**Fastest GPU**: h100-96 (8.5 ms/frame, 117.6 FPS)
+| GPU Type | GPU Name | Mean | P50 | P95 | P99 | FPS | 30fps | 60fps |
+|----------|----------|------|-----|-----|-----|-----|-------|-------|
+| h100-96 | NVIDIA H100 96GB | 8.5ms | 8.3ms | 9.1ms | 9.8ms | 117.6 | yes | yes |
+| a100-80 | NVIDIA A100 80GB | 10.2ms | 10.0ms | 11.0ms | 11.5ms | 98.0 | yes | yes |
+| a100-40 | NVIDIA A100 40GB | 12.8ms | 12.5ms | 13.8ms | 14.2ms | 78.1 | yes | no |
 ```
 
 ## Examples
@@ -159,19 +163,17 @@ python -m cli.compare_latency benchmark_results/20260128_172934/ \
 | Column | Description | Importance |
 |--------|-------------|------------|
 | **Mean** | Average latency | Overall performance |
-| **Median** | Typical latency | Most common case |
+| **P50** | Median latency | Typical performance |
 | **P95** | 95th percentile | Near-worst case |
 | **P99** | 99th percentile | Worst case |
 | **FPS** | Throughput | Processing speed |
 
 ### Real-Time Indicators
 
-- **✓** = GPU meets framerate requirement
-- **✗** = GPU does not meet requirement
+- **yes** = GPU meets framerate requirement (P99 < threshold)
+- **no** = GPU does not meet requirement
 
-### Fastest GPU
-
-Identified by lowest mean latency and highest FPS.
+Real-time capability is determined by **P99** latency, not mean.
 
 ## Use Cases
 

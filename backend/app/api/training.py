@@ -77,6 +77,29 @@ async def export_dataset(
     # Determine which data sources to include (default: both manual_data and imports)
     allowed_sources = set(config.data_sources or ["manual_data", "imports"])
 
+    # Build manual dataset include/exclude sets for fine-grained filtering
+    manual_ds_include = set(config.manual_datasets) if config.manual_datasets else None
+    manual_ds_exclude = set(config.exclude_manual_datasets) if config.exclude_manual_datasets else None
+
+    def _is_manual_dir(name: str) -> bool:
+        return name == "manual_data" or name.startswith("manual_data__")
+
+    def _manual_dataset_name(name: str) -> str:
+        """Return canonical dataset name: '(root)' for manual_data, else the suffix."""
+        if name == "manual_data":
+            return "(root)"
+        return name[len("manual_data__"):]
+
+    def _should_include_manual(dir_name: str) -> bool:
+        if manual_ds_include is None and manual_ds_exclude is None:
+            return True
+        canonical = _manual_dataset_name(dir_name)
+        if manual_ds_include is not None:
+            return canonical in manual_ds_include
+        if manual_ds_exclude is not None:
+            return canonical not in manual_ds_exclude
+        return True
+
     # Load frames, categorizing each directory as manual_data, video, or imports
     frames = []
     frames_dir = project_path / "frames"
@@ -89,17 +112,18 @@ async def export_dataset(
                 continue
 
             # Categorize this directory
-            if sub_dir.name == "manual_data":
+            if _is_manual_dir(sub_dir.name):
                 source_type = "manual_data"
             elif sub_dir.name in video_dir_names:
                 source_type = "video"
             else:
                 source_type = "imports"
 
-            # Always skip video frames; skip others if not in allowed sources
             if source_type == "video":
                 continue
             if source_type not in allowed_sources:
+                continue
+            if source_type == "manual_data" and not _should_include_manual(sub_dir.name):
                 continue
 
             with open(meta_path) as f:

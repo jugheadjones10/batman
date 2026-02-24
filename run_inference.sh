@@ -1,28 +1,42 @@
 #!/bin/bash
 #===============================================================================
-# Submit RF-DETR Inference Job to SLURM (Project-Centric)
+# Run RF-DETR Inference from Local Mac (with auto-sync)
 #===============================================================================
 #
-# All inference is project-centric: --project is required.
-# Results are saved under {project}/inference/{run_name}/{video_id}/.
+# Local wrapper that submits an inference job to the GPU cluster via SSH,
+# streams the job output, waits for completion, and syncs results locally.
+#
+# Accepts the same arguments as submit_inference.sh.
 #
 # Usage:
-#   ./submit_inference.sh --project data/projects/CraneHook --run rfdetr_run_1
-#   ./submit_inference.sh --project data/projects/CraneHook --latest
-#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --video video_2
-#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --test-only
-#   ./submit_inference.sh --project data/projects/CraneHook --run my_run --track --frame-interval 5
+#   ./run_inference.sh --project data/projects/One --run rfdetr_run_1
+#   ./run_inference.sh --project data/projects/One --latest
+#   ./run_inference.sh --project data/projects/One --latest --no-sync
+#   ./run_inference.sh --project data/projects/One --run my_run --track --frame-interval 5
 #
-# GPU Options:
-#   --gpu=TYPE    GPU type (h200, h100-96, h100-47, a100-80, a100-40, nv)
-#                 Default: a100-40 (inference doesn't need large GPU)
+# Requires:
+#   - SSH access to the GPU cluster
+#   - SSHFS mount at gpu-server/ (run ./mount_gpu.sh) for result syncing
 #
 #===============================================================================
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 #-------------------------------------------------------------------------------
-# Default Configuration
+# SSH / Remote Configuration
+#-------------------------------------------------------------------------------
+SSH_USER="youngjin"
+SSH_HOST="xlogin.comp.nus.edu.sg"
+SSH_DEST="${SSH_USER}@${SSH_HOST}"
+REMOTE_DIR="/home/y/youngjin/batman"
+MOUNT_POINT="$SCRIPT_DIR/gpu-server"
+CONTROL_PATH="/tmp/batman_run_ssh_%r@%h:%p"
+SSH_OPTS="-o ControlPath=$CONTROL_PATH -o ConnectTimeout=10"
+
+#-------------------------------------------------------------------------------
+# Default Configuration (mirrors submit_inference.sh)
 #-------------------------------------------------------------------------------
 GPU_TYPE="h100-96"
 PARTITION=""
@@ -43,13 +57,20 @@ TRACK_THRESH=0.25
 TRACK_BUFFER=30
 MATCH_THRESH=0.8
 DRY_RUN=false
+NO_SYNC=false
+NO_PUSH=false
 EXTRA_ARGS=""
+
+POLL_INTERVAL=15
 
 #-------------------------------------------------------------------------------
 # Parse Arguments
 #-------------------------------------------------------------------------------
 show_help() {
     echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Local inference runner. Submits to GPU cluster via SSH, waits for"
+    echo "completion, and syncs results to your local project directory."
     echo ""
     echo "Required:"
     echo "  --project=PATH, -p   Path to Batman project"
@@ -63,7 +84,7 @@ show_help() {
     echo "  --test-only          Only run on test-only videos"
     echo ""
     echo "GPU Options:"
-    echo "  --gpu=TYPE           GPU type (default: a100-40)"
+    echo "  --gpu=TYPE           GPU type (default: h100-96)"
     echo "  --time=HH:MM:SS     Time limit (default: 04:00:00)"
     echo ""
     echo "Inference Options:"
@@ -80,14 +101,18 @@ show_help() {
     echo "  --track-buffer=N     Frames to keep lost tracks (default: 30)"
     echo "  --match-thresh=N     IoU threshold for matching (default: 0.8)"
     echo ""
+    echo "Sync Options:"
+    echo "  --no-sync            Submit and wait, but skip syncing results locally"
+    echo "  --no-push            Skip pushing manual_data + project.json to GPU before job"
+    echo ""
     echo "Other:"
-    echo "  --dry-run            Show generated script without submitting"
+    echo "  --dry-run            Show generated SLURM script without submitting"
     echo "  --help               Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0 --project data/projects/CraneHook --run rfdetr_run_1"
-    echo "  $0 --project data/projects/CraneHook --latest --track --frame-interval 5"
-    echo "  $0 --project data/projects/CraneHook --run my_run --test-only"
+    echo "  $0 --project data/projects/One --latest"
+    echo "  $0 --project data/projects/One --run rfdetr_run_1 --track"
+    echo "  $0 --project data/projects/One --latest --no-sync"
     exit 0
 }
 
@@ -123,19 +148,19 @@ while [[ $# -gt 0 ]]; do
         --track-buffer)    TRACK_BUFFER="$2"; shift 2 ;;
         --match-thresh=*)  MATCH_THRESH="${1#*=}"; shift ;;
         --match-thresh)    MATCH_THRESH="$2"; shift 2 ;;
+        --no-sync)         NO_SYNC=true; shift ;;
+        --no-push)         NO_PUSH=true; shift ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         show_help ;;
         *)                 EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
 
-# Validate: --project is required
 if [ -z "$PROJECT" ]; then
     echo "Error: --project is required"
     exit 1
 fi
 
-# Validate: must have one of --run or --latest
 if [ -z "$RUN" ] && [ "$LATEST" = false ]; then
     echo "Error: Must specify --run or --latest"
     exit 1
@@ -153,6 +178,18 @@ case $GPU_TYPE in
     nv)         PARTITION="${PARTITION:-gpu-short}";  GRES="gpu:nv:1" ;;
     *)          echo "Unknown GPU type: $GPU_TYPE"; exit 1 ;;
 esac
+
+#-------------------------------------------------------------------------------
+# Check SSHFS Mount (skip if --no-sync or --dry-run)
+#-------------------------------------------------------------------------------
+if [ "$NO_SYNC" = false ] && [ "$DRY_RUN" = false ]; then
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        echo "Error: SSHFS mount not found at gpu-server/"
+        echo "  Run:  ./mount_gpu.sh"
+        echo "  Or:   --no-sync to skip result syncing"
+        exit 1
+    fi
+fi
 
 #-------------------------------------------------------------------------------
 # Build Python Arguments
@@ -181,9 +218,8 @@ OPT_FLAGS=""
 [ "$TEST_ONLY" = true ] && OPT_FLAGS="$OPT_FLAGS --test-only"
 
 #-------------------------------------------------------------------------------
-# Create SLURM Script
+# Generate SLURM Script (identical to submit_inference.sh)
 #-------------------------------------------------------------------------------
-mkdir -p logs
 SLURM_SCRIPT=$(mktemp /tmp/inference_slurm_XXXXXX.sh)
 
 cat > "$SLURM_SCRIPT" << SLURM_EOF
@@ -256,20 +292,22 @@ echo "============================================================"
 SLURM_EOF
 
 #-------------------------------------------------------------------------------
-# Submit or Display
+# Display Summary
 #-------------------------------------------------------------------------------
 echo "============================================================"
-echo "RF-DETR Inference Job (Project-Centric)"
+echo "RF-DETR Inference (Local Runner)"
 echo "============================================================"
-echo "GPU:          ${GPU_TYPE}"
-echo "Partition:    ${PARTITION}"
-echo "Time limit:   ${TIME}"
-echo "Project:      ${PROJECT}"
-echo "Run:          ${RUN_ARG}"
-echo "Video:        ${VIDEO:-all project videos}"
-echo "Test-only:    ${TEST_ONLY}"
+echo "GPU:            ${GPU_TYPE}"
+echo "Partition:      ${PARTITION}"
+echo "Time limit:     ${TIME}"
+echo "Project:        ${PROJECT}"
+echo "Run:            ${RUN_ARG}"
+echo "Video:          ${VIDEO:-all project videos}"
+echo "Test-only:      ${TEST_ONLY}"
 echo "Frame interval: ${FRAME_INTERVAL}"
-echo "Tracking:     ${TRACK}"
+echo "Tracking:       ${TRACK}"
+echo "Pre-push:       $([ "$NO_PUSH" = true ] && echo "off" || echo "on")"
+echo "Auto-sync:      $([ "$NO_SYNC" = true ] && echo "off" || echo "on")"
 echo "============================================================"
 
 if [ "$DRY_RUN" = true ]; then
@@ -278,15 +316,161 @@ if [ "$DRY_RUN" = true ]; then
     echo "============================================================"
     cat "$SLURM_SCRIPT"
     echo "============================================================"
-else
-    JOB_ID=$(sbatch "$SLURM_SCRIPT" | awk '{print $4}')
-    echo ""
-    echo "Job submitted: $JOB_ID"
-    echo ""
-    echo "Monitor with:"
-    echo "  squeue -j $JOB_ID"
-    echo "  tail -f logs/slurm_${JOB_ID}_inference.out"
-    echo "  tail -f logs/slurm_${JOB_ID}_inference.err"
+    rm -f "$SLURM_SCRIPT"
+    exit 0
 fi
 
+#-------------------------------------------------------------------------------
+# SSH Helpers
+#-------------------------------------------------------------------------------
+ensure_ssh() {
+    if ! ssh -O check $SSH_OPTS "$SSH_DEST" 2>/dev/null; then
+        echo "Opening SSH connection to $SSH_HOST..."
+        ssh -M -f -N -o ControlMaster=yes -o ControlPath="$CONTROL_PATH" \
+            -o ControlPersist=30m -o ServerAliveInterval=60 "$SSH_DEST"
+    fi
+}
+
+remote() {
+    ssh $SSH_OPTS "$SSH_DEST" "$@"
+}
+
+ensure_ssh
+
+#-------------------------------------------------------------------------------
+# Pre-sync: push manual_data + project.json to GPU
+#-------------------------------------------------------------------------------
+if [ "$NO_PUSH" = false ]; then
+    echo ""
+    echo "Pushing project data to GPU..."
+    LOCAL_PROJECT="$SCRIPT_DIR/$PROJECT"
+    REMOTE_PROJECT="$SSH_DEST:$REMOTE_DIR/$PROJECT"
+
+    if [ -d "$LOCAL_PROJECT/manual_data" ]; then
+        rsync -az --progress -e "ssh $SSH_OPTS" \
+            "$LOCAL_PROJECT/manual_data/" "$REMOTE_PROJECT/manual_data/"
+    fi
+    if [ -f "$LOCAL_PROJECT/project.json" ]; then
+        rsync -az -e "ssh $SSH_OPTS" \
+            "$LOCAL_PROJECT/project.json" "$REMOTE_PROJECT/project.json"
+    fi
+    echo "Project data synced."
+    echo ""
+fi
+
+#-------------------------------------------------------------------------------
+# Upload & Submit
+#-------------------------------------------------------------------------------
+REMOTE_SCRIPT="/tmp/$(basename "$SLURM_SCRIPT")"
+scp -q $SSH_OPTS "$SLURM_SCRIPT" "$SSH_DEST:$REMOTE_SCRIPT"
 rm -f "$SLURM_SCRIPT"
+
+JOB_OUTPUT=$(remote "cd $REMOTE_DIR && mkdir -p logs && sbatch $REMOTE_SCRIPT" 2>&1)
+JOB_ID=$(echo "$JOB_OUTPUT" | awk '/Submitted batch job/ {print $4}')
+
+if [ -z "$JOB_ID" ]; then
+    echo "Error: Failed to submit job"
+    echo "$JOB_OUTPUT"
+    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null
+    exit 1
+fi
+
+echo ""
+echo "Job submitted: $JOB_ID"
+
+#-------------------------------------------------------------------------------
+# Cleanup Trap
+#-------------------------------------------------------------------------------
+TAIL_PID=""
+ERR_PID=""
+cleanup() {
+    if [ -n "$TAIL_PID" ]; then
+        kill "$TAIL_PID" 2>/dev/null
+        wait "$TAIL_PID" 2>/dev/null
+    fi
+    if [ -n "$ERR_PID" ]; then
+        kill "$ERR_PID" 2>/dev/null
+        wait "$ERR_PID" 2>/dev/null
+    fi
+    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null
+}
+trap cleanup EXIT
+
+#-------------------------------------------------------------------------------
+# Stream Log & Wait for Completion
+#-------------------------------------------------------------------------------
+LOG_REMOTE="$REMOTE_DIR/logs/slurm_${JOB_ID}_inference.out"
+ERR_REMOTE="$REMOTE_DIR/logs/slurm_${JOB_ID}_inference.err"
+
+echo "Streaming output (log: gpu-server/logs/slurm_${JOB_ID}_inference.out)"
+echo ""
+
+ssh $SSH_OPTS "$SSH_DEST" \
+    "while [ ! -f '$LOG_REMOTE' ]; do sleep 2; done; tail -f '$LOG_REMOTE'" 2>/dev/null &
+TAIL_PID=$!
+
+ssh $SSH_OPTS "$SSH_DEST" \
+    "while [ ! -f '$ERR_REMOTE' ]; do sleep 2; done; tail -f '$ERR_REMOTE'" 2>/dev/null \
+    | sed 's/^/[stderr] /' >&2 &
+ERR_PID=$!
+
+# Poll squeue until the job leaves the queue
+while remote "squeue -j $JOB_ID -h 2>/dev/null" 2>/dev/null | grep -q "$JOB_ID"; do
+    sleep "$POLL_INTERVAL"
+done
+
+# Let tail flush remaining output
+sleep 3
+kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null
+TAIL_PID=""
+kill "$ERR_PID" 2>/dev/null; wait "$ERR_PID" 2>/dev/null
+ERR_PID=""
+
+#-------------------------------------------------------------------------------
+# Check Job Result
+#-------------------------------------------------------------------------------
+JOB_STATE=$(remote "sacct -j $JOB_ID --format=State --noheader -P 2>/dev/null | head -1 | tr -d ' '" 2>/dev/null || echo "UNKNOWN")
+
+echo ""
+
+if [[ "$JOB_STATE" == "FAILED" || "$JOB_STATE" == "CANCELLED" || "$JOB_STATE" == "TIMEOUT" || "$JOB_STATE" == "OUT_OF_MEMORY" ]]; then
+    echo "============================================================"
+    echo "Job $JOB_ID finished with state: $JOB_STATE"
+    echo "Error log: gpu-server/logs/slurm_${JOB_ID}_inference.err"
+    echo "============================================================"
+    exit 1
+fi
+
+echo "============================================================"
+echo "Job $JOB_ID completed! (state: ${JOB_STATE})"
+echo "============================================================"
+
+#-------------------------------------------------------------------------------
+# Sync Results
+#-------------------------------------------------------------------------------
+if [ "$NO_SYNC" = true ]; then
+    echo ""
+    echo "Sync skipped (--no-sync). Results available via SSHFS at:"
+    echo "  gpu-server/$PROJECT/inference/"
+    exit 0
+fi
+
+echo ""
+echo "Syncing inference results..."
+
+SRC="$MOUNT_POINT/$PROJECT/inference/"
+DST="$SCRIPT_DIR/$PROJECT/inference/"
+
+if [ ! -d "$SRC" ]; then
+    echo "Warning: No inference directory at $SRC"
+    echo "Results may be available via SSHFS at: gpu-server/$PROJECT/inference/"
+    exit 0
+fi
+
+mkdir -p "$DST"
+rsync -a --progress "$SRC" "$DST"
+
+echo ""
+echo "============================================================"
+echo "Results synced to: $PROJECT/inference/"
+echo "============================================================"

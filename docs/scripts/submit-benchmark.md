@@ -270,7 +270,7 @@ Submitting jobs...
 
 Monitor with:
   squeue -u $USER
-  tail -f logs/job_123458.log
+  tail -f logs/slurm_123458_benchmark_h100-96.out
 
 Compare results when complete:
   python -m cli.compare_latency benchmark_results/20260128_172934/
@@ -291,24 +291,23 @@ benchmark_results/20260128_172934/
 └── comparison.md                  (after running compare_latency)
 
 logs/
-├── job_123458.log                 # h100-96 log
-└── job_123459.log                 # a100-80 log
+├── slurm_123458_benchmark_h100-96.out   # h100-96 log
+└── slurm_123459_benchmark_a100-80.out   # a100-80 log
 ```
 
-### Monitor Scripts
+### Monitor Script
 
-Each job gets a `monitor.sh` helper:
+A `monitor.sh` helper is generated at the benchmark suite root:
 
 ```bash
-# Generated monitor scripts
-benchmark_results/20260128_172934/h100-96/monitor.sh
-benchmark_results/20260128_172934/a100-80/monitor.sh
+# Generated monitor script
+benchmark_results/20260128_172934/monitor.sh
 ```
 
-Run to monitor specific GPU:
+Run to monitor jobs:
 
 ```bash
-./benchmark_results/20260128_172934/h100-96/monitor.sh
+./benchmark_results/20260128_172934/monitor.sh
 ```
 
 ## Comparing Results
@@ -344,10 +343,10 @@ watch -n 5 squeue -u $USER
 
 ```bash
 # Follow log
-tail -f logs/job_123458.log
+tail -f logs/slurm_123458_benchmark_h100-96.out
 
 # Use monitor script
-./benchmark_results/20260128_172934/h100-96/monitor.sh
+./benchmark_results/20260128_172934/monitor.sh
 ```
 
 ### Check Progress
@@ -357,7 +356,7 @@ tail -f logs/job_123458.log
 ls benchmark_results/20260128_172934/*/benchmark_results.json | wc -l
 
 # Check for errors
-grep -i error logs/job_*.log
+grep -i error logs/slurm_*_benchmark_*.out
 ```
 
 ## Best Practices
@@ -458,7 +457,7 @@ Generate benchmark results for papers/reports:
 Check partition availability:
 
 ```bash
-sinfo -p h100,a100,gpu,nv
+sinfo -p gpu,gpu-long
 ```
 
 ### Job Failed
@@ -466,7 +465,7 @@ sinfo -p h100,a100,gpu,nv
 Check logs:
 
 ```bash
-cat logs/job_*.log | grep -i error
+grep -i error logs/slurm_*_benchmark_*.out
 ```
 
 ### Inconsistent Results

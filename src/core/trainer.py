@@ -144,19 +144,65 @@ def get_device_info(device: str) -> dict[str, Any]:
     return info
 
 
+def is_manual_data_dir(dir_name: str) -> bool:
+    """Check if a frames/ subdirectory holds manual data (root or subdataset)."""
+    return dir_name == "manual_data" or dir_name.startswith("manual_data__")
+
+
+def manual_dataset_name(dir_name: str) -> str | None:
+    """Extract the subdataset name from a manual data frames dir.
+
+    Returns None for the root ``manual_data`` dir, or the subdataset name
+    for ``manual_data__<name>`` dirs.
+    """
+    if dir_name == "manual_data":
+        return None
+    if dir_name.startswith("manual_data__"):
+        return dir_name[len("manual_data__"):]
+    return None
+
+
 def _categorize_frame_dir(dir_name: str, video_dir_names: set[str]) -> str:
     """Categorize a frames/ subdirectory as 'manual_data', 'video', or 'imports'."""
-    if dir_name == "manual_data":
+    if is_manual_data_dir(dir_name):
         return "manual_data"
     if dir_name in video_dir_names:
         return "video"
     return "imports"
 
 
+def _should_include_manual_dir(
+    dir_name: str,
+    manual_datasets: list[str] | None,
+    exclude_manual_datasets: list[str] | None,
+) -> bool:
+    """Decide whether a manual data frames dir should be included.
+
+    When neither filter is set, all manual data dirs are included.
+    ``manual_datasets`` is an include-list of subdataset names (use ``(root)``
+    for the root ``manual_data`` dir).
+    ``exclude_manual_datasets`` is an exclude-list.
+    """
+    if manual_datasets is None and exclude_manual_datasets is None:
+        return True
+
+    ds_name = manual_dataset_name(dir_name)
+    # ds_name is None for root "manual_data", otherwise the subdataset name
+    canonical = "(root)" if ds_name is None else ds_name
+
+    if manual_datasets is not None:
+        return canonical in manual_datasets
+    if exclude_manual_datasets is not None:
+        return canonical not in exclude_manual_datasets
+    return True
+
+
 def load_project_data(
     project_dir: Path,
     video_id: int | str | None = None,
     sources: list[str] | None = None,
+    manual_datasets: list[str] | None = None,
+    exclude_manual_datasets: list[str] | None = None,
 ) -> tuple[dict, dict, list[str], dict]:
     """
     Load project data from Batman project directory.
@@ -171,6 +217,10 @@ def load_project_data(
             filtering and uses source-based filtering instead.
             Valid values: "manual_data", "imports". Video frames are always
             excluded when sources is set.
+        manual_datasets: If set, only include these manual subdatasets.
+            Use "(root)" for root-level images, or subdirectory names.
+        exclude_manual_datasets: If set, exclude these manual subdatasets.
+            Mutually exclusive with manual_datasets.
 
     Returns:
         Tuple of (frames_meta, annotations_data, class_names, project_config)
@@ -204,7 +254,6 @@ def load_project_data(
     video_dirs_to_load = []
 
     if sources is not None:
-        # Source-based filtering: always skip video frames
         allowed_sources = set(sources)
         for sub_dir in frames_base_dir.iterdir():
             if not sub_dir.is_dir() or not (sub_dir / "frames.json").exists():
@@ -212,8 +261,14 @@ def load_project_data(
             source_type = _categorize_frame_dir(sub_dir.name, video_dir_names)
             if source_type == "video":
                 continue
-            if source_type in allowed_sources:
-                video_dirs_to_load.append(sub_dir)
+            if source_type not in allowed_sources:
+                continue
+            # Apply manual dataset filtering
+            if source_type == "manual_data" and not _should_include_manual_dir(
+                sub_dir.name, manual_datasets, exclude_manual_datasets
+            ):
+                continue
+            video_dirs_to_load.append(sub_dir)
     elif video_id is None or video_id == "all":
         excluded_video_ids = {
             vid_id
@@ -224,12 +279,22 @@ def load_project_data(
             if sub_dir.is_dir() and (sub_dir / "frames.json").exists():
                 if sub_dir.name in excluded_video_ids:
                     continue
+                # Apply manual dataset filtering for manual dirs
+                if is_manual_data_dir(sub_dir.name) and not _should_include_manual_dir(
+                    sub_dir.name, manual_datasets, exclude_manual_datasets
+                ):
+                    continue
                 video_dirs_to_load.append(sub_dir)
     elif video_id == "imports":
         for sub_dir in frames_base_dir.iterdir():
             if not sub_dir.is_dir() or not (sub_dir / "frames.json").exists():
                 continue
             if sub_dir.name in all_videos_meta:
+                continue
+            # Apply manual dataset filtering for manual dirs
+            if is_manual_data_dir(sub_dir.name) and not _should_include_manual_dir(
+                sub_dir.name, manual_datasets, exclude_manual_datasets
+            ):
                 continue
             video_dirs_to_load.append(sub_dir)
     else:
@@ -455,6 +520,8 @@ def prepare_coco_dataset(
     seed: int = 42,
     sources: list[str] | None = None,
     manual_data_split_strategy: str = "proportional",
+    manual_datasets: list[str] | None = None,
+    exclude_manual_datasets: list[str] | None = None,
 ) -> DatasetStats:
     """
     Prepare COCO format dataset from Batman project.
@@ -476,6 +543,10 @@ def prepare_coco_dataset(
             When set, overrides video_id. Video frames are always excluded.
         manual_data_split_strategy: How to distribute manual data across splits.
             "proportional" (default), "val_only", "train_only", "all_splits".
+        manual_datasets: If set, only include these manual subdatasets.
+            Use "(root)" for root-level images, or subdirectory names.
+        exclude_manual_datasets: If set, exclude these manual subdatasets.
+            Mutually exclusive with manual_datasets.
 
     Returns:
         DatasetStats with counts and class names
@@ -487,7 +558,11 @@ def prepare_coco_dataset(
     set_seed(seed)
 
     frames_meta, annotations_data, original_class_names, _ = load_project_data(
-        project_dir, video_id, sources=sources
+        project_dir,
+        video_id,
+        sources=sources,
+        manual_datasets=manual_datasets,
+        exclude_manual_datasets=exclude_manual_datasets,
     )
 
     if filter_classes:

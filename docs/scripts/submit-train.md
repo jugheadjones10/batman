@@ -13,13 +13,21 @@ Submit RF-DETR training jobs to SLURM clusters with automatic GPU configuration 
 <div class="command-builder-widget" data-tool="submit_train" data-params='[
   {"name": "gpu", "type": "choice", "choices": ["h200", "h100-96", "h100-47", "a100-80", "a100-40", "nv"], "default": "h100-96", "description": "GPU type", "group": "GPU"},
   {"name": "num-gpus", "type": "number", "default": 1, "min": 1, "max": 8, "description": "Number of GPUs", "group": "GPU"},
-  {"name": "project", "type": "path", "default": "data/projects/Test", "description": "Project directory", "group": "Training"},
+  {"name": "project", "type": "path", "default": "data/projects/One", "description": "Project directory", "group": "Training"},
   {"name": "epochs", "type": "number", "default": 50, "min": 1, "description": "Training epochs", "group": "Training"},
   {"name": "batch-size", "type": "number", "description": "Batch size (auto-set if not specified)", "group": "Training"},
   {"name": "image-size", "type": "number", "default": 640, "min": 320, "max": 1280, "step": 32, "description": "Image size", "group": "Training"},
   {"name": "lr", "type": "text", "default": "1e-4", "description": "Learning rate", "group": "Training"},
   {"name": "patience", "type": "number", "default": 10, "min": 0, "description": "Early stopping patience", "group": "Training"},
-  {"name": "model", "type": "choice", "choices": ["base", "large"], "default": "base", "description": "Model size", "group": "Training"},
+  {"name": "model", "type": "choice", "choices": ["nano", "small", "base", "medium", "large"], "default": "base", "description": "Model size", "group": "Training"},
+  {"name": "label", "type": "text", "description": "Label appended to run name", "group": "Training"},
+  {"name": "sources", "type": "text", "description": "Data sources (comma-separated): manual_data,imports", "group": "Training"},
+  {"name": "manual-split", "type": "choice", "choices": ["proportional", "val_only", "train_only", "all_splits"], "default": "train_only", "description": "Manual data split strategy", "group": "Training"},
+  {"name": "manual-datasets", "type": "text", "description": "Only include these manual subdatasets (comma-separated)", "group": "Training"},
+  {"name": "exclude-manual-datasets", "type": "text", "description": "Exclude these manual subdatasets (comma-separated)", "group": "Training"},
+  {"name": "max-frames-per-class", "type": "number", "min": 1, "description": "Cap frames per class", "group": "Training"},
+  {"name": "infer-after", "type": "flag", "description": "Run inference on project videos after training", "group": "Post-training"},
+  {"name": "infer-test-only", "type": "flag", "description": "With --infer-after, only test-only videos", "group": "Post-training"},
   {"name": "output-dir", "type": "path", "description": "Output directory (auto-generated if not set)", "group": "Training"},
   {"name": "filter-classes", "type": "text", "description": "Only train on specific classes", "group": "Training"},
   {"name": "partition", "type": "text", "description": "SLURM partition (auto-detected if not set)", "group": "SLURM"},
@@ -53,7 +61,7 @@ GPU type to use.
 Number of GPUs for distributed training.
 
 - **Default**: `1`
-- **Range**: `1-8`
+- **Range**: `1` to max per GPU type (see GPU Limits table below)
 
 Multi-GPU training uses PyTorch `torchrun` for distributed data parallel.
 
@@ -63,7 +71,7 @@ Multi-GPU training uses PyTorch `torchrun` for distributed data parallel.
 
 Project directory containing labeled data.
 
-- **Default**: `data/projects/Test`
+- **Default**: `data/projects/One`
 
 #### `--epochs=N`
 
@@ -103,14 +111,14 @@ Early stopping patience (0 to disable).
 
 Model architecture size.
 
-- **Choices**: `base`, `large`
+- **Choices**: `nano`, `small`, `base`, `medium`, `large`
 - **Default**: `base`
 
 #### `--output-dir=PATH`
 
 Output directory for training run.
 
-- **Default**: Auto-generated as `runs/rfdetr_{GPU_TYPE}_{TIMESTAMP}/`
+- **Default**: Auto-generated as `{project}/runs/rfdetr_{GPU_TYPE}_{TIMESTAMP}/`
 
 #### `--filter-classes=NAMES`
 
@@ -119,6 +127,57 @@ Only train on specific classes (pipe-separated for multi-word).
 ```bash
 --filter-classes="crane hook|crane-hook"
 ```
+
+#### `--label=NAME`
+
+Label appended to run name (e.g., `rfdetr_h100-96_20260128_105030_my-label`).
+
+#### `--max-frames-per-class=N`
+
+Cap frames per class (random sample, deterministic with seed).
+
+#### `--sources=TYPES`
+
+Data sources to include (comma-separated). Valid: `manual_data`, `imports`.
+
+```bash
+--sources=manual_data
+```
+
+#### `--manual-split=STRATEGY`
+
+How to split manual data across train/val/test.
+
+- **Choices**: `proportional`, `val_only`, `train_only`, `all_splits`
+- **Default**: `train_only`
+
+#### `--manual-datasets=NAMES`
+
+Only include specific manual data subdatasets (comma-separated). Use `(root)` for root-level images. Mutually exclusive with `--exclude-manual-datasets`.
+
+```bash
+--manual-datasets=crane_closeups,worker_shots
+```
+
+#### `--exclude-manual-datasets=NAMES`
+
+Exclude specific manual data subdatasets. All other manual datasets are included. Mutually exclusive with `--manual-datasets`.
+
+```bash
+--exclude-manual-datasets=negative_examples
+```
+
+See the [Training CLI manual data subdatasets docs](../cli/train.md#manual-data-subdatasets) for the directory layout.
+
+### Post-training Options
+
+#### `--infer-after`
+
+Run inference on project videos after training completes.
+
+#### `--infer-test-only`
+
+With `--infer-after`, only run inference on test-only videos (`exclude_from_training=true`).
 
 ### SLURM Options
 
@@ -130,10 +189,10 @@ SLURM partition to use.
 
 | GPU              | Default Partition |
 | ---------------- | ----------------- |
-| h200             | `gpu`             |
-| h100-96, h100-47 | `h100`            |
-| a100-80, a100-40 | `a100`            |
-| nv               | `nv`              |
+| h200             | `gpu` (3h limit)  |
+| h100-96, h100-47 | `gpu-long` (3d limit) |
+| a100-80, a100-40 | `gpu-long` (3d limit) |
+| nv               | `gpu-long` (3d limit) |
 
 #### `--time=LIMIT`
 
@@ -257,18 +316,18 @@ $ ./submit_train.sh --project data/projects/Test
 
 Submitted batch job 123456
 Job ID: 123456
-Output directory: runs/rfdetr_h100_20260128_105030/
-Log file: logs/job_123456.log
+Output directory: data/projects/One/runs/rfdetr_h100-96_20260128_105030/
+Log file: logs/slurm_123456_rfdetr-base-h100-96.out
 
 To monitor:
-  tail -f logs/job_123456.log
+  tail -f logs/slurm_123456_rfdetr-base-h100-96.out
   squeue -j 123456
 ```
 
 ### Generated Files
 
 ```
-runs/rfdetr_h100_20260128_105030/
+{project}/runs/rfdetr_h100-96_20260128_105030/
 ├── best.pth                 # Best checkpoint
 ├── checkpoint_last.pth      # Latest checkpoint
 ├── training_config.json     # Configuration
@@ -277,7 +336,8 @@ runs/rfdetr_h100_20260128_105030/
 └── val_images/              # Validation visualizations
 
 logs/
-└── job_123456.log          # SLURM job log
+├── slurm_123456_rfdetr-base-h100-96.out   # SLURM stdout
+└── slurm_123456_rfdetr-base-h100-96.err   # SLURM stderr
 ```
 
 ## Monitoring
@@ -296,18 +356,17 @@ watch -n 5 squeue -j 123456
 
 ```bash
 # Follow log output
-tail -f logs/job_123456.log
+tail -f logs/slurm_123456_rfdetr-base-h100-96.out
 
 # View full log
-cat logs/job_123456.log
+cat logs/slurm_123456_rfdetr-base-h100-96.out
 ```
 
 ### Check TensorBoard
 
 ```bash
 # On compute node
-module load tensorboard
-tensorboard --logdir runs/rfdetr_h100_20260128_105030/tensorboard --port 6006
+tensorboard --logdir data/projects/One/runs/rfdetr_h100-96_20260128_105030/tensorboard --port 6006
 
 # Forward port to local machine
 ssh -L 6006:localhost:6006 user@cluster
@@ -339,9 +398,12 @@ Check node GPU count:
 
 | Node Type  | Max GPUs |
 | ---------- | -------- |
-| H100 nodes | 4        |
-| A100 nodes | 4        |
-| H200 nodes | 8        |
+| H200       | 4        |
+| H100-96    | 2        |
+| H100-47    | 4        |
+| A100-80    | 1        |
+| A100-40    | 2        |
+| NV         | 2        |
 
 Script validates GPU count against limits.
 
@@ -412,7 +474,7 @@ H200 limited to 3 hours on `gpu` partition:
 Check partition availability:
 
 ```bash
-sinfo -p h100,a100,gpu
+sinfo -p gpu,gpu-long
 ```
 
 ### Training Stalled
@@ -420,11 +482,12 @@ sinfo -p h100,a100,gpu
 Check logs for errors:
 
 ```bash
-tail -100 logs/job_*.log
+tail -100 logs/slurm_*_rfdetr-*.out
 ```
 
 ## Related
 
+- **[Run Training (Local)](run-training.md)** - Run from Mac with auto-sync
 - **[Training CLI](../cli/train.md)** - Local training
 - **[Submit Inference](submit-inference.md)** - Run inference
 - **[SLURM Guide](../guides/slurm.md)** - Complete SLURM guide

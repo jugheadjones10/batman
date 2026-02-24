@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Trash2,
   ArrowLeft,
+  FolderOpen,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -42,6 +43,8 @@ export default function AnnotatePage() {
   const [originalBox, setOriginalBox] = useState<BoundingBox | null>(null)
   const [cursor, setCursor] = useState('crosshair')
 
+  const [selectedDataset, setSelectedDataset] = useState<string | null>(null)
+
   // Fetch project data
   const { data: project } = useQuery({
     queryKey: ['project', projectName],
@@ -49,10 +52,16 @@ export default function AnnotatePage() {
     enabled: !!projectName,
   })
 
+  const { data: manualDatasets } = useQuery({
+    queryKey: ['manual-data-datasets', projectName],
+    queryFn: () => api.manualData.listDatasets(projectName!),
+    enabled: !!projectName,
+  })
+
   // Fetch manual data images
   const { data: manualData } = useQuery({
-    queryKey: ['manual-data-images', projectName],
-    queryFn: () => api.manualData.listImages(projectName!, 0, 500),
+    queryKey: ['manual-data-images', projectName, selectedDataset],
+    queryFn: () => api.manualData.listImages(projectName!, 0, 500, selectedDataset ?? undefined),
     enabled: !!projectName,
   })
 
@@ -460,6 +469,12 @@ export default function AnnotatePage() {
     setResizeHandle(null)
   }
 
+  const handleDatasetChange = useCallback((ds: string | null) => {
+    setSelectedDataset(ds)
+    setCurrentImageIndex(0)
+    setSelectedAnnotation(null)
+  }, [setCurrentImageIndex, setSelectedAnnotation])
+
   // Navigation
   const goToImage = useCallback((index: number) => {
     if (images.length > 0 && index >= 0 && index < images.length) {
@@ -529,7 +544,7 @@ export default function AnnotatePage() {
     <div className="h-[calc(100vh-4rem)] flex overflow-hidden">
       {/* Main annotation area */}
       <div className="flex-1 flex flex-col min-w-0 bg-neutral-900">
-        {/* Back link */}
+        {/* Back link + dataset filter */}
         <div className="flex-shrink-0 px-4 py-2 border-b border-border flex items-center gap-2">
           <Link to={`/projects/${projectName}`}>
             <Button variant="ghost" size="sm" className="gap-1 h-8">
@@ -537,6 +552,40 @@ export default function AnnotatePage() {
               Back
             </Button>
           </Link>
+
+          {manualDatasets && manualDatasets.datasets.length > 1 && (
+            <>
+              <div className="w-px h-5 bg-border" />
+              <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />
+              <div className="flex items-center gap-1 flex-wrap">
+                <button
+                  onClick={() => handleDatasetChange(null)}
+                  className={cn(
+                    'px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
+                    selectedDataset === null
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  All
+                </button>
+                {manualDatasets.datasets.map((ds) => (
+                  <button
+                    key={ds.source_key}
+                    onClick={() => handleDatasetChange(ds.name)}
+                    className={cn(
+                      'px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
+                      selectedDataset === ds.name
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    {ds.name === '(root)' ? 'Root' : ds.name} ({ds.image_count})
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Canvas area */}
@@ -550,7 +599,7 @@ export default function AnnotatePage() {
               style={{ width: canvasSize.width, height: canvasSize.height }}
             >
               <img
-                src={api.manualData.imageUrl(projectName, currentImage.filename)}
+                src={currentImage.url}
                 alt={currentImage.filename}
                 className="absolute inset-0 w-full h-full object-contain"
                 draggable={false}
@@ -629,7 +678,7 @@ export default function AnnotatePage() {
                 )}
               >
                 <img
-                  src={api.manualData.imageUrl(projectName, img.filename)}
+                  src={img.url}
                   alt={img.filename}
                   className="w-full h-full object-cover"
                 />

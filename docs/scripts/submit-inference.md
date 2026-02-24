@@ -54,10 +54,10 @@ Only run on videos with `exclude_from_training: true`.
 
 GPU type to use.
 
-- **Default**: `a100-40`
+- **Default**: `h100-96`
 - **Choices**: `h200`, `h100-96`, `h100-47`, `a100-80`, `a100-40`, `nv`
 
-For inference, `a100-40` is typically sufficient.
+Default is `h100-96`. For lighter workloads, `a100-40` may be sufficient.
 
 #### `--time=LIMIT`
 
@@ -73,7 +73,7 @@ Model architecture size: `base` or `large` (default: `base`).
 
 #### `--confidence=THRESHOLD`
 
-Minimum confidence to include (default: `0.0` = show all; each box labeled with its confidence).
+Minimum confidence to include (default: `0.5` in shell script).
 
 #### `--no-optimize`
 
@@ -201,7 +201,7 @@ tail -f logs/slurm_<JOB_ID>_inference.out
 
 ## Best Practices
 
-1. **Use cost-effective GPU**: `--gpu a100-40` is sufficient for inference
+1. **Use cost-effective GPU**: `--gpu a100-40` may be sufficient for inference
 2. **Enable tracking for videos**: `--track`
 3. **Skip frames for speed**: `--frame-interval 5 --track`
 4. **Use `--test-only`** to focus on evaluation videos
@@ -209,6 +209,7 @@ tail -f logs/slurm_<JOB_ID>_inference.out
 
 ## Related
 
+- **[Run Inference (Local)](run-inference.md)** -- Run from Mac with auto-sync
 - **[Inference CLI](../cli/inference.md)** -- Local inference reference
 - **[Submit Training](submit-train.md)** -- Train models on cluster
 - **[Inference Workflow](../guides/inference.md)** -- Complete guide

@@ -134,7 +134,24 @@ python -m cli.train \
   --output-dir runs/my_training_run
 ```
 
-### SLURM Cluster Training
+### SLURM Cluster Training (from Local Mac -- Recommended)
+
+Use `run_training.sh` to push data, train, and sync results in one command:
+
+```bash
+./run_training.sh \
+  --project data/projects/MyProject \
+  --gpu h100-96 \
+  --epochs 50 \
+  --model base \
+  --batch-size 16
+```
+
+This automatically pushes your local `manual_data/` and `project.json` to the cluster before training, and syncs JSON metadata back when done. Requires the SSHFS mount (`./mount_gpu.sh`).
+
+### From the Cluster Directly
+
+If you're already SSH'd into the cluster, use `submit_train.sh`:
 
 ```bash
 ./submit_train.sh \
@@ -148,7 +165,7 @@ python -m cli.train \
 ### Multi-GPU Training
 
 ```bash
-./submit_train.sh \
+./run_training.sh \
   --project data/projects/MyProject \
   --gpu h100-96 \
   --num-gpus 4 \
@@ -165,7 +182,7 @@ python -m cli.train \
 tail -f runs/my_training_run/*.log
 
 # SLURM training
-tail -f logs/job_*.log
+tail -f logs/slurm_*_rfdetr-*.out
 ```
 
 ### Check TensorBoard
@@ -206,8 +223,8 @@ open runs/my_training_run/val_images/
 
 ```bash
 python -m cli.inference \
+  --project data/projects/MyProject \
   --run my_training_run \
-  --input test_image.jpg \
   --confidence 0.5
 ```
 
@@ -244,6 +261,37 @@ python -m cli.train \
   --epochs 100
 ```
 
+### Using Manual Data Subdatasets
+
+Organize manually curated images into subdirectories inside `manual_data/` to create named datasets you can include or exclude per training run:
+
+```
+manual_data/
+  crane_closeups/     # Dataset of close-up crane images
+  worker_shots/       # Dataset of worker images
+  negative_examples/  # Hard negatives you may want to toggle
+```
+
+Train with only specific datasets:
+
+```bash
+python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data,imports \
+  --manual-datasets crane_closeups,worker_shots
+```
+
+Or exclude datasets:
+
+```bash
+python -m cli.train \
+  --project data/projects/MyProject \
+  --sources manual_data,imports \
+  --exclude-manual-datasets negative_examples
+```
+
+See the [Training CLI docs](../cli/train.md#manual-data-subdatasets) for the full directory layout and naming conventions.
+
 ## Step 8: Export and Deploy
 
 ### Export for Inference
@@ -252,15 +300,15 @@ python -m cli.train \
 python -m cli.train \
   --checkpoint runs/my_training_run/best.pth \
   --export exports/my_model_v1 \
-  --classes "person,car,bicycle"
+  --classes person car bicycle
 ```
 
 ### Test Exported Model
 
 ```bash
 python -m cli.inference \
-  --checkpoint exports/my_model_v1/model.pth \
-  --input test_video.mp4 \
+  --project data/projects/MyProject \
+  --run my_training_run \
   --confidence 0.5 \
   --track
 ```
@@ -418,6 +466,7 @@ Keep notes on:
 ## Related
 
 - **[Training CLI](../cli/train.md)** - Command reference
-- **[Submit Training Script](../scripts/submit-train.md)** - SLURM training
+- **[Run Training (Local)](../scripts/run-training.md)** - Local runner with auto-sync
+- **[Submit Training Script](../scripts/submit-train.md)** - Cluster-side SLURM training
 - **[Inference Workflow](inference.md)** - Next steps
 - **[Importer CLI](../cli/importer.md)** - Data import

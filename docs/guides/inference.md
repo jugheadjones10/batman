@@ -86,7 +86,22 @@ python -m cli.inference \
 
 ## SLURM Cluster Inference
 
-### Basic Submission
+### From Your Local Mac (Recommended)
+
+Use `run_inference.sh` to submit, wait, and auto-sync results in one command:
+
+```bash
+./run_inference.sh \
+  --project data/projects/CraneHook \
+  --run rfdetr_run_1 \
+  --gpu a100-40
+```
+
+This streams the job output in real-time and copies results to your local project directory when done. Requires the SSHFS mount (`./mount_gpu.sh`).
+
+### From the Cluster Directly
+
+If you're already SSH'd into the cluster, use `submit_inference.sh`:
 
 ```bash
 ./submit_inference.sh \
@@ -98,7 +113,7 @@ python -m cli.inference \
 ### Test-Only Videos on Cluster
 
 ```bash
-./submit_inference.sh \
+./run_inference.sh \
   --project data/projects/CraneHook \
   --run rfdetr_run_1 \
   --test-only \
@@ -204,5 +219,6 @@ Class names are loaded from `class_info.json` in the run directory (authoritativ
 
 - **[Inference CLI](../cli/inference.md)** -- Command reference
 - **[Video Management CLI](../cli/videos.md)** -- Add/remove project videos
-- **[Submit Inference Script](../scripts/submit-inference.md)** -- SLURM inference
+- **[Run Inference (Local)](../scripts/run-inference.md)** -- Local runner with auto-sync
+- **[Submit Inference Script](../scripts/submit-inference.md)** -- Cluster-side SLURM inference
 - **[Training Workflow](training.md)** -- Train models

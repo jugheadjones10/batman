@@ -448,7 +448,7 @@ async def list_imported_datasets(project_name: str):
     for video_dir in frames_dir.iterdir():
         if not video_dir.is_dir() or video_dir.name in videos_meta:
             continue
-        if video_dir.name == "manual_data":
+        if video_dir.name == "manual_data" or video_dir.name.startswith("manual_data__"):
             continue
         meta_path = video_dir / "frames.json"
         if not meta_path.exists():
@@ -498,6 +498,9 @@ async def get_imported_image(project_name: str, video_id: str, filename: str):
     if not image_path.exists():
         if video_id == "manual_data":
             image_path = project_path / "manual_data" / filename
+        elif video_id.startswith("manual_data__"):
+            dataset_name = video_id[len("manual_data__"):]
+            image_path = project_path / "manual_data" / dataset_name / filename
         if not image_path.exists():
             raise HTTPException(status_code=404, detail="Image not found")
 

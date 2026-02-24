@@ -108,9 +108,9 @@ uv run python -m cli.train \
 
 Available `--manual-split-strategy` options:
 
-- `proportional` (default) -- distribute across all splits
+- `train_only` (default) -- use manual data only for training
 - `val_only` -- use manual data only for validation
-- `train_only` -- use manual data only for training
+- `proportional` -- distribute across all splits
 - `all_splits` -- include manual data in every split
 
 See [Training CLI](cli/train.md) for detailed options.
@@ -121,8 +121,8 @@ Test your trained model:
 
 ```bash
 uv run python -m cli.inference \
+  --project data/projects/MyProject \
   --run my_first_run \
-  --input path/to/video.mp4 \
   --track \
   --confidence 0.5
 ```
@@ -161,9 +161,9 @@ See [SLURM Training](scripts/submit-train.md) for all options.
 
 ```bash
 ./submit_inference.sh \
+  --project data/projects/MyProject \
   --run my_first_run \
-  --input video.mp4 \
-  --gpu a100-40 \
+  --gpu h100-96 \
   --track
 ```
 
@@ -186,7 +186,7 @@ cd frontend
 npm run dev
 ```
 
-Then open http://localhost:5180 (or the port shown) in your browser.
+Then open http://localhost:5173 (or the port shown) in your browser.
 
 See [Development Server](scripts/run-dev.md) for more information.
 

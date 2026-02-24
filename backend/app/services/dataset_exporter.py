@@ -56,8 +56,8 @@ class DatasetExporter:
         manual_frames = []
         other_frames = []
         for frame in frames:
-            vid_id = frame.get("video_id", 0)
-            if vid_id == "manual_data":
+            vid_id = str(frame.get("video_id", 0))
+            if vid_id == "manual_data" or vid_id.startswith("manual_data__"):
                 manual_frames.append(frame)
             else:
                 other_frames.append(frame)

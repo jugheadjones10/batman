@@ -157,43 +157,56 @@ FPS: 117.6       # Frames per second
 **Calculation**: `FPS = 1000 / mean_latency_ms`
 
 **Interpretation**:
-- FPS ≥ 120: Excellent (120 Hz displays)
-- FPS ≥ 60: Great (60 Hz displays, smooth video)
-- FPS ≥ 30: Good (standard video)
+- FPS >= 60: Great (60 Hz displays, smooth video)
+- FPS >= 30: Good (standard video)
 - FPS < 30: May need optimization
 
 #### Real-Time Capability
 
+Real-time capability is checked using **P99** latency (not mean):
+
 ```
-✓ 30 FPS (33.3 ms/frame)
-✓ 60 FPS (16.7 ms/frame)
-✗ 120 FPS (8.3 ms/frame)
+30 FPS: P99 < 33.3 ms/frame
+60 FPS: P99 < 16.7 ms/frame
 ```
 
-**Meaning**: Can model process frames faster than they're produced?
+**Meaning**: Can the model process frames faster than they're produced, even in worst-case scenarios?
 
 ### Benchmark Results File
 
 ```json
 {
-  "gpu": "NVIDIA H100",
-  "model": "base",
-  "image_size": 640,
-  "runs": 100,
-  "latency_ms": {
-    "mean": 8.5,
-    "median": 8.3,
-    "std": 0.4,
-    "p95": 9.1,
-    "p99": 9.8
+  "timestamp": "2026-01-28T10:50:30.123456",
+  "hostname": "gpu-node-01",
+  "checkpoint": "runs/my_run/best.pth",
+  "model_size": "base",
+  "benchmark_mode": "video",
+  "optimized": true,
+  "gpu_info": {
+    "available": true,
+    "name": "NVIDIA H100",
+    "device": "cuda:0",
+    "memory_gb": 96.0
   },
-  "throughput": {
+  "benchmark_config": {
+    "warmup_runs": 10,
+    "test_runs": 100
+  },
+  "metrics": {
+    "mean_ms": 8.5,
+    "std_ms": 0.4,
+    "min_ms": 7.9,
+    "max_ms": 10.2,
+    "p50_ms": 8.3,
+    "p95_ms": 9.1,
+    "p99_ms": 9.8,
     "fps": 117.6
   },
-  "real_time_capable": {
+  "realtime_capable": {
     "30fps": true,
     "60fps": true
-  }
+  },
+  "per_frame_results": [...]
 }
 ```
 
@@ -208,11 +221,11 @@ python -m cli.compare_latency benchmark_results/20260128_172934/
 Output:
 
 ```
-GPU          Mean (ms)  P95 (ms)  FPS    30fps  60fps
---------------------------------------------------------
-h100-96      8.5        9.1       117.6  ✓      ✓
-a100-80      10.2       11.0      98.0   ✓      ✓
-a100-40      12.8       13.8      78.1   ✓      ✓
+GPU Type     GPU Name                       Mean      P50       P95       P99       FPS     30fps  60fps
+------------------------------------------------------------------------------------------------------------------------
+h100-96      NVIDIA H100 96GB               8.5ms     8.3ms     9.1ms     9.8ms     117.6   yes    yes
+a100-80      NVIDIA A100 80GB               10.2ms    10.0ms    11.0ms    11.5ms    98.0    yes    yes
+a100-40      NVIDIA A100 40GB               12.8ms    12.5ms    13.8ms    14.2ms    78.1    yes    no
 ```
 
 ### Save Comparison

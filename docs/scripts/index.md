@@ -4,44 +4,46 @@ Batman provides shell scripts for submitting training, inference, and benchmarki
 
 ## Available Scripts
 
-### 🎓 Training & Inference
+### Training & Inference
 - **[submit_train.sh](submit-train.md)** - Submit training jobs to SLURM
+- **[run_training.sh](run-training.md)** - Run training from local Mac with auto-sync
 - **[submit_inference.sh](submit-inference.md)** - Submit inference jobs to SLURM
+- **[run_inference.sh](run-inference.md)** - Run inference from local Mac with auto-sync
 
-### ⚡ Benchmarking
+### Benchmarking
 - **[submit_benchmark.sh](submit-benchmark.md)** - Submit benchmark jobs for multiple GPUs
 
-### 🔧 Development
+### Development
 - **[run_dev.sh](run-dev.md)** - Start local development servers
 
 ## GPU Types
 
 All SLURM scripts support these GPU types:
 
-| GPU Type | VRAM | Partition | GRES | Use Case |
-|----------|------|-----------|------|----------|
-| `h200` | 141GB | `gpu` | `gpu:h200:1` | Largest models, biggest batches |
-| `h100-96` | 96GB | `h100` | `gpu:h100:1` | Large models, training |
-| `h100-47` | 47GB | `h100` | `gpu:h100_47:1` | Medium models |
-| `a100-80` | 80GB | `a100` | `gpu:a100_80:1` | General purpose |
-| `a100-40` | 40GB | `a100` | `gpu:a100_40:1` | Inference, smaller models |
-| `nv` | Varies | `nv` | `gpu:nv:1` | V100/Titan/T4 (legacy) |
+| GPU Type | VRAM | Partition | GRES | Max/Node | Use Case |
+|----------|------|-----------|------|----------|----------|
+| `h200` | 141GB | `gpu` | `gpu:h200-141:N` | 4 | Largest models (3h limit) |
+| `h100-96` | 96GB | `gpu-long` | `gpu:h100-96:N` | 2 | Large models, training |
+| `h100-47` | 47GB | `gpu-long` | `gpu:h100-47:N` | 4 | Medium models |
+| `a100-80` | 80GB | `gpu-long` | `gpu:a100-80:N` | 1 | General purpose |
+| `a100-40` | 40GB | `gpu-long` | `gpu:a100-40:N` | 2 | Smaller models |
+| `nv` | Varies | `gpu-long` | `gpu:nv:N` | 2 | V100/Titan/T4 (legacy) |
 
 ## Common Patterns
 
 ### Model Selection
 
-All scripts accept one of three model specification methods:
+Training uses `--project` to specify input data. Inference and benchmarking use one of these model specification methods:
 
 ```bash
-# Option 1: By checkpoint path
---checkpoint path/to/model.pth
-
-# Option 2: By run name (auto-finds checkpoint)
+# Option 1: By run name (auto-finds checkpoint in project)
 --run rfdetr_h100_20260120_105925
 
-# Option 3: Use latest run
+# Option 2: Use latest run
 --latest
+
+# Option 3: By checkpoint path (benchmark only)
+--checkpoint path/to/model.pth
 ```
 
 ### GPU Selection
@@ -52,8 +54,8 @@ Specify GPU type with `--gpu`:
 # Training (large GPU)
 ./submit_train.sh --gpu h100-96 ...
 
-# Inference (smaller GPU)
-./submit_inference.sh --gpu a100-40 ...
+# Inference
+./submit_inference.sh --gpu h100-96 ...
 
 # Benchmarking (all GPUs)
 ./submit_benchmark.sh --gpus all ...
@@ -64,11 +66,11 @@ Specify GPU type with `--gpu`:
 Scripts auto-generate timestamped output directories:
 
 ```bash
-# Training
-runs/rfdetr_h100_20260128_105030/
+# Training (under project directory)
+{project}/runs/rfdetr_h100-96_20260128_105030/
 
-# Inference
-inference_results/20260128_105030/
+# Inference (under project directory)
+{project}/inference/{run_name}/{video_id}/{timestamp}/
 
 # Benchmarking
 benchmark_results/20260128_105030/
@@ -89,10 +91,10 @@ Preview SLURM scripts without submitting:
 
 ```bash
 # Submit training
-sbatch_id=$(./submit_train.sh --gpu h100-96 --project data/projects/Test)
+./submit_train.sh --gpu h100-96 --project data/projects/MyProject
 
 # Submit inference
-sbatch_id=$(./submit_inference.sh --run my_run --input video.mp4 --gpu a100-40)
+./submit_inference.sh --project data/projects/MyProject --run my_run
 
 # Submit benchmarks
 ./submit_benchmark.sh --run my_run --gpus h100-96,a100-80
@@ -114,11 +116,14 @@ squeue -j <job_id>
 ### View Logs
 
 ```bash
-# Follow log output
-tail -f logs/job_<job_id>.log
+# Training logs
+tail -f logs/slurm_<job_id>_rfdetr-base-h100-96.out
 
-# View completed job
-cat logs/job_<job_id>.log
+# Inference logs
+tail -f logs/slurm_<job_id>_inference.out
+
+# Benchmark logs
+tail -f logs/slurm_<job_id>_benchmark_<gpu>.out
 ```
 
 ### Cancel Jobs
@@ -136,41 +141,67 @@ scancel --name=rfdetr_training
 
 ## Workflow Examples
 
-### Workflow 1: Training on Cluster
+### Workflow 1: Training on Cluster (from Local Mac)
+
+```bash
+# Run from your Mac -- pushes data, trains, and syncs results automatically
+./run_training.sh \
+  --project data/projects/MyProject \
+  --gpu h100-96 \
+  --epochs 50
+
+# JSON metadata is synced to data/projects/MyProject/runs/ when done
+# Checkpoints remain on GPU, accessible via gpu-server/
+```
+
+Or from the cluster directly:
 
 ```bash
 # 1. Prepare data locally
-python -m cli.importer coco --project data/projects/Test --create --classes person
+python -m cli.importer coco --project data/projects/MyProject --create --classes person
 
 # 2. Submit training
 ./submit_train.sh \
-  --project data/projects/Test \
+  --project data/projects/MyProject \
   --gpu h100-96 \
   --epochs 50
 
 # 3. Monitor training
-tail -f logs/job_*.log
+squeue -u $USER
+tail -f logs/slurm_*_rfdetr-*.out
 
 # 4. Check results
-ls runs/rfdetr_h100_*/
-cat runs/rfdetr_h100_*/results.json
+ls data/projects/MyProject/runs/rfdetr_h100-96_*/
 ```
 
-### Workflow 2: Inference on Videos
+### Workflow 2: Inference on Videos (from Local Mac)
+
+```bash
+# Run from your Mac -- submits, waits, and syncs results automatically
+./run_inference.sh \
+  --project data/projects/MyProject \
+  --run my_training_run \
+  --gpu h100-96 \
+  --track
+
+# Results are synced to data/projects/MyProject/inference/ when done
+```
+
+Or from the cluster directly:
 
 ```bash
 # 1. Submit inference
 ./submit_inference.sh \
+  --project data/projects/MyProject \
   --run my_training_run \
-  --input "videos/*.mp4" \
-  --gpu a100-40 \
+  --gpu h100-96 \
   --track
 
 # 2. Monitor progress
-tail -f logs/job_*.log
+tail -f logs/slurm_*_inference.out
 
-# 3. Download results
-ls inference_results/*/
+# 3. Manually copy results from SSHFS mount
+cp -r gpu-server/data/projects/MyProject/inference/ data/projects/MyProject/inference/
 ```
 
 ### Workflow 3: Multi-GPU Benchmarking
@@ -216,9 +247,9 @@ Default time limits:
 
 | Job Type | Default | Max |
 |----------|---------|-----|
-| Training | 24 hours | Unlimited |
-| Inference | 4 hours | Unlimited |
-| Benchmark | 30 minutes | Unlimited |
+| Training | 24 hours | 3 days (`gpu-long`), 3 hours (`gpu`) |
+| Inference | 4 hours | 3 days (`gpu-long`), 3 hours (`gpu`) |
+| Benchmark | 30 minutes | 3 days (`gpu-long`), 3 hours (`gpu`) |
 
 Override with `--time`:
 
@@ -233,8 +264,8 @@ Use `--num-gpus` for distributed training:
 ```bash
 ./submit_train.sh \
   --gpu h100-96 \
-  --num-gpus 4 \
-  --batch-size 64
+  --num-gpus 2 \
+  --batch-size 16
 ```
 
 ## Tips & Best Practices
@@ -262,17 +293,17 @@ nvidia-smi -l 1
 ### 3. Choose Appropriate GPUs
 
 - **Training**: H100-96, H100-47, A100-80
-- **Inference**: A100-40 (cost-effective)
+- **Inference**: H100-96 or A100-40 (cost-effective)
 - **Benchmarking**: All types for comparison
 
 ### 4. Name Your Runs
 
-Use descriptive run names:
+Use descriptive labels:
 
 ```bash
 ./submit_train.sh \
   --project data/projects/CraneHook \
-  --output-dir runs/crane_hook_v1 \
+  --label v1-base \
   --gpu h100-96
 ```
 
@@ -283,7 +314,7 @@ Use descriptive run names:
 sinfo
 
 # Check available GPUs
-sinfo -p h100,a100,gpu -o "%P %a %l %D %N %G"
+sinfo -p gpu,gpu-long -o "%P %a %l %D %N %G"
 ```
 
 ## Troubleshooting
@@ -304,12 +335,12 @@ Common reasons:
 
 ```bash
 # Check logs
-cat logs/job_<job_id>.log
+cat logs/slurm_<job_id>_*.out
 
 # Common issues:
-# - Out of memory → Reduce batch size
-# - File not found → Check paths
-# - Module errors → Check environment
+# - Out of memory: Reduce batch size
+# - File not found: Check paths
+# - Module errors: Check environment
 ```
 
 ### H200 Time Limit
@@ -321,29 +352,25 @@ H200 on `gpu` partition has 3-hour limit:
 ./submit_train.sh --gpu h200 ...  # Max 3 hours
 
 # Use H100-96 for longer jobs
-./submit_train.sh --gpu h100-96 ...  # Up to 24+ hours
+./submit_train.sh --gpu h100-96 ...  # Up to 3 days
 ```
 
 ## Environment Setup
 
-### Required Modules
+Scripts activate the Python virtual environment from the project root:
 
-Scripts automatically load:
 ```bash
-module load cuda/12.1
-module load python/3.11
+cd ~/batman
+source .venv/bin/activate
 ```
 
-### Python Environment
-
-Scripts use `uv` for dependency management:
-```bash
-uv sync
-```
+No `module load` commands are needed -- all dependencies are in the virtual environment.
 
 ## Related
 
 - **[Submit Training](submit-train.md)** - Training job details
+- **[Run Training (Local)](run-training.md)** - Local training runner with auto-sync
 - **[Submit Inference](submit-inference.md)** - Inference job details
+- **[Run Inference (Local)](run-inference.md)** - Local inference runner with auto-sync
 - **[Submit Benchmark](submit-benchmark.md)** - Benchmark job details
 - **[SLURM Usage Guide](../guides/slurm.md)** - Complete SLURM guide

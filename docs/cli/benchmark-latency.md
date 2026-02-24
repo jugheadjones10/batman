@@ -119,7 +119,7 @@ Number of test runs to measure.
 
 Output directory for benchmark results.
 
-- **Default**: `benchmark_results/`
+- **Default**: `benchmark_results/{timestamp}/` (timestamped subdirectory)
 
 #### `--create-latency-video`
 
@@ -133,58 +133,65 @@ Creates `benchmark_results.json`:
 
 ```json
 {
-  "gpu": "NVIDIA H100",
-  "model": "base",
-  "image_size": 640,
-  "runs": 100,
-  "warmup": 10,
-  "latency_ms": {
-    "mean": 8.5,
-    "median": 8.3,
-    "std": 0.4,
-    "min": 7.9,
-    "max": 10.2,
-    "p50": 8.3,
-    "p95": 9.1,
-    "p99": 9.8
+  "timestamp": "2026-01-28T10:50:30.123456",
+  "hostname": "gpu-node-01",
+  "checkpoint": "runs/my_run/best.pth",
+  "model_size": "base",
+  "benchmark_mode": "video",
+  "optimized": true,
+  "gpu_info": {
+    "available": true,
+    "name": "NVIDIA H100",
+    "device": "cuda:0",
+    "memory_gb": 96.0
   },
-  "throughput": {
-    "fps": 117.6,
-    "frames_per_second": 117.6
+  "benchmark_config": {
+    "warmup_runs": 10,
+    "test_runs": 100
   },
-  "real_time_capable": {
+  "metrics": {
+    "mean_ms": 8.5,
+    "std_ms": 0.4,
+    "min_ms": 7.9,
+    "max_ms": 10.2,
+    "p50_ms": 8.3,
+    "p95_ms": 9.1,
+    "p99_ms": 9.8,
+    "fps": 117.6
+  },
+  "realtime_capable": {
     "30fps": true,
-    "60fps": true,
-    "120fps": false
+    "60fps": true
   },
-  "frame_latencies": [8.1, 8.3, 8.5, ...]
+  "per_frame_results": [
+    {"frame_idx": 0, "inference_time_ms": 8.1},
+    {"frame_idx": 1, "inference_time_ms": 8.3}
+  ]
 }
 ```
 
 ### Console Output
 
 ```
-=== Benchmark Results ===
+======================================================================
+BENCHMARK RESULTS
+======================================================================
+
 GPU: NVIDIA H100
-Model: base (640x640)
-Runs: 100 (warmup: 10)
+GPU Memory: 96.0 GB
 
-Latency (ms):
-  Mean:   8.5 ± 0.4
-  Median: 8.3
-  Min:    7.9
-  Max:    10.2
-  P50:    8.3
-  P95:    9.1
-  P99:    9.8
+Latency:
+  Mean:   8.50 ms  (± 0.40 ms)
+  Min:    7.90 ms
+  Max:    10.20 ms
+  P50:    8.30 ms
+  P95:    9.10 ms
+  P99:    9.80 ms
+Throughput: 117.6 FPS
 
-Throughput:
-  FPS: 117.6
-
-Real-time capable:
-  ✓ 30 FPS (33.3 ms/frame)
-  ✓ 60 FPS (16.7 ms/frame)
-  ✗ 120 FPS (8.3 ms/frame)
+Real-time (requires P99 < threshold):
+  30 FPS (33.3ms): ✓ YES
+  60 FPS (16.7ms): ✗ NO
 ```
 
 ### Latency Video
@@ -276,11 +283,10 @@ python -m cli.benchmark_latency \
 
 ### Real-Time Capability
 
-Checks if mean latency meets framerate requirements:
+Checks if **P99** latency meets framerate requirements:
 
-- **30 FPS**: ≤ 33.3 ms/frame
-- **60 FPS**: ≤ 16.7 ms/frame
-- **120 FPS**: ≤ 8.3 ms/frame
+- **30 FPS**: P99 < 33.3 ms/frame
+- **60 FPS**: P99 < 16.7 ms/frame
 
 ### Throughput
 

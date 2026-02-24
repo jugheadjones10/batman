@@ -16,6 +16,9 @@ Batman provides a comprehensive set of command-line tools for training, inferenc
 - **[create_latency_video](create-latency-video.md)** - Create latency-delayed visualization videos
 - **[create_sidebyside_video](create-sidebyside-video.md)** - Create side-by-side comparison videos
 
+### 📹 Video Management
+- **[videos](videos.md)** - Add, list, remove, and manage project videos
+
 ### 📦 Data Management
 - **[importer](importer.md)** - Import datasets from Roboflow or COCO Zoo
 - **[classes](classes.md)** - List, rename, and merge object classes
@@ -77,10 +80,10 @@ Default output locations:
 
 | Tool | Default Output |
 |------|----------------|
-| Training | `runs/rfdetr_run/` |
-| Inference | `inference_results/` |
-| Benchmarking | `benchmark_results/` |
-| Dataset Export | `datasets/rfdetr_coco/` |
+| Training | `{project}/runs/rfdetr_{timestamp}/` |
+| Inference | `{project}/inference/{run_name}/{video_id}/` |
+| Benchmarking | `benchmark_results/{timestamp}/` |
+| Dataset Export | `{project}/exports/coco` |
 
 ## Installation
 
@@ -113,7 +116,7 @@ python -m cli.importer roboflow --help
 For inference and benchmarking:
 
 ```bash
-# Detection confidence (default: 0.5)
+# Detection confidence (inference default: 0.0, training default: 0.5)
 --confidence 0.7
 
 # Tracking threshold (default: 0.25)
@@ -151,8 +154,8 @@ uv run python -m cli.train \
 
 ```bash
 uv run python -m cli.inference \
+  --project data/projects/MyProject \
   --run my_training_run \
-  --input video.mp4 \
   --track \
   --confidence 0.6
 ```
@@ -195,10 +198,10 @@ Most inference tools support model optimization:
 
 ```bash
 # Enable automatic optimization (default)
-python -m cli.inference --run my_run --input video.mp4
+python -m cli.inference --project data/projects/MyProject --run my_run
 
 # Disable if you encounter issues
-python -m cli.inference --run my_run --input video.mp4 --no-optimize
+python -m cli.inference --project data/projects/MyProject --run my_run --no-optimize
 ```
 
 ### 3. Use Tracking for Videos
@@ -207,20 +210,19 @@ Enable tracking for better temporal consistency:
 
 ```bash
 python -m cli.inference \
+  --project data/projects/MyProject \
   --run my_run \
-  --input video.mp4 \
   --track \
   --track-buffer 30
 ```
 
 ### 4. Save JSON for Analysis
 
-Keep JSON outputs for programmatic analysis:
+Inference outputs are saved to `{project}/inference/{run_name}/{video_id}/`:
 
 ```bash
-# Inference outputs both visualizations and JSON
-python -m cli.inference --run my_run --input video.mp4
-# Saves: detected_video.mp4 + detections.json
+python -m cli.inference --project data/projects/MyProject --run my_run
+# Saves: result.json + detected.mp4 per video
 ```
 
 ### 5. Specify Classes for Clarity
@@ -231,8 +233,8 @@ Load class names from projects or specify manually:
 # From project
 --project data/projects/MyProject
 
-# Manual specification
---classes "person,car,bicycle"
+# Manual specification (space-separated)
+--classes person car bicycle
 ```
 
 ## Next Steps

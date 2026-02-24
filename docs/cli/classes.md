@@ -48,12 +48,15 @@ python -m cli.classes list --project data/projects/MyProject
 #### Output
 
 ```
-Classes in project 'MyProject':
-  1. person (245 annotations)
-  2. car (189 annotations)
-  3. bicycle (67 annotations)
+Project: MyProject
+Total classes: 3
+Total frames: 150
 
-Total: 3 classes, 501 annotations
+Idx   Name                           Frames   Annotations  Avg/Frame  Source
+-----------------------------------------------------------------------------------------------
+0     person                         120      245          2.04       manual_data
+1     car                            95       189          1.99       imports
+2     bicycle                        45       67           1.49       manual_data
 ```
 
 ### `rename` - Rename Class
@@ -193,13 +196,16 @@ python -m cli.classes list --project data/projects/CraneHook
 
 Output:
 ```
-Classes in project 'CraneHook':
-  1. crane-hook (150 annotations)
-  2. crane_hook (45 annotations)
-  3. hook (30 annotations)
-  4. crane_boom (200 annotations)
+Project: CraneHook
+Total classes: 4
+Total frames: 200
 
-Total: 4 classes, 425 annotations
+Idx   Name                           Frames   Annotations  Avg/Frame  Source
+-----------------------------------------------------------------------------------------------
+0     crane-hook                     100      150          1.50       imports
+1     crane_hook                     30       45           1.50       manual_data
+2     hook                           25       30           1.20       imports
+3     crane_boom                     150      200          1.33       imports
 ```
 
 ### Example 2: Merge Variants
@@ -228,11 +234,14 @@ python -m cli.classes list --project data/projects/CraneHook
 
 Output:
 ```
-Classes in project 'CraneHook':
-  1. crane_hook (225 annotations)
-  2. crane_boom (200 annotations)
+Project: CraneHook
+Total classes: 2
+Total frames: 200
 
-Total: 2 classes, 425 annotations
+Idx   Name                           Frames   Annotations  Avg/Frame  Source
+-----------------------------------------------------------------------------------------------
+0     crane_hook                     130      225          1.73       imports
+1     crane_boom                     150      200          1.33       imports
 ```
 
 ## Important Notes

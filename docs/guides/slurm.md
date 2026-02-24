@@ -18,14 +18,14 @@ SLURM (Simple Linux Utility for Resource Management) is a job scheduler for HPC 
 
 ```bash
 squeue -u $USER
-tail -f logs/job_*.log
+tail -f logs/slurm_*.out
 ```
 
 ### 3. Check Results
 
 ```bash
-ls runs/rfdetr_h100_*/
-cat runs/rfdetr_h100_*/results.json
+ls data/projects/MyProject/runs/rfdetr_h100-96_*/
+cat data/projects/MyProject/runs/rfdetr_h100-96_*/results.json
 ```
 
 ## Getting data to the GPU machine
@@ -68,14 +68,14 @@ uv sync   # if not already done
 ./submit_train.sh --project data/projects/One --gpu h100-96
 ```
 
-Monitor with `squeue -u $USER` and `tail -f logs/job_*.log`. When the job finishes, checkpoints and logs are under `runs/rfdetr_*_*/`.
+Monitor with `squeue -u $USER` and `tail -f logs/slurm_*_rfdetr-*.out`. When the job finishes, checkpoints and logs are under `data/projects/One/runs/rfdetr_*/`.
 
 ### 4. (Optional) Copy results back
 
 To copy a run back to your laptop:
 
 ```bash
-rsync -avz USER@cluster:~/batman/runs/rfdetr_h100_20260128_123456/ ./runs/
+rsync -avz USER@cluster:~/batman/data/projects/One/runs/rfdetr_h100-96_20260128_123456/ ./data/projects/One/runs/
 ```
 
 ### Alternative: Mount GPU server and copy data
@@ -106,14 +106,14 @@ Because `gpu-server/` is the live remote filesystem, any copy into `gpu-server/d
 
 ### Available GPUs
 
-| GPU Type | VRAM | Partition | GRES | Nodes |
-|----------|------|-----------|------|-------|
-| H200 | 141GB | `gpu` | `gpu:h200:1` | 1-8 GPUs |
-| H100-96 | 96GB | `h100` | `gpu:h100:1` | 1-4 GPUs |
-| H100-47 | 47GB | `h100` | `gpu:h100_47:1` | 1-4 GPUs |
-| A100-80 | 80GB | `a100` | `gpu:a100_80:1` | 1-4 GPUs |
-| A100-40 | 40GB | `a100` | `gpu:a100_40:1` | 1-4 GPUs |
-| NV (V100/Titan/T4) | Varies | `nv` | `gpu:nv:1` | Varies |
+| GPU Type | VRAM | Partition | GRES | Max/Node |
+|----------|------|-----------|------|----------|
+| H200 | 141GB | `gpu` | `gpu:h200-141:N` | 4 (3h limit) |
+| H100-96 | 96GB | `gpu-long` | `gpu:h100-96:N` | 2 |
+| H100-47 | 47GB | `gpu-long` | `gpu:h100-47:N` | 4 |
+| A100-80 | 80GB | `gpu-long` | `gpu:a100-80:N` | 1 |
+| A100-40 | 40GB | `gpu-long` | `gpu:a100-40:N` | 2 |
+| NV (V100/Titan/T4) | Varies | `gpu-long` | `gpu:nv:N` | 2 |
 
 ### GPU Selection Guidelines
 
@@ -138,10 +138,10 @@ Because `gpu-server/` is the live remote filesystem, any copy into `gpu-server/d
 sinfo
 
 # Check specific partitions
-sinfo -p h100,a100,gpu
+sinfo -p gpu-long,gpu
 
 # See available GPUs
-sinfo -p h100,a100,gpu -o "%P %a %l %D %N %G"
+sinfo -p gpu-long,gpu -o "%P %a %l %D %N %G"
 ```
 
 ## Job Submission
@@ -162,9 +162,9 @@ sinfo -p h100,a100,gpu -o "%P %a %l %D %N %G"
 
 ```bash
 ./submit_inference.sh \
+  --project data/projects/MyProject \
   --run my_training_run \
-  --input "videos/*.mp4" \
-  --gpu a100-40 \
+  --gpu h100-96 \
   --track
 ```
 
@@ -221,7 +221,7 @@ scancel -u $USER
 scancel --name=rfdetr_training
 
 # Cancel by partition
-scancel -u $USER -p h100
+scancel -u $USER -p gpu-long
 ```
 
 ### Check Job Details
@@ -238,24 +238,24 @@ sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed,ExitCode
 
 ### Log Files
 
-All jobs write to `logs/job_<job_id>.log`:
+All jobs write to `logs/slurm_<job_id>_<job_name>.out`:
 
 ```bash
 # Follow log
-tail -f logs/job_<job_id>.log
+tail -f logs/slurm_<job_id>_*.out
 
 # View last 100 lines
-tail -100 logs/job_<job_id>.log
+tail -100 logs/slurm_<job_id>_*.out
 
 # Search logs
-grep -i error logs/job_*.log
+grep -i error logs/slurm_*.out
 ```
 
 ### Training Progress
 
 ```bash
 # Follow training log
-tail -f logs/job_<job_id>.log | grep "Epoch"
+tail -f logs/slurm_<job_id>_rfdetr-*.out | grep "Epoch"
 
 # Check tensorboard
 ssh <compute_node>
@@ -381,7 +381,7 @@ Too many jobs running.
 sacct -j <job_id> --format=JobID,State,ExitCode
 
 # Check logs
-cat logs/job_<job_id>.log | grep -i error
+grep -i error logs/slurm_<job_id>_*.out
 ```
 
 **Common errors**:
@@ -473,7 +473,7 @@ Preview scripts before submitting:
 Check logs regularly:
 
 ```bash
-watch -n 60 tail -50 logs/job_*.log
+watch -n 60 tail -50 logs/slurm_*.out
 ```
 
 ### 6. Clean Up
@@ -483,7 +483,7 @@ Remove old logs and results:
 ```bash
 # Archive old logs
 mkdir -p archive/logs
-mv logs/job_*.log archive/logs/
+mv logs/slurm_*.out logs/slurm_*.err archive/logs/
 
 # Remove old benchmark results
 rm -rf benchmark_results/old_*/
@@ -519,7 +519,7 @@ job_id=$(./submit_train.sh --project data/projects/MyProject --gpu h100-96)
 watch -n 10 squeue -j $job_id
 
 # 3. When complete, submit inference
-./submit_inference.sh --run my_run --input video.mp4 --gpu a100-40
+./submit_inference.sh --project data/projects/MyProject --run my_run --gpu h100-96
 
 # 4. Benchmark
 ./submit_benchmark.sh --run my_run --gpus all
@@ -533,19 +533,18 @@ for lr in 1e-5 1e-4 5e-4; do
     --project data/projects/MyProject \
     --gpu h100-96 \
     --lr $lr \
-    --output-dir runs/lr_${lr}
+    --label lr_${lr}
 done
 ```
 
-### Workflow 3: Batch Inference
+### Workflow 3: Inference on All Project Videos
 
 ```bash
-for video in videos/*.mp4; do
-  ./submit_inference.sh \
-    --run my_run \
-    --input "$video" \
-    --gpu a100-40
-done
+./submit_inference.sh \
+  --project data/projects/MyProject \
+  --run my_run \
+  --gpu h100-96 \
+  --track
 ```
 
 ## Related

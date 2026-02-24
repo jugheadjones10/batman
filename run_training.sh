@@ -1,48 +1,59 @@
 #!/bin/bash
 #===============================================================================
-# Submit RF-DETR Training Job to SLURM
+# Run RF-DETR Training from Local Mac (with auto-sync)
 #===============================================================================
 #
-# Usage:
-#   ./submit_train.sh                              # Use defaults (H200)
-#   ./submit_train.sh --gpu=a100-40                # Use A100 40GB
-#   ./submit_train.sh --gpu=h100 --epochs=100      # H100 with 100 epochs
-#   ./submit_train.sh --dry-run                    # Show what would be submitted
+# Local wrapper that submits a training job to the GPU cluster via SSH,
+# streams the job output, waits for completion, and syncs lightweight
+# results (JSON metadata only, not .pth checkpoints) locally.
 #
-# GPU Options:
-#   h200       - NVIDIA H200 (default, best performance)
-#   h100-96    - NVIDIA H100 96GB
-#   h100-47    - NVIDIA H100 47GB  
-#   a100-80    - NVIDIA A100 80GB
-#   a100-40    - NVIDIA A100 40GB
-#   v100       - NVIDIA V100
-#   titanrtx   - NVIDIA Titan RTX
-#   t4         - NVIDIA Tesla T4
+# Accepts the same arguments as submit_train.sh.
+#
+# Usage:
+#   ./run_training.sh --project data/projects/One
+#   ./run_training.sh --project data/projects/One --gpu=h100-96 --epochs=50
+#   ./run_training.sh --project data/projects/One --sources=manual_data --label=manual-only
+#   ./run_training.sh --project data/projects/One --infer-after --infer-test-only
+#
+# Requires:
+#   - SSH access to the GPU cluster
+#   - SSHFS mount at gpu-server/ (run ./mount_gpu.sh) for result syncing
 #
 #===============================================================================
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 #-------------------------------------------------------------------------------
-# Default Configuration
+# SSH / Remote Configuration
 #-------------------------------------------------------------------------------
-GPU_TYPE="h100-96"  # Default to H100-96 (available on gpu-long)
-PARTITION=""        # Auto-set based on GPU type
+SSH_USER="youngjin"
+SSH_HOST="xlogin.comp.nus.edu.sg"
+SSH_DEST="${SSH_USER}@${SSH_HOST}"
+REMOTE_DIR="/home/y/youngjin/batman"
+MOUNT_POINT="$SCRIPT_DIR/gpu-server"
+CONTROL_PATH="/tmp/batman_run_ssh_%r@%h:%p"
+SSH_OPTS="-o ControlPath=$CONTROL_PATH -o ConnectTimeout=10"
+
+#-------------------------------------------------------------------------------
+# Default Configuration (mirrors submit_train.sh)
+#-------------------------------------------------------------------------------
+GPU_TYPE="h100-96"
+PARTITION=""
 EPOCHS=50
-BATCH_SIZE=""  # Will be set based on GPU if empty
+BATCH_SIZE=""
 IMAGE_SIZE=640
 LR="1e-4"
 PATIENCE=10
 PROJECT_DIR="data/projects/One"
-# Where to write the prepared COCO dataset (train/val/test splits); used as input for training
-# Empty = auto: ${PROJECT_DIR}/exports/coco
 OUTPUT_DATASET=""
-# Where to write the training run (checkpoints, logs). Empty = auto: runs/rfdetr_<gpu>_<timestamp>
 OUTPUT_DIR=""
-# Model size: nano (~3M) | small (~10M) | base (~28M) | medium (~48M) | large (~76M). base = balanced speed/accuracy
 MODEL="base"
 TIME="24:00:00"
 DRY_RUN=false
+NO_SYNC=false
+NO_PUSH=false
 PREPARE_ONLY=false
 NUM_GPUS=1
 FILTER_CLASSES=""
@@ -56,60 +67,60 @@ INFER_TEST_ONLY=false
 LABEL=""
 EXTRA_ARGS=""
 
+POLL_INTERVAL=30
+
 #-------------------------------------------------------------------------------
 # Parse Arguments
 #-------------------------------------------------------------------------------
 show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
+    echo "Local training runner. Pushes project data to GPU, submits training"
+    echo "via SSH, waits for completion, and syncs results locally."
+    echo ""
     echo "GPU Options:"
-    echo "  --gpu=TYPE          GPU type (see below)"
+    echo "  --gpu=TYPE          GPU type (default: h100-96)"
     echo "  --num-gpus=N        Number of GPUs (default: 1)"
     echo ""
-    echo "Available GPUs:"
-    echo "  h200       NVIDIA H200 141GB    (max 4 per node, 3h limit)"
-    echo "  h100-96    NVIDIA H100 96GB     (max 2 per node)"
-    echo "  h100-47    NVIDIA H100 47GB     (max 4 per node)"
-    echo "  a100-80    NVIDIA A100 80GB     (max 1 per node)"
-    echo "  a100-40    NVIDIA A100 40GB     (max 2 per node)"
-    echo "  nv         V100/Titan/T4        (max 2 per node)"
-    echo ""
     echo "Training Options:"
-    echo "  --project=PATH      Project directory (default: data/projects/Test)"
+    echo "  --project=PATH      Project directory (default: data/projects/One)"
     echo "  --epochs=N          Training epochs (default: 50)"
     echo "  --batch-size=N      Batch size (auto-set based on GPU if not specified)"
     echo "  --image-size=N      Image size (default: 640)"
     echo "  --lr=RATE           Learning rate (default: 1e-4)"
     echo "  --patience=N        Early stopping patience (default: 10)"
     echo "  --model=SIZE        Model size: base, large (default: base)"
-    echo "  --label=NAME        Label appended to run name (e.g. rfdetr_h100-96_..._my-label)"
+    echo "  --label=NAME        Label appended to run name"
     echo "  --output-dir=PATH   Output directory for run (overrides auto-naming)"
     echo "  --filter-classes=NAMES  Only train on specific classes (pipe-separated)"
-    echo "                          Example: --filter-classes='crane hook|crane-hook'"
-    echo "  --max-frames-per-class=N  Cap frames per class (random sample, deterministic)"
-    echo "  --sources=TYPES         Data sources to include (comma-separated)"
-    echo "                          Valid: manual_data, imports (excludes video frames)"
-    echo "                          Example: --sources=manual_data"
-    echo "  --manual-split=STRATEGY How to split manual data (default: train_only)"
-    echo "                          Options: proportional, val_only, train_only, all_splits"
-    echo "  --manual-datasets=NAMES Include only these manual subdatasets (comma-separated)"
-    echo "                          Use '(root)' for root-level images"
-    echo "                          Example: --manual-datasets=crane_closeups,worker_shots"
-    echo "  --exclude-manual-datasets=NAMES  Exclude these manual subdatasets (comma-separated)"
-    echo "                          Example: --exclude-manual-datasets=negative_examples"
+    echo "  --max-frames-per-class=N  Cap frames per class"
+    echo "  --sources=TYPES     Data sources: manual_data, imports (comma-separated)"
+    echo "  --manual-split=STRATEGY  How to split manual data"
+    echo "  --manual-datasets=NAMES  Include only these manual subdatasets"
+    echo "  --exclude-manual-datasets=NAMES  Exclude these manual subdatasets"
     echo ""
     echo "SLURM Options:"
     echo "  --partition=NAME    SLURM partition (auto-detected if not set)"
-    echo "  --time=HH:MM:SS     Time limit (default: 24:00:00)"
+    echo "  --time=HH:MM:SS    Time limit (default: 24:00:00)"
     echo ""
     echo "Post-training Inference:"
     echo "  --infer-after       Run inference on project videos after training"
     echo "  --infer-test-only   With --infer-after, only run on test-only videos"
     echo ""
+    echo "Sync Options:"
+    echo "  --no-sync           Skip syncing results locally after completion"
+    echo "  --no-push           Skip pushing manual_data + project.json to GPU before job"
+    echo ""
     echo "Other:"
     echo "  --prepare-only      Only prepare dataset, don't train"
-    echo "  --dry-run           Show generated script without submitting"
+    echo "  --dry-run           Show generated SLURM script without submitting"
     echo "  --help              Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --project data/projects/One"
+    echo "  $0 --project data/projects/One --gpu=h100-96 --epochs=100 --label=v2"
+    echo "  $0 --project data/projects/One --sources=manual_data --label=manual-only"
+    echo "  $0 --project data/projects/One --infer-after --infer-test-only"
     exit 0
 }
 
@@ -139,6 +150,8 @@ while [[ $# -gt 0 ]]; do
         --prepare-only) PREPARE_ONLY=true; shift ;;
         --infer-after)  INFER_AFTER=true; shift ;;
         --infer-test-only) INFER_TEST_ONLY=true; shift ;;
+        --no-sync)      NO_SYNC=true; shift ;;
+        --no-push)      NO_PUSH=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --help|-h)      show_help ;;
         *)              EXTRA_ARGS="$EXTRA_ARGS $arg"; shift ;;
@@ -148,24 +161,21 @@ done
 #-------------------------------------------------------------------------------
 # Map GPU Type to SLURM Configuration
 #-------------------------------------------------------------------------------
-# Note: H200 is only on 'gpu' partition (3h limit), others available on 'gpu-long' (3d limit)
 case $GPU_TYPE in
     h200)
         SLURM_GRES="gpu:h200-141:${NUM_GPUS}"
         DEFAULT_BATCH=16
         MEM="256G"
-        DEFAULT_PARTITION="gpu"  # H200 only on gpu partition (3h limit!)
-        MAX_TIME="3:00:00"
+        DEFAULT_PARTITION="gpu"
         MAX_GPUS=4
-        echo "⚠️  Warning: H200 only available on 'gpu' partition with 3-hour limit!"
-        echo "   For longer training, use --gpu=h100-96 or --gpu=h100-47"
+        echo "Warning: H200 only available on 'gpu' partition with 3-hour limit!"
+        echo "  For longer training, use --gpu=h100-96 or --gpu=h100-47"
         ;;
     h100-96|h100)
         SLURM_GRES="gpu:h100-96:${NUM_GPUS}"
         DEFAULT_BATCH=16
         MEM="256G"
         DEFAULT_PARTITION="gpu-long"
-        MAX_TIME="3-00:00:00"
         MAX_GPUS=2
         ;;
     h100-47)
@@ -173,7 +183,6 @@ case $GPU_TYPE in
         DEFAULT_BATCH=12
         MEM="256G"
         DEFAULT_PARTITION="gpu-long"
-        MAX_TIME="3-00:00:00"
         MAX_GPUS=4
         ;;
     a100-80)
@@ -181,7 +190,6 @@ case $GPU_TYPE in
         DEFAULT_BATCH=12
         MEM="128G"
         DEFAULT_PARTITION="gpu-long"
-        MAX_TIME="3-00:00:00"
         MAX_GPUS=1
         ;;
     a100-40|a100)
@@ -189,7 +197,6 @@ case $GPU_TYPE in
         DEFAULT_BATCH=8
         MEM="64G"
         DEFAULT_PARTITION="gpu-long"
-        MAX_TIME="3-00:00:00"
         MAX_GPUS=2
         ;;
     nv|v100|titanv|titanrtx|t4)
@@ -197,46 +204,32 @@ case $GPU_TYPE in
         DEFAULT_BATCH=4
         MEM="32G"
         DEFAULT_PARTITION="gpu-long"
-        MAX_TIME="3-00:00:00"
         MAX_GPUS=2
         ;;
     *)
         echo "Error: Unknown GPU type: $GPU_TYPE"
-        echo ""
-        echo "Available GPUs:"
-        echo "  h100-96  - H100 96GB (recommended for long training)"
-        echo "  h100-47  - H100 47GB"
-        echo "  a100-80  - A100 80GB"
-        echo "  a100-40  - A100 40GB"
-        echo "  h200     - H200 (3h limit only!)"
-        echo "  nv       - V100/Titan/T4"
         exit 1
         ;;
 esac
 
-# Validate number of GPUs
 if [ "$NUM_GPUS" -gt "$MAX_GPUS" ]; then
     echo "Error: Requested $NUM_GPUS GPUs but $GPU_TYPE only supports max $MAX_GPUS per node"
     exit 1
 fi
 
-# Set partition (auto or override)
 if [ -z "$PARTITION" ]; then
     PARTITION=$DEFAULT_PARTITION
 fi
 
-# Warn if time exceeds partition limit
 if [ "$PARTITION" = "gpu" ] && [ "$TIME" != "3:00:00" ]; then
-    echo "⚠️  Adjusting time to 3:00:00 (gpu partition limit)"
+    echo "Warning: Adjusting time to 3:00:00 (gpu partition limit)"
     TIME="3:00:00"
 fi
 
-# Set batch size
 if [ -z "$BATCH_SIZE" ]; then
     BATCH_SIZE=$DEFAULT_BATCH
 fi
 
-# Generate output directory (under project by default)
 if [ -z "$OUTPUT_DIR" ]; then
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     RUN_NAME="rfdetr_${GPU_TYPE}_${TIMESTAMP}"
@@ -246,21 +239,62 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="${PROJECT_DIR}/runs/${RUN_NAME}"
 fi
 
-# Generate dataset output directory (under project by default)
 if [ -z "$OUTPUT_DATASET" ]; then
     OUTPUT_DATASET="${PROJECT_DIR}/exports/coco"
 fi
 
-# Generate job name
 JOB_NAME="rfdetr-${MODEL}-${GPU_TYPE}"
 
 #-------------------------------------------------------------------------------
-# Create Logs Directory
+# Check SSHFS Mount (skip if --no-sync or --dry-run)
 #-------------------------------------------------------------------------------
-mkdir -p logs
+if [ "$NO_SYNC" = false ] && [ "$DRY_RUN" = false ]; then
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        echo "Error: SSHFS mount not found at gpu-server/"
+        echo "  Run:  ./mount_gpu.sh"
+        echo "  Or:   --no-sync to skip result syncing"
+        exit 1
+    fi
+fi
+
+if [ -n "${MANUAL_DATASETS}" ] && [ -n "${EXCLUDE_MANUAL_DATASETS}" ]; then
+    echo "Error: --manual-datasets and --exclude-manual-datasets are mutually exclusive"
+    exit 1
+fi
 
 #-------------------------------------------------------------------------------
-# Generate SLURM Script
+# Build CLI Arguments
+#-------------------------------------------------------------------------------
+FILTER_ARG=""
+if [ -n "${FILTER_CLASSES}" ]; then
+    FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
+fi
+
+MAX_FRAMES_ARG=""
+if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
+    MAX_FRAMES_ARG="--max-frames-per-class ${MAX_FRAMES_PER_CLASS}"
+fi
+
+SOURCES_ARG=""
+if [ -n "${SOURCES}" ]; then
+    SOURCES_ARG="--sources ${SOURCES}"
+fi
+
+MANUAL_SPLIT_ARG=""
+if [ -n "${MANUAL_SPLIT_STRATEGY}" ]; then
+    MANUAL_SPLIT_ARG="--manual-split-strategy ${MANUAL_SPLIT_STRATEGY}"
+fi
+
+MANUAL_DS_ARG=""
+if [ -n "${MANUAL_DATASETS}" ]; then
+    MANUAL_DS_ARG="--manual-datasets ${MANUAL_DATASETS}"
+fi
+if [ -n "${EXCLUDE_MANUAL_DATASETS}" ]; then
+    MANUAL_DS_ARG="--exclude-manual-datasets ${EXCLUDE_MANUAL_DATASETS}"
+fi
+
+#-------------------------------------------------------------------------------
+# Generate SLURM Script (identical to submit_train.sh)
 #-------------------------------------------------------------------------------
 SLURM_SCRIPT=$(mktemp /tmp/slurm_rfdetr_XXXXXX.sh)
 
@@ -299,11 +333,8 @@ echo "Started:       $(date)"
 echo "Working Dir:   $(pwd)"
 echo "============================================================"
 
-# Change to project directory
 cd ~/batman || { echo "Error: ~/batman not found"; exit 1; }
 
-# Use project venv so dependencies (loguru, torch, etc.) are available.
-# On the cluster, create once:  python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 if [ -f .venv/bin/activate ]; then
   source .venv/bin/activate
   echo "Using project venv: $(which python3)"
@@ -312,63 +343,24 @@ else
   echo "Then resubmit."
 fi
 
-# Print GPU info
 echo ""
 echo "GPU Info:"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv
 echo ""
 
-# Set environment variables for distributed training
 export MASTER_ADDR=localhost
-export MASTER_PORT=$((12355 + RANDOM % 1000))  # Random port to avoid conflicts
+export MASTER_PORT=$((12355 + RANDOM % 1000))
 export WORLD_SIZE=$NUM_GPUS
 export RANK=0
 export LOCAL_RANK=0
 
 echo "Distributed config: WORLD_SIZE=$WORLD_SIZE, MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT"
 
-# Print Python info
 echo "Python: $(which python3) ($(python3 --version 2>&1))"
 echo ""
 
 SLURM_EOF
 
-# Build filter-classes argument if specified
-# Uses pipe '|' delimiter for class names that may contain spaces
-FILTER_ARG=""
-if [ -n "${FILTER_CLASSES}" ]; then
-    FILTER_ARG="--filter-classes \"${FILTER_CLASSES}\""
-fi
-
-MAX_FRAMES_ARG=""
-if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
-    MAX_FRAMES_ARG="--max-frames-per-class ${MAX_FRAMES_PER_CLASS}"
-fi
-
-SOURCES_ARG=""
-if [ -n "${SOURCES}" ]; then
-    SOURCES_ARG="--sources ${SOURCES}"
-fi
-
-MANUAL_SPLIT_ARG=""
-if [ -n "${MANUAL_SPLIT_STRATEGY}" ]; then
-    MANUAL_SPLIT_ARG="--manual-split-strategy ${MANUAL_SPLIT_STRATEGY}"
-fi
-
-if [ -n "${MANUAL_DATASETS}" ] && [ -n "${EXCLUDE_MANUAL_DATASETS}" ]; then
-    echo "Error: --manual-datasets and --exclude-manual-datasets are mutually exclusive"
-    exit 1
-fi
-
-MANUAL_DS_ARG=""
-if [ -n "${MANUAL_DATASETS}" ]; then
-    MANUAL_DS_ARG="--manual-datasets ${MANUAL_DATASETS}"
-fi
-if [ -n "${EXCLUDE_MANUAL_DATASETS}" ]; then
-    MANUAL_DS_ARG="--exclude-manual-datasets ${EXCLUDE_MANUAL_DATASETS}"
-fi
-
-# Add the training command
 if [ "$PREPARE_ONLY" = true ]; then
     cat >> "$SLURM_SCRIPT" << EOF
 
@@ -400,7 +392,6 @@ echo "  LR:          ${LR}"
 echo "  Patience:    ${PATIENCE}"
 echo ""
 
-# Display project classes
 echo "Project Classes:"
 PROJECT_CLASSES=\$(python3 -c "import json; c=json.load(open('${PROJECT_DIR}/project.json'))['classes']; print('  ' + '\\n  '.join(c))" 2>/dev/null || echo "  (unable to read)")
 echo "\$PROJECT_CLASSES"
@@ -415,10 +406,8 @@ echo "Starting training..."
 
 EOF
 
-    # Add the training command with proper quoting
     if [ "$NUM_GPUS" -gt 1 ]; then
         cat >> "$SLURM_SCRIPT" << EOF
-# Use torchrun for multi-GPU, regular python for single-GPU
 echo "Using torchrun for multi-GPU training (\$NUM_GPUS GPUs)..."
 torchrun --nproc_per_node=\$NUM_GPUS --master_port=\$MASTER_PORT \\
     -m cli.train \\
@@ -467,7 +456,6 @@ EOF
     fi
 fi
 
-# Add post-training inference if requested
 if [ "$INFER_AFTER" = true ] && [ "$PREPARE_ONLY" != true ]; then
     INFER_CLI_FLAGS="--latest --device cuda"
     if [ "$INFER_TEST_ONLY" = true ]; then
@@ -517,76 +505,225 @@ exit $EXIT_CODE
 SLURM_EOF
 
 #-------------------------------------------------------------------------------
-# Submit or Display
+# Display Summary
 #-------------------------------------------------------------------------------
-echo ""
 echo "============================================================"
-echo "SLURM Job Configuration"
+echo "RF-DETR Training (Local Runner)"
 echo "============================================================"
-echo "GPU:          ${GPU_TYPE} (${NUM_GPUS}x)"
-echo "Partition:    ${PARTITION}"
-echo "GRES:         ${SLURM_GRES}"
-echo "Memory:       ${MEM}"
-echo "Time:         ${TIME}"
-echo "Batch Size:   ${BATCH_SIZE}"
-if [ -n "${MAX_FRAMES_PER_CLASS}" ]; then
-echo "Max frames/class: ${MAX_FRAMES_PER_CLASS}"
+echo "GPU:            ${GPU_TYPE} (${NUM_GPUS}x)"
+echo "Partition:      ${PARTITION}"
+echo "Memory:         ${MEM}"
+echo "Time limit:     ${TIME}"
+echo "Project:        ${PROJECT_DIR}"
+echo "Output:         ${OUTPUT_DIR}"
+echo "Model:          RF-DETR ${MODEL}"
+echo "Epochs:         ${EPOCHS}"
+echo "Batch Size:     ${BATCH_SIZE}"
+echo "Image Size:     ${IMAGE_SIZE}"
+echo "LR:             ${LR}"
+echo "Patience:       ${PATIENCE}"
+if [ -n "${FILTER_CLASSES}" ]; then
+echo "Filter classes: ${FILTER_CLASSES}"
 fi
 if [ -n "${SOURCES}" ]; then
-echo "Sources:      ${SOURCES}"
+echo "Sources:        ${SOURCES}"
 fi
 if [ -n "${MANUAL_SPLIT_STRATEGY}" ]; then
-echo "Manual split: ${MANUAL_SPLIT_STRATEGY}"
+echo "Manual split:   ${MANUAL_SPLIT_STRATEGY}"
 fi
 if [ -n "${MANUAL_DATASETS}" ]; then
-echo "Manual DS:    ${MANUAL_DATASETS} (include)"
+echo "Manual DS:      ${MANUAL_DATASETS} (include)"
 fi
 if [ -n "${EXCLUDE_MANUAL_DATASETS}" ]; then
-echo "Manual DS:    ${EXCLUDE_MANUAL_DATASETS} (exclude)"
+echo "Manual DS:      ${EXCLUDE_MANUAL_DATASETS} (exclude)"
 fi
-echo "Output Dir:   ${OUTPUT_DIR}"
 if [ "$INFER_AFTER" = true ]; then
     if [ "$INFER_TEST_ONLY" = true ]; then
-        echo "Infer After:  yes (test-only videos)"
+        echo "Infer after:    yes (test-only videos)"
     else
-        echo "Infer After:  yes (all videos)"
+        echo "Infer after:    yes (all videos)"
     fi
 fi
+echo "Pre-push:       $([ "$NO_PUSH" = true ] && echo "off" || echo "on")"
+echo "Auto-sync:      $([ "$NO_SYNC" = true ] && echo "off" || echo "on")"
 echo "============================================================"
-echo ""
 
 if [ "$DRY_RUN" = true ]; then
-    echo "=== Generated SLURM Script (dry run) ==="
     echo ""
+    echo "DRY RUN - Generated SLURM script:"
+    echo "============================================================"
     cat "$SLURM_SCRIPT"
-    echo ""
-    echo "=== End of Script ==="
-    rm "$SLURM_SCRIPT"
-else
-    echo "Submitting job..."
-    JOB_ID=$(sbatch "$SLURM_SCRIPT" | awk '{print $4}')
-    
-    if [ -n "$JOB_ID" ]; then
-        echo ""
-        echo "✓ Job submitted successfully!"
-        echo "  Job ID: $JOB_ID"
-        echo ""
-        echo "Useful commands:"
-        echo "  squeue -j $JOB_ID              # Check job status"
-        echo "  scancel $JOB_ID                # Cancel job"
-        echo "  tail -f logs/slurm_${JOB_ID}_${JOB_NAME}.out  # Watch output"
-        echo "  tail -f logs/slurm_${JOB_ID}_${JOB_NAME}.err  # Watch errors"
-        echo ""
-        
-        # Save the script for reference
-        cp "$SLURM_SCRIPT" "logs/submitted_${JOB_ID}.sh"
-        echo "Script saved to: logs/submitted_${JOB_ID}.sh"
-    else
-        echo "Error: Failed to submit job"
-        cat "$SLURM_SCRIPT"
-        rm "$SLURM_SCRIPT"
-        exit 1
-    fi
-    
-    rm "$SLURM_SCRIPT"
+    echo "============================================================"
+    rm -f "$SLURM_SCRIPT"
+    exit 0
 fi
+
+#-------------------------------------------------------------------------------
+# SSH Helpers
+#-------------------------------------------------------------------------------
+ensure_ssh() {
+    if ! ssh -O check $SSH_OPTS "$SSH_DEST" 2>/dev/null; then
+        echo "Opening SSH connection to $SSH_HOST..."
+        ssh -M -f -N -o ControlMaster=yes -o ControlPath="$CONTROL_PATH" \
+            -o ControlPersist=30m -o ServerAliveInterval=60 "$SSH_DEST"
+    fi
+}
+
+remote() {
+    ssh $SSH_OPTS "$SSH_DEST" "$@"
+}
+
+ensure_ssh
+
+#-------------------------------------------------------------------------------
+# Pre-sync: push manual_data + project.json to GPU
+#-------------------------------------------------------------------------------
+if [ "$NO_PUSH" = false ]; then
+    echo ""
+    echo "Pushing project data to GPU..."
+    LOCAL_PROJECT="$SCRIPT_DIR/$PROJECT_DIR"
+    REMOTE_PROJECT="$SSH_DEST:$REMOTE_DIR/$PROJECT_DIR"
+
+    if [ -d "$LOCAL_PROJECT/manual_data" ]; then
+        rsync -az --progress -e "ssh $SSH_OPTS" \
+            "$LOCAL_PROJECT/manual_data/" "$REMOTE_PROJECT/manual_data/"
+    fi
+    if [ -f "$LOCAL_PROJECT/project.json" ]; then
+        rsync -az -e "ssh $SSH_OPTS" \
+            "$LOCAL_PROJECT/project.json" "$REMOTE_PROJECT/project.json"
+    fi
+    echo "Project data synced."
+    echo ""
+fi
+
+#-------------------------------------------------------------------------------
+# Upload & Submit
+#-------------------------------------------------------------------------------
+REMOTE_SCRIPT="/tmp/$(basename "$SLURM_SCRIPT")"
+scp -q $SSH_OPTS "$SLURM_SCRIPT" "$SSH_DEST:$REMOTE_SCRIPT"
+rm -f "$SLURM_SCRIPT"
+
+JOB_OUTPUT=$(remote "cd $REMOTE_DIR && mkdir -p logs && sbatch $REMOTE_SCRIPT" 2>&1)
+JOB_ID=$(echo "$JOB_OUTPUT" | awk '/Submitted batch job/ {print $4}')
+
+if [ -z "$JOB_ID" ]; then
+    echo "Error: Failed to submit job"
+    echo "$JOB_OUTPUT"
+    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null
+    exit 1
+fi
+
+echo ""
+echo "Job submitted: $JOB_ID"
+
+#-------------------------------------------------------------------------------
+# Cleanup Trap
+#-------------------------------------------------------------------------------
+TAIL_PID=""
+ERR_PID=""
+cleanup() {
+    if [ -n "$TAIL_PID" ]; then
+        kill "$TAIL_PID" 2>/dev/null
+        wait "$TAIL_PID" 2>/dev/null
+    fi
+    if [ -n "$ERR_PID" ]; then
+        kill "$ERR_PID" 2>/dev/null
+        wait "$ERR_PID" 2>/dev/null
+    fi
+    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null
+}
+trap cleanup EXIT
+
+#-------------------------------------------------------------------------------
+# Stream Log & Wait for Completion
+#-------------------------------------------------------------------------------
+LOG_REMOTE="$REMOTE_DIR/logs/slurm_${JOB_ID}_${JOB_NAME}.out"
+ERR_REMOTE="$REMOTE_DIR/logs/slurm_${JOB_ID}_${JOB_NAME}.err"
+
+echo "Streaming output (log: gpu-server/logs/slurm_${JOB_ID}_${JOB_NAME}.out)"
+echo ""
+
+ssh $SSH_OPTS "$SSH_DEST" \
+    "while [ ! -f '$LOG_REMOTE' ]; do sleep 2; done; tail -f '$LOG_REMOTE'" 2>/dev/null &
+TAIL_PID=$!
+
+ssh $SSH_OPTS "$SSH_DEST" \
+    "while [ ! -f '$ERR_REMOTE' ]; do sleep 2; done; tail -f '$ERR_REMOTE'" 2>/dev/null \
+    | sed 's/^/[stderr] /' >&2 &
+ERR_PID=$!
+
+while remote "squeue -j $JOB_ID -h 2>/dev/null" 2>/dev/null | grep -q "$JOB_ID"; do
+    sleep "$POLL_INTERVAL"
+done
+
+sleep 3
+kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null
+TAIL_PID=""
+kill "$ERR_PID" 2>/dev/null; wait "$ERR_PID" 2>/dev/null
+ERR_PID=""
+
+#-------------------------------------------------------------------------------
+# Check Job Result
+#-------------------------------------------------------------------------------
+JOB_STATE=$(remote "sacct -j $JOB_ID --format=State --noheader -P 2>/dev/null | head -1 | tr -d ' '" 2>/dev/null || echo "UNKNOWN")
+
+echo ""
+
+if [[ "$JOB_STATE" == "FAILED" || "$JOB_STATE" == "CANCELLED" || "$JOB_STATE" == "TIMEOUT" || "$JOB_STATE" == "OUT_OF_MEMORY" ]]; then
+    echo "============================================================"
+    echo "Job $JOB_ID finished with state: $JOB_STATE"
+    echo "Error log: gpu-server/logs/slurm_${JOB_ID}_${JOB_NAME}.err"
+    echo "============================================================"
+    exit 1
+fi
+
+echo "============================================================"
+echo "Job $JOB_ID completed! (state: ${JOB_STATE})"
+echo "============================================================"
+
+#-------------------------------------------------------------------------------
+# Sync Results (JSON metadata only, no .pth checkpoints)
+#-------------------------------------------------------------------------------
+if [ "$NO_SYNC" = true ]; then
+    echo ""
+    echo "Sync skipped (--no-sync). Results available via SSHFS at:"
+    echo "  gpu-server/$OUTPUT_DIR/"
+    exit 0
+fi
+
+echo ""
+echo "Syncing training results (JSON metadata only)..."
+
+RUN_SRC="$MOUNT_POINT/$OUTPUT_DIR"
+RUN_DST="$SCRIPT_DIR/$OUTPUT_DIR"
+
+if [ -d "$RUN_SRC" ]; then
+    mkdir -p "$RUN_DST"
+    rsync -a --include='*.json' --exclude='*' "$RUN_SRC/" "$RUN_DST/"
+    echo "  Synced JSON files to: $OUTPUT_DIR/"
+else
+    echo "  Warning: Run directory not found at $RUN_SRC"
+fi
+
+if [ "$INFER_AFTER" = true ]; then
+    echo ""
+    echo "Syncing inference results..."
+    INFER_SRC="$MOUNT_POINT/$PROJECT_DIR/inference/"
+    INFER_DST="$SCRIPT_DIR/$PROJECT_DIR/inference/"
+
+    if [ -d "$INFER_SRC" ]; then
+        mkdir -p "$INFER_DST"
+        rsync -a --progress "$INFER_SRC" "$INFER_DST"
+        echo "  Synced inference to: $PROJECT_DIR/inference/"
+    else
+        echo "  Warning: No inference directory at $INFER_SRC"
+    fi
+fi
+
+echo ""
+echo "============================================================"
+echo "Done! Training metadata synced to: $OUTPUT_DIR/"
+if [ "$INFER_AFTER" = true ]; then
+echo "Inference results synced to: $PROJECT_DIR/inference/"
+fi
+echo "============================================================"

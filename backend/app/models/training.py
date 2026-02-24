@@ -105,6 +105,8 @@ class DatasetExportConfig(BaseModel):
     manual_data_split_strategy: Literal[
         "proportional", "val_only", "train_only", "all_splits"
     ] = "train_only"
+    manual_datasets: Optional[list[str]] = None
+    exclude_manual_datasets: Optional[list[str]] = None
 
 
 class DatasetExportResult(BaseModel):
