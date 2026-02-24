@@ -38,7 +38,7 @@ SSH_OPTS="-o ControlPath=$CONTROL_PATH -o ConnectTimeout=10"
 #-------------------------------------------------------------------------------
 # Default Configuration (mirrors submit_inference.sh)
 #-------------------------------------------------------------------------------
-GPU_TYPE="h100-96"
+GPU_TYPE="a100-80"
 PARTITION=""
 TIME="04:00:00"
 RUN=""
@@ -321,18 +321,69 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 #-------------------------------------------------------------------------------
-# SSH Helpers
+# SSH Helpers (with reconnect/retry logic)
 #-------------------------------------------------------------------------------
+MAX_SSH_RETRIES=5
+SSH_RETRY_DELAY=10
+
 ensure_ssh() {
     if ! ssh -O check $SSH_OPTS "$SSH_DEST" 2>/dev/null; then
-        echo "Opening SSH connection to $SSH_HOST..."
+        echo "  Reconnecting SSH to $SSH_HOST..."
+        ssh -O exit $SSH_OPTS "$SSH_DEST" 2>/dev/null || true
         ssh -M -f -N -o ControlMaster=yes -o ControlPath="$CONTROL_PATH" \
-            -o ControlPersist=30m -o ServerAliveInterval=60 "$SSH_DEST"
+            -o ControlPersist=30m -o ServerAliveInterval=60 \
+            -o ServerAliveCountMax=3 "$SSH_DEST"
     fi
 }
 
 remote() {
     ssh $SSH_OPTS "$SSH_DEST" "$@"
+}
+
+remote_retry() {
+    local attempt=0
+    while [ $attempt -lt $MAX_SSH_RETRIES ]; do
+        if remote "$@" 2>/dev/null; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -lt $MAX_SSH_RETRIES ]; then
+            sleep "$SSH_RETRY_DELAY"
+            ensure_ssh 2>/dev/null || true
+        fi
+    done
+    return 1
+}
+
+start_streaming() {
+    [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null && wait "$TAIL_PID" 2>/dev/null || true
+    [ -n "$ERR_PID" ] && kill "$ERR_PID" 2>/dev/null && wait "$ERR_PID" 2>/dev/null || true
+    ensure_ssh 2>/dev/null || true
+    ssh $SSH_OPTS "$SSH_DEST" \
+        "tail -f '$LOG_REMOTE' 2>/dev/null" 2>/dev/null &
+    TAIL_PID=$!
+    ssh $SSH_OPTS "$SSH_DEST" \
+        "tail -f '$ERR_REMOTE' 2>/dev/null" 2>/dev/null \
+        | sed 's/^/[stderr] /' >&2 &
+    ERR_PID=$!
+}
+
+sync_with_retry() {
+    local src="$1" dst="$2"
+    shift 2
+    local attempt=0
+    while [ $attempt -lt $MAX_SSH_RETRIES ]; do
+        if rsync "$@" "$src" "$dst"; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -lt $MAX_SSH_RETRIES ]; then
+            echo "  Sync failed (attempt $attempt/$MAX_SSH_RETRIES), retrying in ${SSH_RETRY_DELAY}s..."
+            sleep "$SSH_RETRY_DELAY"
+        fi
+    done
+    echo "  Warning: Sync failed after $MAX_SSH_RETRIES attempts."
+    return 1
 }
 
 ensure_ssh
@@ -400,15 +451,9 @@ echo "Job submitted: $JOB_ID"
 TAIL_PID=""
 ERR_PID=""
 cleanup() {
-    if [ -n "$TAIL_PID" ]; then
-        kill "$TAIL_PID" 2>/dev/null
-        wait "$TAIL_PID" 2>/dev/null
-    fi
-    if [ -n "$ERR_PID" ]; then
-        kill "$ERR_PID" 2>/dev/null
-        wait "$ERR_PID" 2>/dev/null
-    fi
-    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null
+    [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null && wait "$TAIL_PID" 2>/dev/null || true
+    [ -n "$ERR_PID" ] && kill "$ERR_PID" 2>/dev/null && wait "$ERR_PID" 2>/dev/null || true
+    remote "rm -f $REMOTE_SCRIPT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -423,13 +468,17 @@ echo ""
 
 # Wait for job to start (log file created) with queue status updates
 WAITED=0
-while ! remote "test -f '$LOG_REMOTE'" 2>/dev/null; do
-    QUEUE_INFO=$(remote "squeue -j $JOB_ID -h -o '%T %r' 2>/dev/null" 2>/dev/null || true)
-    if [ -z "$QUEUE_INFO" ]; then
+while true; do
+    if remote "test -f '$LOG_REMOTE'" 2>/dev/null; then
         break
     fi
-    JOB_REASON=$(echo "$QUEUE_INFO" | awk '{print $1, "(" $2 ")"}')
-    printf "\r  Waiting for job to start... %s  " "$JOB_REASON"
+    QUEUE_INFO=$(remote "squeue -j $JOB_ID -h -o '%T %r'" 2>/dev/null) || QUEUE_INFO=""
+    if [ -n "$QUEUE_INFO" ]; then
+        JOB_REASON=$(echo "$QUEUE_INFO" | awk '{print $1, "(" $2 ")"}')
+        printf "\r  Waiting for job to start... %s  " "$JOB_REASON"
+    elif [ $WAITED -gt 0 ]; then
+        printf "\r  Waiting for job to start... (checking)  "
+    fi
     sleep 5
     WAITED=$((WAITED + 5))
 done
@@ -437,31 +486,45 @@ if [ "$WAITED" -gt 0 ]; then
     printf "\r  Job started!%-40s\n" ""
 fi
 
-ssh $SSH_OPTS "$SSH_DEST" \
-    "tail -f '$LOG_REMOTE' 2>/dev/null" 2>/dev/null &
-TAIL_PID=$!
+# Start streaming stdout + stderr
+start_streaming
 
-ssh $SSH_OPTS "$SSH_DEST" \
-    "tail -f '$ERR_REMOTE' 2>/dev/null" 2>/dev/null \
-    | sed 's/^/[stderr] /' >&2 &
-ERR_PID=$!
-
-# Poll squeue until the job leaves the queue
-while remote "squeue -j $JOB_ID -h 2>/dev/null" 2>/dev/null | grep -q "$JOB_ID"; do
+# Poll squeue until job finishes (resilient to SSH drops)
+SSH_FAIL_COUNT=0
+while true; do
     sleep "$POLL_INTERVAL"
+
+    if SQUEUE_OUT=$(remote "squeue -j $JOB_ID -h" 2>/dev/null); then
+        SSH_FAIL_COUNT=0
+        echo "$SQUEUE_OUT" | grep -q "$JOB_ID" || break
+        # Restart log streams if they died
+        kill -0 "$TAIL_PID" 2>/dev/null || start_streaming
+    else
+        SSH_FAIL_COUNT=$((SSH_FAIL_COUNT + 1))
+        if [ $SSH_FAIL_COUNT -ge 3 ]; then
+            echo ""
+            echo "  Connection lost. Reconnecting..."
+            if ensure_ssh 2>/dev/null; then
+                SSH_FAIL_COUNT=0
+                start_streaming
+            else
+                echo "  Retry failed, will keep trying..."
+            fi
+        fi
+    fi
 done
 
 # Let tail flush remaining output
 sleep 3
-kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null
+kill "$TAIL_PID" 2>/dev/null; wait "$TAIL_PID" 2>/dev/null || true
 TAIL_PID=""
-kill "$ERR_PID" 2>/dev/null; wait "$ERR_PID" 2>/dev/null
+kill "$ERR_PID" 2>/dev/null; wait "$ERR_PID" 2>/dev/null || true
 ERR_PID=""
 
 #-------------------------------------------------------------------------------
-# Check Job Result
+# Check Job Result (with retry)
 #-------------------------------------------------------------------------------
-JOB_STATE=$(remote "sacct -j $JOB_ID --format=State --noheader -P 2>/dev/null | head -1 | tr -d ' '" 2>/dev/null || echo "UNKNOWN")
+JOB_STATE=$(remote_retry "sacct -j $JOB_ID --format=State --noheader -P | head -1 | tr -d ' '") || JOB_STATE="UNKNOWN"
 
 echo ""
 
@@ -478,7 +541,7 @@ echo "Job $JOB_ID completed! (state: ${JOB_STATE})"
 echo "============================================================"
 
 #-------------------------------------------------------------------------------
-# Sync Results
+# Sync Results (with retry)
 #-------------------------------------------------------------------------------
 if [ "$NO_SYNC" = true ]; then
     echo ""
@@ -500,7 +563,8 @@ if [ ! -d "$SRC" ]; then
 fi
 
 mkdir -p "$DST"
-rsync -a --progress "$SRC" "$DST"
+sync_with_retry "$SRC" "$DST" -a --progress \
+    || echo "  Results available via SSHFS at: gpu-server/$PROJECT/inference/"
 
 echo ""
 echo "============================================================"

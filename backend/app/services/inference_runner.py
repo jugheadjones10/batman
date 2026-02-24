@@ -10,6 +10,7 @@ from loguru import logger
 
 from backend.app.config import settings
 from backend.app.services.tracker import Tracker, TrackingConfig
+from src.core.inference import Detection, draw_detections
 
 
 class InferenceRunner:
@@ -237,7 +238,23 @@ class InferenceRunner:
 
                 # Draw annotations if saving
                 if writer:
-                    annotated = self._draw_annotations(frame, detections)
+                    height, width = frame.shape[:2]
+                    det_objects = [
+                        Detection(
+                            bbox=(
+                                (d["box"]["x"] - d["box"]["width"] / 2) * width,
+                                (d["box"]["y"] - d["box"]["height"] / 2) * height,
+                                (d["box"]["x"] + d["box"]["width"] / 2) * width,
+                                (d["box"]["y"] + d["box"]["height"] / 2) * height,
+                            ),
+                            class_id=d.get("class_id", 0),
+                            class_name=d.get("class_name", f"class_{d.get('class_id', 0)}"),
+                            confidence=d.get("confidence", 1.0),
+                            track_id=d.get("track_id"),
+                        )
+                        for d in detections
+                    ]
+                    annotated = draw_detections(frame, det_objects)
                     writer.write(annotated)
 
                 frame_num += 1
@@ -307,54 +324,6 @@ class InferenceRunner:
         # This is a placeholder implementation
         return []
 
-    def _draw_annotations(
-        self,
-        frame: np.ndarray,
-        detections: list[dict],
-    ) -> np.ndarray:
-        """Draw bounding boxes and labels on frame."""
-        frame = frame.copy()
-        height, width = frame.shape[:2]
-
-        # Color palette for different classes
-        colors = [
-            (255, 0, 0), (0, 255, 0), (0, 0, 255),
-            (255, 255, 0), (255, 0, 255), (0, 255, 255),
-            (128, 0, 0), (0, 128, 0), (0, 0, 128),
-        ]
-
-        for det in detections:
-            box = det["box"]
-            cls_id = det.get("class_id", 0)
-            class_name = det.get("class_name", f"class_{cls_id}")
-            conf = det.get("confidence", 1.0)
-            track_id = det.get("track_id")
-
-            # Convert normalized coords to pixel coords
-            x1 = int((box["x"] - box["width"] / 2) * width)
-            y1 = int((box["y"] - box["height"] / 2) * height)
-            x2 = int((box["x"] + box["width"] / 2) * width)
-            y2 = int((box["y"] + box["height"] / 2) * height)
-
-            # Calculate center coordinates
-            cx = int((x1 + x2) / 2)
-            cy = int((y1 + y2) / 2)
-
-            color = colors[cls_id % len(colors)]
-
-            # Draw box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            # Draw label with center coordinates
-            label = f"{class_name} {conf:.2f} ({cx},{cy})"
-            if track_id is not None:
-                label = f"[{track_id}] " + label
-
-            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(frame, (x1, y1 - label_h - 4), (x1 + label_w, y1), color, -1)
-            cv2.putText(frame, label, (x1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        return frame
 
 
 # Global instance
