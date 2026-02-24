@@ -271,7 +271,7 @@ Examples:
 
     parser.add_argument("--model", choices=["base", "large"], default="base", help="Model size (default: base)")
     parser.add_argument("--device", default="auto", help="Device: cuda, mps, cpu, or auto")
-    parser.add_argument("--confidence", "-t", type=float, default=0.0, help="Min confidence to include (0=all; each box shows its confidence)")
+    parser.add_argument("--confidence", "-t", type=float, default=0.5, help="Min confidence threshold (default: 0.5)")
 
     parser.add_argument("--no-optimize", action="store_true", help="Skip model optimization")
     parser.add_argument("--optimize-compile", action="store_true", help="Use JIT compilation")

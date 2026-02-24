@@ -337,7 +337,7 @@ def cmd_infer_after(args: argparse.Namespace, run_dir: Path, class_names: list[s
         print(f"  Videos: {len(videos)}")
 
     config = InferenceConfig(
-        confidence_threshold=0.0,
+        confidence_threshold=0.5,
         device=args.device,
         save_visualizations=True,
     )
