@@ -1,6 +1,6 @@
 # Run Training (Local)
 
-Run training on the GPU cluster **from your local Mac** with automatic data pushing and result syncing. This script handles everything end-to-end: pushing your latest `manual_data` and `project.json` to the cluster, submitting the SLURM job via SSH, streaming the output, waiting for completion, and syncing lightweight training metadata (JSON files only, not large `.pth` checkpoints) back locally.
+Run training on the GPU cluster **from your local Mac** with automatic data pushing and result syncing. This script handles everything end-to-end: pushing your latest `manual_data`, frame metadata, labels, and `project.json` to the cluster, submitting the SLURM job via SSH, streaming the output, waiting for completion, and syncing lightweight training metadata (JSON files only, not large `.pth` checkpoints) back locally.
 
 ## Basic Usage
 
@@ -12,7 +12,7 @@ This accepts the same arguments as [`submit_train.sh`](submit-train.md), plus `-
 
 ## How It Works
 
-1. Pushes `manual_data/` and `project.json` from your local project to the GPU cluster via rsync
+1. Pushes `manual_data/`, manual data frame metadata (`frames/manual_data*/`), labels, and `project.json` from your local project to the GPU cluster via rsync
 2. Generates the same SLURM script as `submit_train.sh`
 3. Uploads the script to the GPU cluster via `scp`
 4. Submits the job via `ssh ... sbatch`
@@ -41,7 +41,7 @@ Skip syncing results locally after completion.
 
 ### `--no-push`
 
-Skip pushing `manual_data/` and `project.json` to the GPU before the job. Useful if you know the cluster already has the latest data.
+Skip pushing project data (manual_data, frame metadata, labels, project.json) to the GPU before the job. Useful if you know the cluster already has the latest data.
 
 ```bash
 ./run_training.sh --project data/projects/One --no-push

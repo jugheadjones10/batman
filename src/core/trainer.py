@@ -631,6 +631,14 @@ def prepare_coco_dataset(
             val_frame_ids.update(manual_frame_ids)
             test_frame_ids.update(manual_frame_ids)
 
+    # Ensure val split isn't empty (small datasets can truncate to 0 via int())
+    total_frames = len(train_frame_ids) + len(val_frame_ids) + len(test_frame_ids)
+    if not val_frame_ids and total_frames >= 2:
+        if len(train_frame_ids) > 1:
+            val_frame_ids.add(train_frame_ids.pop())
+        elif len(test_frame_ids) > 0:
+            val_frame_ids.add(test_frame_ids.pop())
+
     # Create datasets
     train_images, train_anns = create_coco_split(
         train_frame_ids,

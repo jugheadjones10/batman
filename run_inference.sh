@@ -338,7 +338,7 @@ remote() {
 ensure_ssh
 
 #-------------------------------------------------------------------------------
-# Pre-sync: push manual_data + project.json to GPU
+# Pre-sync: push manual_data, frames metadata, labels, and project.json to GPU
 #-------------------------------------------------------------------------------
 if [ "$NO_PUSH" = false ]; then
     echo ""
@@ -350,6 +350,22 @@ if [ "$NO_PUSH" = false ]; then
         rsync -az --progress -e "ssh $SSH_OPTS" \
             "$LOCAL_PROJECT/manual_data/" "$REMOTE_PROJECT/manual_data/"
     fi
+
+    # Sync manual data frame metadata (frames/manual_data*/frames.json)
+    for frames_dir in "$LOCAL_PROJECT"/frames/manual_data*; do
+        if [ -d "$frames_dir" ]; then
+            dir_name=$(basename "$frames_dir")
+            rsync -az -e "ssh $SSH_OPTS" \
+                "$frames_dir/" "$REMOTE_PROJECT/frames/$dir_name/"
+        fi
+    done
+
+    # Sync labels (annotations)
+    if [ -d "$LOCAL_PROJECT/labels/current" ]; then
+        rsync -az -e "ssh $SSH_OPTS" \
+            "$LOCAL_PROJECT/labels/current/" "$REMOTE_PROJECT/labels/current/"
+    fi
+
     if [ -f "$LOCAL_PROJECT/project.json" ]; then
         rsync -az -e "ssh $SSH_OPTS" \
             "$LOCAL_PROJECT/project.json" "$REMOTE_PROJECT/project.json"
@@ -405,12 +421,28 @@ ERR_REMOTE="$REMOTE_DIR/logs/slurm_${JOB_ID}_inference.err"
 echo "Streaming output (log: gpu-server/logs/slurm_${JOB_ID}_inference.out)"
 echo ""
 
+# Wait for job to start (log file created) with queue status updates
+WAITED=0
+while ! remote "test -f '$LOG_REMOTE'" 2>/dev/null; do
+    QUEUE_INFO=$(remote "squeue -j $JOB_ID -h -o '%T %r' 2>/dev/null" 2>/dev/null || true)
+    if [ -z "$QUEUE_INFO" ]; then
+        break
+    fi
+    JOB_REASON=$(echo "$QUEUE_INFO" | awk '{print $1, "(" $2 ")"}')
+    printf "\r  Waiting for job to start... %s  " "$JOB_REASON"
+    sleep 5
+    WAITED=$((WAITED + 5))
+done
+if [ "$WAITED" -gt 0 ]; then
+    printf "\r  Job started!%-40s\n" ""
+fi
+
 ssh $SSH_OPTS "$SSH_DEST" \
-    "while [ ! -f '$LOG_REMOTE' ]; do sleep 2; done; tail -f '$LOG_REMOTE'" 2>/dev/null &
+    "tail -f '$LOG_REMOTE' 2>/dev/null" 2>/dev/null &
 TAIL_PID=$!
 
 ssh $SSH_OPTS "$SSH_DEST" \
-    "while [ ! -f '$ERR_REMOTE' ]; do sleep 2; done; tail -f '$ERR_REMOTE'" 2>/dev/null \
+    "tail -f '$ERR_REMOTE' 2>/dev/null" 2>/dev/null \
     | sed 's/^/[stderr] /' >&2 &
 ERR_PID=$!
 

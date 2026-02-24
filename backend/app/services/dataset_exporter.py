@@ -131,6 +131,14 @@ class DatasetExporter:
                 f"strategy '{manual_data_split_strategy}'"
             )
 
+        # Ensure val split isn't empty (small datasets can truncate to 0 via int())
+        total = len(splits["train"]) + len(splits["val"]) + len(splits["test"])
+        if not splits["val"] and total >= 2:
+            if len(splits["train"]) > 1:
+                splits["val"].append(splits["train"].pop())
+            elif splits["test"]:
+                splits["val"].append(splits["test"].pop())
+
         results = {
             "format": format,
             "output_path": str(output_dir),

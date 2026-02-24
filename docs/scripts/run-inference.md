@@ -12,7 +12,7 @@ This accepts the same arguments as [`submit_inference.sh`](submit-inference.md),
 
 ## How It Works
 
-1. Pushes `manual_data/` and `project.json` from your local project to the GPU cluster via rsync
+1. Pushes `manual_data/`, manual data frame metadata, labels, and `project.json` from your local project to the GPU cluster via rsync
 2. Generates the same SLURM script as `submit_inference.sh`
 3. Uploads the script to the GPU cluster via `scp`
 4. Submits the job via `ssh ... sbatch`
@@ -40,7 +40,7 @@ Submit the job and wait for completion, but skip copying results locally. Useful
 
 ### `--no-push`
 
-Skip pushing `manual_data/` and `project.json` to the GPU before the job. Useful if you know the cluster already has the latest data.
+Skip pushing project data (manual_data, frame metadata, labels, project.json) to the GPU before the job. Useful if you know the cluster already has the latest data.
 
 ```bash
 ./run_inference.sh --project data/projects/One --latest --no-push

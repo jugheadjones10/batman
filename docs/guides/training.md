@@ -147,7 +147,7 @@ Use `run_training.sh` to push data, train, and sync results in one command:
   --batch-size 16
 ```
 
-This automatically pushes your local `manual_data/` and `project.json` to the cluster before training, and syncs JSON metadata back when done. Requires the SSHFS mount (`./mount_gpu.sh`).
+This automatically pushes your local `manual_data/`, frame metadata, labels, and `project.json` to the cluster before training, and syncs JSON metadata back when done. Requires the SSHFS mount (`./mount_gpu.sh`).
 
 ### From the Cluster Directly
 
