@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import os
 import re
 import tempfile
@@ -144,17 +145,64 @@ class GPUService:
 
     # ── File sync ────────────────────────────────────────────────────────
 
-    def push_project_data(self, project_dir: str) -> dict[str, int]:
-        """Push local project data to the GPU cluster (manual_data, frames metadata, labels, project.json).
+    FINGERPRINT_FILE = ".batman_data_fingerprint"
 
-        Mirrors the pre-sync logic from run_training.sh.
-        """
+    def _compute_project_data_fingerprint(self, local_project: Path) -> str:
+        """Hash of project data we push (paths + mtime + size). Same state => same hash."""
+        parts: list[str] = []
+        pj = local_project / "project.json"
+        if pj.exists():
+            st = pj.stat()
+            parts.append(f"project.json\t{st.st_mtime_ns}\t{st.st_size}")
+        md = local_project / "manual_data"
+        if md.is_dir():
+            for item in sorted(md.rglob("*")):
+                if item.is_file():
+                    rel = item.relative_to(md)
+                    st = item.stat()
+                    parts.append(f"manual_data/{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+        frames_dir = local_project / "frames"
+        if frames_dir.is_dir():
+            for sub in sorted(frames_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if sub.name == "manual_data" or sub.name.startswith("manual_data__"):
+                    for item in sorted(sub.rglob("*")):
+                        if item.is_file():
+                            rel = item.relative_to(sub)
+                            st = item.stat()
+                            parts.append(f"frames/{sub.name}/{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+                elif not sub.name.startswith("video_"):
+                    fj = sub / "frames.json"
+                    if fj.exists():
+                        st = fj.stat()
+                        parts.append(f"frames/{sub.name}/frames.json\t{st.st_mtime_ns}\t{st.st_size}")
+        labels_dir = local_project / "labels" / "current"
+        if labels_dir.is_dir():
+            for item in sorted(labels_dir.rglob("*")):
+                if item.is_file():
+                    rel = item.relative_to(labels_dir)
+                    st = item.stat()
+                    parts.append(f"labels/current/{rel}\t{st.st_mtime_ns}\t{st.st_size}")
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+    def push_project_data(self, project_dir: str, force: bool = False) -> dict[str, int]:
+        """Push local project data to the GPU cluster. Skips push if fingerprint matches remote."""
         conn = self._require_conn()
         local_project = Path(project_dir)
         remote_project = f"{settings.remote_dir}/{project_dir}"
         files_synced = 0
 
         conn.run(f"mkdir -p {remote_project}", hide=True)
+
+        if not force:
+            fingerprint = self._compute_project_data_fingerprint(local_project)
+            remote_fp_path = f"{remote_project}/{self.FINGERPRINT_FILE}"
+            result = conn.run(f"cat {remote_fp_path} 2>/dev/null || true", hide=True)
+            remote_fingerprint = (result.stdout or "").strip()
+            if remote_fingerprint == fingerprint:
+                logger.info(f"Project data unchanged (fingerprint match), skipping push for {project_dir}")
+                return {"files_synced": 0, "skipped": True}
 
         # project.json
         pj = local_project / "project.json"
@@ -190,6 +238,16 @@ class GPUService:
         labels_dir = local_project / "labels" / "current"
         if labels_dir.is_dir():
             files_synced += self._push_dir(conn, labels_dir, f"{remote_project}/labels/current")
+
+        # Write fingerprint so next submit can skip if unchanged
+        fingerprint = self._compute_project_data_fingerprint(local_project)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".fp", delete=False) as f:
+            f.write(fingerprint)
+            fp_path = f.name
+        try:
+            conn.put(fp_path, f"{remote_project}/{self.FINGERPRINT_FILE}")
+        finally:
+            os.unlink(fp_path)
 
         logger.info(f"Pushed {files_synced} files to {remote_project}")
         return {"files_synced": files_synced}
@@ -341,16 +399,31 @@ class GPUService:
         self,
         job_id: str,
         job_name: str,
-    ) -> AsyncGenerator[str, None]:
-        """Stream SLURM log output via tail -f as an async generator.
-
-        Yields individual lines. Blocks until the job finishes or the generator
-        is closed.
-        """
+    ) -> AsyncGenerator[tuple[str, str], None]:
+        """Stream SLURM stdout and stderr via tail -f. Yields (stream, line) with stream in ('stdout', 'stderr', 'system')."""
         conn = self._require_conn()
         remote_dir = settings.remote_dir
         log_path = f"{remote_dir}/logs/slurm_{job_id}_{job_name}.out"
         err_path = f"{remote_dir}/logs/slurm_{job_id}_{job_name}.err"
+
+        def _read_remote_file(path: str, stream_tag: str) -> list[tuple[str, str]]:
+            try:
+                r = conn.run(f"test -f {path} && cat {path}", hide=True, timeout=60)
+                out = (r.stdout or "").splitlines()
+                return [(stream_tag, line + "\n") for line in out]
+            except Exception as e:
+                logger.warning(f"Could not read log file {path}: {e}")
+                return [(stream_tag, f"[system] Could not read log file: {e}\n")]
+
+        # If job is already finished, stream existing .out and .err then exit
+        status = self.get_job_status(job_id)
+        if status.get("status") in ("completed", "failed", "cancelled", "timeout"):
+            out_lines = await asyncio.to_thread(_read_remote_file, log_path, "stdout")
+            err_lines = await asyncio.to_thread(_read_remote_file, err_path, "stderr")
+            for stream, line in out_lines + err_lines:
+                yield stream, line
+            yield "system", f"[system] Job {job_id} finished with status: {status['status']}\n"
+            return
 
         # Wait for log file to appear (job may be queued)
         for _ in range(120):  # up to 10 minutes
@@ -364,70 +437,81 @@ class GPUService:
             # Yield queue status while waiting
             status = self.get_job_status(job_id)
             if status.get("status") in ("completed", "failed", "cancelled", "timeout"):
-                yield f"[system] Job {job_id} finished with status: {status['status']}\n"
+                out_lines = await asyncio.to_thread(_read_remote_file, log_path, "stdout")
+                err_lines = await asyncio.to_thread(_read_remote_file, err_path, "stderr")
+                for stream, line in out_lines + err_lines:
+                    yield stream, line
+                yield "system", f"[system] Job {job_id} finished with status: {status['status']}\n"
                 return
             reason = status.get("reason", "")
-            yield f"[system] Waiting for job to start... {status.get('raw_state', 'PENDING')} {reason}\n"
+            yield "system", f"[system] Waiting for job to start... {status.get('raw_state', 'PENDING')} {reason}\n"
             await asyncio.sleep(5)
         else:
-            yield f"[system] Timed out waiting for log file to appear\n"
+            yield "system", "[system] Timed out waiting for log file to appear\n"
             return
 
-        # Stream log via subprocess ssh tail -f (Fabric doesn't support async streaming well)
+        # Stream both .out and .err via existing Fabric/paramiko connection
         loop = asyncio.get_event_loop()
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
 
-        def _tail_thread() -> None:
-            """Run tail -f in a background thread and push lines to the queue."""
+        def _tail_stdout() -> None:
             try:
-                import subprocess
-
-                proc = subprocess.Popen(
-                    [
-                        "ssh",
-                        "-o", "StrictHostKeyChecking=no",
-                        "-o", "ConnectTimeout=10",
-                        f"{settings.ssh_user}@{settings.ssh_host}",
-                        f"tail -f {log_path} 2>/dev/null",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                client = conn.client
+                stdin, stdout, stderr = client.exec_command(
+                    f"tail -f {log_path} 2>/dev/null",
+                    get_pty=False,
                 )
                 try:
-                    for line in iter(proc.stdout.readline, ""):
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
+                    for line in iter(stdout.readline, ""):
+                        if line:
+                            loop.call_soon_threadsafe(queue.put_nowait, ("stdout", line))
                 except Exception:
                     pass
                 finally:
-                    proc.terminate()
                     try:
-                        proc.wait(timeout=3)
+                        stdout.channel.close()
                     except Exception:
-                        proc.kill()
+                        pass
             except Exception as e:
-                loop.call_soon_threadsafe(queue.put_nowait, f"[system] Log stream error: {e}\n")
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+                logger.warning(f"Log stream tail (stdout) failed: {e}")
+                loop.call_soon_threadsafe(queue.put_nowait, ("system", f"[system] Log stream error: {e}\n"))
 
-        thread = threading.Thread(target=_tail_thread, daemon=True)
-        thread.start()
+        def _tail_stderr() -> None:
+            try:
+                client = conn.client
+                stdin, stdout, stderr = client.exec_command(
+                    f"tail -f {err_path} 2>/dev/null",
+                    get_pty=False,
+                )
+                try:
+                    for line in iter(stdout.readline, ""):
+                        if line:
+                            loop.call_soon_threadsafe(queue.put_nowait, ("stderr", line))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        stdout.channel.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Log stream tail (stderr) failed: {e}")
+                loop.call_soon_threadsafe(queue.put_nowait, ("system", f"[system] Stderr stream error: {e}\n"))
+
+        for target in (_tail_stdout, _tail_stderr):
+            threading.Thread(target=target, daemon=True).start()
 
         try:
             while True:
-                # Check job status periodically
                 try:
-                    line = await asyncio.wait_for(queue.get(), timeout=15)
+                    stream, line = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield stream, line
                 except asyncio.TimeoutError:
                     status = self.get_job_status(job_id)
                     if status.get("status") in ("completed", "failed", "cancelled", "timeout"):
-                        yield f"[system] Job finished: {status['status']}\n"
+                        yield "system", f"[system] Job finished: {status['status']}\n"
                         return
                     continue
-
-                if line is None:
-                    break
-                yield line
         finally:
             pass
 
@@ -541,8 +625,8 @@ python3 -m cli.inference \\
 
         script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
-#SBATCH --output=logs/slurm_%j_{job_name}.out
-#SBATCH --error=logs/slurm_%j_{job_name}.err
+#SBATCH --output={settings.remote_dir}/logs/slurm_%j_{job_name}.out
+#SBATCH --error={settings.remote_dir}/logs/slurm_%j_{job_name}.err
 #SBATCH --time={time_limit}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -658,8 +742,8 @@ exit $EXIT_CODE
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time={time_limit}
-#SBATCH --output=logs/slurm_%j_{job_name}.out
-#SBATCH --error=logs/slurm_%j_{job_name}.err
+#SBATCH --output={settings.remote_dir}/logs/slurm_%j_{job_name}.out
+#SBATCH --error={settings.remote_dir}/logs/slurm_%j_{job_name}.err
 
 echo "============================================================"
 echo "RF-DETR Inference Job"

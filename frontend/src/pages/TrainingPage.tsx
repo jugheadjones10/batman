@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -190,6 +191,19 @@ export default function TrainingPage() {
       toast({ title: 'Submission failed', description: error.message, type: 'error' })
     },
   })
+
+  // If submit stays pending for a few seconds, tell the user it's pushing data (can be slow)
+  useEffect(() => {
+    if (!submitMutation.isPending) return
+    const t = setTimeout(() => {
+      toast({
+        title: 'Still working…',
+        description: 'Pushing data to cluster. This may take a minute for large projects.',
+        type: 'default',
+      })
+    }, 4000)
+    return () => clearTimeout(t)
+  }, [submitMutation.isPending, toast])
 
   const handleSubmit = async () => {
     if (!project?.annotation_count) {
@@ -652,22 +666,6 @@ export default function TrainingPage() {
             </CardContent>
           </Card>
 
-          {/* ─── Section 3: Log Viewer ─── */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base">
-                Job Logs
-                {selectedRunName && (
-                  <span className="ml-2 text-xs font-normal text-muted-foreground">
-                    {selectedRunName}
-                  </span>
-                )}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <LogViewer url={logsUrl} />
-            </CardContent>
-          </Card>
         </div>
 
         {/* ─── Section 2: Active/Recent Jobs ─── */}
@@ -702,6 +700,25 @@ export default function TrainingPage() {
             </CardContent>
           </Card>
         </div>
+      </div>
+
+      {/* ─── Job Logs (full width) ─── */}
+      <div className="mt-6">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">
+              Job Logs
+              {selectedRunName && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {selectedRunName}
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <LogViewer url={logsUrl} />
+          </CardContent>
+        </Card>
       </div>
     </div>
   )

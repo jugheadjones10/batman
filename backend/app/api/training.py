@@ -177,9 +177,10 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
     output_dir = f"{project_dir}/runs/{run_name}"
     output_dataset = f"{project_dir}/exports/coco"
 
-    # Push project data to cluster
+    # Push project data to cluster (can take a while over SSH for many files)
+    logger.info("Submitting training: pushing project data to cluster (may take a minute for large projects)...")
     try:
-        gpu_service.push_project_data(project_dir)
+        await asyncio.to_thread(gpu_service.push_project_data, project_dir)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to push data: {e}")
 
@@ -210,7 +211,7 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
 
     # Submit to SLURM
     try:
-        job_id = gpu_service.submit_slurm_job(script)
+        job_id = await asyncio.to_thread(gpu_service.submit_slurm_job, script)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"SLURM submission failed: {e}")
 
@@ -358,10 +359,25 @@ async def list_training_runs(project_name: str):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        # Check live SLURM status for queued/running jobs
-        tracked = gpu_service.get_tracked_job(meta["name"])
-        if tracked and tracked.status != meta.get("status"):
-            meta["status"] = tracked.status
+        # Check live SLURM status for runs that still appear active (so UI updates when job finishes)
+        current_status = meta.get("status", "unknown")
+        job_id = meta.get("slurm_job_id")
+        if job_id and current_status in ("queued", "running", "pending") and gpu_service.is_connected:
+            try:
+                status_info = gpu_service.get_job_status(job_id)
+                slurm_status = status_info.get("status", "unknown")
+                if slurm_status in ("completed", "failed", "cancelled", "timeout"):
+                    current_status = slurm_status
+                    meta["status"] = slurm_status
+                    meta["completed_at"] = meta.get("completed_at") or datetime.utcnow().isoformat()
+                    with open(meta_path, "w") as mf:
+                        json.dump(meta, mf, indent=2)
+            except Exception:
+                pass
+        else:
+            tracked = gpu_service.get_tracked_job(meta["name"])
+            if tracked and tracked.status != meta.get("status"):
+                meta["status"] = tracked.status
 
         # TensorBoard URL
         tb_key = f"{project_name}_{meta['name']}"
@@ -446,8 +462,8 @@ async def stream_training_logs(project_name: str, run_name: str):
 
     async def event_generator():
         try:
-            async for line in gpu_service.stream_logs(job_id, job_name):
-                data = json.dumps({"type": "log", "line": line.rstrip("\n")})
+            async for stream, line in gpu_service.stream_logs(job_id, job_name):
+                data = json.dumps({"type": "log", "stream": stream, "line": line.rstrip("\n")})
                 yield f"data: {data}\n\n"
         except Exception as e:
             data = json.dumps({"type": "error", "message": str(e)})

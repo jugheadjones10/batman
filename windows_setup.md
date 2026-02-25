@@ -1,6 +1,6 @@
 # WSL2 Mirrored Networking + SSH Setup Notes (What Changed)
 
-This document lists the concrete configuration changes made on the **Windows host** and inside **Ubuntu (WSL2)** to enable inbound SSH (so VS Code Remote-SSH can connect). It’s written so you can later remember what you did and revert it cleanly.
+This document lists the concrete configuration changes made on the **Windows host** and inside **Ubuntu (WSL2)** to enable inbound SSH so **VS Code or Cursor** (Remote-SSH) can connect. It’s written so you can later remember what you did and revert it cleanly.
 
 ---
 
@@ -92,7 +92,7 @@ sudo apt install -y openssh-server
 sudo systemctl enable --now ssh
 ```
 
-**Why:** VS Code Remote-SSH requires an SSH server on the remote side. `openssh-server` provides `sshd`.
+**Why:** Remote-SSH (VS Code or Cursor) requires an SSH server on the remote side. `openssh-server` provides `sshd`.
 
 **Verify `sshd` is running:**
 
@@ -127,7 +127,7 @@ sudo apt autoremove -y
 
 **What changed:** your Mac’s full public key line (starts with `ssh-ed25519` or similar) was appended to `~/.ssh/authorized_keys`.
 
-**Why:** Allows passwordless SSH (and VS Code Remote-SSH is much smoother).
+**Why:** Allows passwordless SSH (and Remote-SSH in VS Code or Cursor is much smoother).
 
 **Revert:** remove that specific key line from:
 
@@ -179,3 +179,9 @@ Get-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
   nc -vz <tailscale-ip> 22
   ssh <wsl_user>@<tailscale-ip>
   ```
+
+---
+
+## 5) Using Cursor instead of VS Code
+
+**You don’t change anything on the Windows or WSL side.** The same SSH server, firewall, and keys work for both. Cursor uses the same Remote-SSH flow and reads your existing `~/.ssh/config`; use the same host entry you use in VS Code.

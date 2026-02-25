@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Plus, Folder, Video, Tag, Trash2, ArrowRight } from 'lucide-react'
+import { Plus, Folder, Video, Tag, Trash2, ArrowRight, X } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -15,6 +15,8 @@ export default function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDesc, setNewProjectDesc] = useState('')
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null)
+  const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
@@ -41,7 +43,12 @@ export default function ProjectsPage() {
     mutationFn: api.projects.delete,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      toast({ title: 'Project deleted', type: 'success' })
+      setProjectToDelete(null)
+      setDeleteConfirmName('')
+      toast({ title: 'Project moved to Trash', type: 'success' })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to delete project', description: error.message, type: 'error' })
     },
   })
 
@@ -147,10 +154,86 @@ export default function ProjectsPage() {
             >
               <ProjectCard
                 project={project}
-                onDelete={() => deleteMutation.mutate(project.name)}
+                onDelete={() => setProjectToDelete(project)}
               />
             </motion.div>
           ))}
+        </div>
+      )}
+
+      {/* Delete project confirmation */}
+      {projectToDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => {
+            setProjectToDelete(null)
+            setDeleteConfirmName('')
+          }}
+        >
+          <Card
+            className="w-full max-w-md shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <CardHeader className="flex flex-row items-center justify-between">
+              <div>
+                <CardTitle className="text-destructive">Delete project?</CardTitle>
+                <CardDescription>
+                  This will move <strong>{projectToDelete.name}</strong> to Trash. You can restore it from your system Trash (or from <code className="text-xs">data/.trash</code> on the server) if needed.
+                </CardDescription>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setProjectToDelete(null)
+                  setDeleteConfirmName('')
+                }}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Type <strong>{projectToDelete.name}</strong> to confirm:
+              </p>
+              <Input
+                placeholder={projectToDelete.name}
+                value={deleteConfirmName}
+                onChange={(e) => setDeleteConfirmName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && deleteConfirmName === projectToDelete.name) {
+                    deleteMutation.mutate(projectToDelete.name)
+                  }
+                  if (e.key === 'Escape') {
+                    setProjectToDelete(null)
+                    setDeleteConfirmName('')
+                  }
+                }}
+                className="font-mono"
+                autoFocus
+              />
+              <div className="flex gap-2 pt-2">
+                <Button
+                  variant="destructive"
+                  disabled={deleteConfirmName !== projectToDelete.name || deleteMutation.isPending}
+                  onClick={() => deleteMutation.mutate(projectToDelete.name)}
+                  className="gap-2"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Move to Trash
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setProjectToDelete(null)
+                    setDeleteConfirmName('')
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>

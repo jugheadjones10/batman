@@ -192,16 +192,29 @@ async def update_project_classes(project_name: str, classes: list[str]):
 
 @router.delete("/{project_name}")
 async def delete_project(project_name: str):
-    """Delete a project."""
+    """Move project to Trash (or data/.trash if system Trash is unavailable)."""
     project_path = get_project_path(project_name)
 
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    shutil.rmtree(project_path)
-    logger.info(f"Deleted project: {project_name}")
+    try:
+        from send2trash import send2trash
 
-    return {"message": "Project deleted"}
+        send2trash(str(project_path))
+        logger.info(f"Moved project to Trash: {project_name}")
+        return {"message": "Project moved to Trash"}
+    except Exception as e:
+        logger.warning(f"send2trash failed ({e}), moving to data/.trash")
+        trash_dir = settings.projects_dir.parent / ".trash"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        dest = trash_dir / f"{project_name}_{timestamp}"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(project_path), str(dest))
+        logger.info(f"Moved project to {dest}")
+        return {"message": "Project moved to Trash (.trash)"}
 
 
 @router.get("/{project_name}/iterations", response_model=list[LabelIterationInfo])

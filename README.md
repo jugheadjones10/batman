@@ -244,7 +244,7 @@ GET    /api/projects              # List all projects
 POST   /api/projects              # Create project
 GET    /api/projects/{name}       # Get project details
 PUT    /api/projects/{name}/classes   # Update classes
-DELETE /api/projects/{name}       # Delete project
+DELETE /api/projects/{name}       # Move project to Trash
 ```
 
 ### Videos

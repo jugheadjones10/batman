@@ -62,6 +62,8 @@ Content-Type: application/json
 DELETE /api/projects/{name}
 ```
 
+Moves the project to the system Trash (or to `data/.trash` if Trash is unavailable). The project can be restored from Trash. Response: `{ "message": "Project moved to Trash" }` or `{ "message": "Project moved to Trash (.trash)" }`.
+
 ### Manual Data
 
 Images placed in `project_root/manual_data/` can be synced and used for annotation.

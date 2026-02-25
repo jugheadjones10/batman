@@ -238,7 +238,9 @@ sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed,ExitCode
 
 ### Log Files
 
-All jobs write to `logs/slurm_<job_id>_<job_name>.out`:
+When you submit jobs from the **Batman UI**, SLURM writes stdout/stderr to an absolute path under the cluster project directory, e.g. `$BATMAN_REMOTE_DIR/logs/slurm_<job_id>_<job_name>.out` (default: `/home/y/youngjin/batman/logs/`). This ensures logs are in the same place whether the job is submitted from the login node or the UI.
+
+All jobs write to `logs/slurm_<job_id>_<job_name>.out` (relative to your project root on the cluster, or the absolute path above for UI submissions):
 
 ```bash
 # Follow log

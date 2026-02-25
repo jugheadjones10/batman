@@ -251,6 +251,22 @@ Key metrics:
 - **Precision**: Fraction of correct detections
 - **Recall**: Fraction of objects detected
 
+### Run directory: JSON files and syncing
+
+Each training run lives under `data/projects/<Project>/runs/<run_name>/`. These JSON files appear there and how they get there depends on whether you train **locally** or submit to the **GPU cluster** (UI or `submit_train.sh`).
+
+| File | Purpose | Created by | Syncing behaviour |
+|------|---------|------------|-------------------|
+| **meta.json** | Run metadata for the UI and API: run id/name, status (queued/running/completed/failed/cancelled), SLURM job id, config snapshot, created_at, started_at, completed_at. | **Backend (Batman API)** when you submit a job. | **Local only.** Written on the machine running the Batman server. Updated in place when the background poll sees the job start or finish (`status`, `started_at`, `completed_at`). The list endpoint also updates it from SLURM when you still show as running (so the UI flips to “Completed” without waiting for the poll). |
+| **training_config.json** | Exact training invocation: full command, timestamp, hostname, working directory, parsed arguments (project, output_dir, model, epochs, batch_size, etc.), environment (Python path, version). | **Training CLI** (`cli.train`) at the **start** of the run, on the machine where training runs (local or GPU server). | **GPU → local:** When you submit via the UI, this file is created on the cluster. After the job completes, the backend’s **result sync** pulls `*.json` from the cluster run dir into the local run dir, so you get `training_config.json` locally. |
+| **results.json** | Final evaluation metrics: COCO-style mAP, precision, recall, per-class metrics (`class_map`), and optionally `checkpoint_path`. | **RF-DETR training/eval** (inside the training run) on the machine where training runs. | **GPU → local:** Same as above. Created on the cluster; synced down with other `*.json` when the job finishes. Used by the UI/API for run cards (e.g. mAP, best checkpoint) when present. |
+| **class_info.json** | Class names, number of classes, and model id (e.g. `rf-detr-base`) for this run. Used by inference and the UI to load the right classes for a checkpoint. | **Training CLI** (`cli.train`) at the **end** of training (after the trainer returns), on the machine where training runs. | **GPU → local:** Created on the cluster; synced down with other `*.json`. Required for inference so the server knows class names for this run. |
+
+**Summary**
+
+- **meta.json**: Only on the Batman server host; created and updated by the backend; not synced from the cluster.
+- **training_config.json**, **results.json**, **class_info.json**: Created on the machine that runs training (cluster when you submit via UI). When training is submitted through the UI, after the job completes the backend runs `sync_results(remote_run, local_run, ["*.json"])`, so those three files are **pulled from the GPU cluster** into your local run directory. Checkpoints (e.g. `best.pth`) are **not** synced by default; only `*.json` are.
+
 ## Step 6: Evaluate Results
 
 ### Check Training Configuration
