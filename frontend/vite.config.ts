@@ -10,6 +10,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: true,   // Listen on 0.0.0.0 so you can access via Tailscale/LAN IP (e.g. http://<tailscale-ip>:5180)
     port: 5180,  // Use 5180 to avoid conflicts with other Vite apps
     strictPort: false,  // Use next available port if occupied
     proxy: {
