@@ -1,6 +1,7 @@
 """GPU cluster connection API routes."""
 
 from fastapi import APIRouter, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 
 from backend.app.config import settings
@@ -20,6 +21,7 @@ async def connect(request: ConnectRequest):
         result = gpu_service.connect(request.password)
         return result
     except Exception as e:
+        logger.warning(f"GPU connect failed: {e}")
         raise HTTPException(status_code=400, detail=f"Connection failed: {e}")
 
 
