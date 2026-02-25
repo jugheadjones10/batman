@@ -125,14 +125,26 @@ If you're already SSH'd into the cluster, use `submit_inference.sh`:
 
 The Web UI provides a visual interface for running and browsing inference results.
 
-### Running Inference
+### Running Inference on GPU Cluster
+
+1. Navigate to the **Inference** page for your project
+2. Connect to the GPU cluster (enter SSH password in the connection panel)
+3. Click **Run Inference** -- the default tab is **GPU Cluster**
+4. Select a training run (or use "Latest")
+5. Choose GPU type and configure settings (confidence, frame interval, tracking, etc.)
+6. Click **Submit to GPU** -- the job is submitted to SLURM
+7. View real-time logs in the **GPU Inference Logs** section
+8. Results are synced back to your local project when the job completes
+
+### Running Inference Locally
 
 1. Navigate to the **Inference** page for your project
 2. Click **Run Inference**
-3. Select a training run (model)
-4. Select a video
-5. Configure settings (confidence, tracking, etc.)
-6. Click **Run & Save** -- results are persisted automatically
+3. Switch to the **Local** tab
+4. Select a training run (model)
+5. Select a video
+6. Configure settings (confidence, tracking, etc.)
+7. Click **Run & Save** -- results are persisted automatically
 
 ### Browsing Results
 

@@ -296,7 +296,9 @@ fi
 #-------------------------------------------------------------------------------
 # Generate SLURM Script (identical to submit_train.sh)
 #-------------------------------------------------------------------------------
-SLURM_SCRIPT=$(mktemp /tmp/slurm_rfdetr_XXXXXX.sh)
+SLURM_SCRIPT=$(mktemp /tmp/slurm_rfdetr_XXXXXX)
+mv "$SLURM_SCRIPT" "${SLURM_SCRIPT}.sh"
+SLURM_SCRIPT="${SLURM_SCRIPT}.sh"
 
 cat > "$SLURM_SCRIPT" << SLURM_EOF
 #!/bin/bash

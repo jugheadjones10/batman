@@ -1,53 +1,44 @@
-"""Training API routes."""
+"""Training API routes — GPU cluster submission via Fabric/SLURM."""
 
 import asyncio
 import json
-import re
-import subprocess
 import socket
+import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from backend.app.api.projects import get_project_path, load_project_config
 from backend.app.models.training import (
     DatasetExportConfig,
     DatasetExportResult,
-    InferenceConfig,
-    TrainingConfig,
-    TrainingProgress,
-    TrainingRequest,
     TrainingRunInfo,
+    TrainingSubmitRequest,
 )
 from backend.app.services.dataset_exporter import DatasetExporter
-from backend.app.services.trainer import ModelTrainer
+from backend.app.services.gpu_service import GPU_CONFIGS, GPUJobState, gpu_service
 
 router = APIRouter(prefix="/projects/{project_name}/training", tags=["training"])
 
-
-# In-memory training status (would use database in production)
-_training_jobs: dict[str, TrainingProgress] = {}
-
-# Track running training tasks: {run_name: asyncio.Task}
-_training_tasks: dict[str, asyncio.Task] = {}
-
-# Track TensorBoard processes: {run_name: {"process": subprocess.Popen, "port": int}}
+# TensorBoard process tracking (kept from previous implementation)
 _tensorboard_processes: dict[str, dict] = {}
 
 
 def _find_free_port(start_port: int = 6006, max_attempts: int = 100) -> int:
-    """Find a free port starting from start_port."""
     for port in range(start_port, start_port + max_attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(('127.0.0.1', port))
+                s.bind(("127.0.0.1", port))
                 return port
             except OSError:
                 continue
-    raise RuntimeError(f"Could not find free port in range {start_port}-{start_port + max_attempts}")
+    raise RuntimeError(f"No free port in range {start_port}-{start_port + max_attempts}")
+
+
+# ── Dataset export (kept) ────────────────────────────────────────────────
 
 
 @router.post("/export-dataset", response_model=DatasetExportResult)
@@ -62,11 +53,9 @@ async def export_dataset(
 
     project_config = load_project_config(project_path)
     classes = project_config.get("classes", [])
-
     if not classes:
         raise HTTPException(status_code=400, detail="No classes defined")
 
-    # Load videos.json to identify video directories (which are excluded from training)
     videos_meta_path = project_path / "videos" / "videos.json"
     video_dir_names: set[str] = set()
     if videos_meta_path.exists():
@@ -74,21 +63,17 @@ async def export_dataset(
             videos_meta = json.load(f)
         video_dir_names = set(videos_meta.keys())
 
-    # Determine which data sources to include (default: both manual_data and imports)
     allowed_sources = set(config.data_sources or ["manual_data", "imports"])
-
-    # Build manual dataset include/exclude sets for fine-grained filtering
     manual_ds_include = set(config.manual_datasets) if config.manual_datasets else None
-    manual_ds_exclude = set(config.exclude_manual_datasets) if config.exclude_manual_datasets else None
+    manual_ds_exclude = (
+        set(config.exclude_manual_datasets) if config.exclude_manual_datasets else None
+    )
 
     def _is_manual_dir(name: str) -> bool:
         return name == "manual_data" or name.startswith("manual_data__")
 
     def _manual_dataset_name(name: str) -> str:
-        """Return canonical dataset name: '(root)' for manual_data, else the suffix."""
-        if name == "manual_data":
-            return "(root)"
-        return name[len("manual_data__"):]
+        return "(root)" if name == "manual_data" else name[len("manual_data__"):]
 
     def _should_include_manual(dir_name: str) -> bool:
         if manual_ds_include is None and manual_ds_exclude is None:
@@ -100,7 +85,6 @@ async def export_dataset(
             return canonical not in manual_ds_exclude
         return True
 
-    # Load frames, categorizing each directory as manual_data, video, or imports
     frames = []
     frames_dir = project_path / "frames"
     if frames_dir.exists():
@@ -111,7 +95,6 @@ async def export_dataset(
             if not meta_path.exists():
                 continue
 
-            # Categorize this directory
             if _is_manual_dir(sub_dir.name):
                 source_type = "manual_data"
             elif sub_dir.name in video_dir_names:
@@ -129,29 +112,26 @@ async def export_dataset(
             with open(meta_path) as f:
                 frames_meta = json.load(f)
             for frame_id, frame_data in frames_meta.items():
-                fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
-                vid = int(sub_dir.name) if sub_dir.name.lstrip("-").isdigit() else sub_dir.name
-                frames.append({
-                    "id": fid,
-                    "video_id": vid,
-                    **frame_data,
-                })
+                fid = (
+                    int(frame_id)
+                    if isinstance(frame_id, str) and frame_id.isdigit()
+                    else frame_id
+                )
+                vid = (
+                    int(sub_dir.name)
+                    if sub_dir.name.lstrip("-").isdigit()
+                    else sub_dir.name
+                )
+                frames.append({"id": fid, "video_id": vid, **frame_data})
 
-    # Load annotations
     annotations_path = project_path / "labels" / "current" / "annotations.json"
     annotations = []
     if annotations_path.exists():
         with open(annotations_path) as f:
             annotations_meta = json.load(f)
         for ann_id, ann_data in annotations_meta.items():
-            if not config.include_unapproved:
-                pass
-            annotations.append({
-                "id": int(ann_id),
-                **ann_data,
-            })
+            annotations.append({"id": int(ann_id), **ann_data})
 
-    # Export dataset
     exporter = DatasetExporter(project_path)
     result = await exporter.export(
         frames=frames,
@@ -161,111 +141,214 @@ async def export_dataset(
         split_by_video=config.split_by_video,
         manual_data_split_strategy=config.manual_data_split_strategy,
     )
-
     return DatasetExportResult(**result)
 
 
-@router.post("/start")
-async def start_training(
-    project_name: str,
-    request: TrainingRequest,
-):
-    """Start a training run."""
+# ── Submit training to GPU cluster ───────────────────────────────────────
+
+
+@router.post("/submit")
+async def submit_training(project_name: str, request: TrainingSubmitRequest):
+    """Submit a training job to the GPU cluster."""
+    if not gpu_service.is_connected:
+        raise HTTPException(status_code=400, detail="Not connected to GPU cluster")
+
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_config = load_project_config(project_path)
     classes = project_config.get("classes", [])
-
     if not classes:
         raise HTTPException(status_code=400, detail="No classes defined")
 
-    # Check for existing dataset
-    exports_dir = project_path / "exports"
-    if not exports_dir.exists() or not any(exports_dir.iterdir()):
-        raise HTTPException(
-            status_code=400,
-            detail="No exported dataset found. Export dataset first.",
-        )
+    project_dir = f"data/projects/{project_name}"
 
-    # Use most recent export
-    latest_export = max(exports_dir.iterdir(), key=lambda p: p.stat().st_mtime)
-    
-    # RF-DETR uses COCO format, YOLO uses YOLO format
-    if request.config.base_model.startswith("rfdetr"):
-        dataset_path = latest_export / "coco"
-        if not dataset_path.exists():
-            raise HTTPException(status_code=400, detail="COCO format dataset not found for RF-DETR")
-    else:
-        dataset_path = latest_export / "yolo"
-        if not dataset_path.exists():
-            raise HTTPException(status_code=400, detail="YOLO format dataset not found")
+    # Auto batch size from GPU config if not specified
+    gpu_cfg = GPU_CONFIGS.get(request.gpu.gpu_type, {})
+    batch_size = request.training.batch_size or gpu_cfg.get("default_batch", 8)
 
-    # Create training run record
+    # Generate run name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"rfdetr_{request.gpu.gpu_type}_{timestamp}"
+    if request.label:
+        run_name = f"{run_name}_{request.label}"
+
+    output_dir = f"{project_dir}/runs/{run_name}"
+    output_dataset = f"{project_dir}/exports/coco"
+
+    # Push project data to cluster
+    try:
+        gpu_service.push_project_data(project_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to push data: {e}")
+
+    # Generate SLURM script
+    script, job_name = gpu_service.generate_training_script(
+        project_dir=project_dir,
+        output_dir=output_dir,
+        output_dataset=output_dataset,
+        model=request.training.model,
+        epochs=request.training.epochs,
+        batch_size=batch_size,
+        image_size=request.training.image_size,
+        lr=request.training.lr,
+        patience=request.training.patience,
+        grad_accum=request.training.grad_accum,
+        gpu_type=request.gpu.gpu_type,
+        num_gpus=request.gpu.num_gpus,
+        time_limit=request.gpu.time_limit,
+        filter_classes=request.data.filter_classes,
+        max_frames_per_class=request.data.max_frames_per_class,
+        sources=request.data.sources,
+        manual_split_strategy=request.data.manual_split_strategy,
+        manual_datasets=request.data.manual_datasets,
+        exclude_manual_datasets=request.data.exclude_manual_datasets,
+        infer_after=request.infer_after,
+        infer_test_only=request.infer_test_only,
+    )
+
+    # Submit to SLURM
+    try:
+        job_id = gpu_service.submit_slurm_job(script)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SLURM submission failed: {e}")
+
+    # Save meta.json locally
     runs_dir = project_path / "runs"
     runs_dir.mkdir(exist_ok=True)
+    run_dir = runs_dir / run_name
+    run_dir.mkdir(exist_ok=True)
 
-    run_id = len(list(runs_dir.iterdir())) + 1
-    run_dir = runs_dir / request.name
-
+    run_id = len(list(runs_dir.iterdir()))
     now = datetime.utcnow()
 
-    run_meta = {
+    meta = {
         "id": run_id,
-        "name": request.name,
-        "label_iteration_id": request.label_iteration_id,
-        "base_model": request.config.base_model,
-        "config": request.config.model_dump(),
-        "status": "pending",
+        "name": run_name,
+        "model": f"rf-detr-{request.training.model}",
+        "status": "queued",
         "progress": 0.0,
+        "slurm_job_id": job_id,
+        "gpu_type": request.gpu.gpu_type,
+        "config": {
+            "training": request.training.model_dump(),
+            "gpu": request.gpu.model_dump(),
+            "data": request.data.model_dump(),
+        },
         "created_at": now.isoformat(),
     }
-
-    run_dir.mkdir(exist_ok=True)
     with open(run_dir / "meta.json", "w") as f:
-        json.dump(run_meta, f, indent=2)
+        json.dump(meta, f, indent=2)
 
-    _training_jobs[str(run_id)] = TrainingProgress(
-        run_id=run_id,
-        status="pending",
-        progress=0.0,
-        current_epoch=0,
-        total_epochs=request.config.epochs,
+    # Track and start background polling
+    job_state = GPUJobState(
+        job_id=job_id,
+        run_name=run_name,
+        job_type="training",
+        gpu_type=request.gpu.gpu_type,
+        project_name=project_name,
+        project_dir=project_dir,
+        output_dir=output_dir,
+        submitted_at=now.isoformat(),
+        log_file=f"logs/slurm_{job_id}_{job_name}.out",
+        err_file=f"logs/slurm_{job_id}_{job_name}.err",
     )
+    gpu_service.track_job(job_state)
 
-    # Create and track the training task
-    task = asyncio.create_task(
-        _run_training(
-            str(run_id),
-            project_path,
-            run_dir,
-            dataset_path,
-            request.config,
-        )
-    )
-    _training_tasks[request.name] = task
+    asyncio.create_task(gpu_service.poll_job_until_done(job_state, project_path))
 
     return {
-        "run_id": run_id,
-        "message": "Training started",
+        "job_id": job_id,
+        "run_name": run_name,
+        "message": "Training job submitted to GPU cluster",
     }
+
+
+# ── List / get training runs ────────────────────────────────────────────
+
+
+def _is_local_training_run(run_dir: Path) -> bool:
+    """True if run_dir looks like a local training run (no meta.json from cluster submit)."""
+    if (run_dir / "meta.json").exists():
+        return False
+    return (
+        (run_dir / "training_config.json").exists()
+        or (run_dir / "results.json").exists()
+        or (run_dir / "tensorboard").is_dir()
+        or bool(list(run_dir.glob("*.pth")))
+    )
+
+
+def _local_run_info(project_name: str, run_dir: Path, run_index: int) -> TrainingRunInfo | None:
+    """Build TrainingRunInfo for a local-only run (no meta.json)."""
+    name = run_dir.name
+    tb_key = f"{project_name}_{name}"
+    tensorboard_url = None
+    if tb_key in _tensorboard_processes:
+        tb_info = _tensorboard_processes[tb_key]
+        if tb_info["process"].poll() is None:
+            tensorboard_url = f"http://localhost:{tb_info['port']}"
+
+    config_path = run_dir / "training_config.json"
+    created_at = datetime.fromtimestamp(run_dir.stat().st_mtime)
+    model = "unknown"
+    config = None
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            args = config.get("arguments", {})
+            model = f"rf-detr-{args.get('model', 'base')}"
+            ts = config.get("timestamp")
+            if ts:
+                created_at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+
+    metrics = None
+    checkpoint_path = None
+    results_path = run_dir / "results.json"
+    if results_path.exists():
+        try:
+            with open(results_path) as f:
+                metrics = json.load(f)
+            checkpoint_path = metrics.get("checkpoint_path")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return TrainingRunInfo(
+        id=run_index,
+        name=name,
+        status="completed",
+        model=model,
+        gpu_type="local",
+        slurm_job_id=None,
+        progress=1.0,
+        metrics=metrics,
+        checkpoint_path=checkpoint_path,
+        latency_ms=None,
+        tensorboard_url=tensorboard_url,
+        config=config,
+        started_at=None,
+        completed_at=None,
+        created_at=created_at,
+    )
 
 
 @router.get("/runs", response_model=list[TrainingRunInfo])
 async def list_training_runs(project_name: str):
-    """List all training runs."""
+    """List all training runs for a project."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
     runs = []
     runs_dir = project_path / "runs"
-
     if not runs_dir.exists():
         return runs
 
-    for run_dir in runs_dir.iterdir():
+    for run_dir in sorted(runs_dir.iterdir(), reverse=True):
         if not run_dir.is_dir():
             continue
         meta_path = run_dir / "meta.json"
@@ -275,7 +358,12 @@ async def list_training_runs(project_name: str):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        # Check if TensorBoard is running for this run
+        # Check live SLURM status for queued/running jobs
+        tracked = gpu_service.get_tracked_job(meta["name"])
+        if tracked and tracked.status != meta.get("status"):
+            meta["status"] = tracked.status
+
+        # TensorBoard URL
         tb_key = f"{project_name}_{meta['name']}"
         tensorboard_url = None
         if tb_key in _tensorboard_processes:
@@ -287,444 +375,209 @@ async def list_training_runs(project_name: str):
             TrainingRunInfo(
                 id=meta["id"],
                 name=meta["name"],
-                label_iteration_id=meta.get("label_iteration_id", 0),
-                base_model=meta["base_model"],
                 status=meta.get("status", "unknown"),
+                model=meta.get("model", meta.get("base_model", "unknown")),
+                gpu_type=meta.get("gpu_type"),
+                slurm_job_id=meta.get("slurm_job_id"),
                 progress=meta.get("progress", 0.0),
                 metrics=meta.get("metrics"),
                 checkpoint_path=meta.get("checkpoint_path"),
                 latency_ms=meta.get("latency_ms"),
                 tensorboard_url=tensorboard_url,
-                started_at=datetime.fromisoformat(meta["started_at"]) if meta.get("started_at") else None,
-                completed_at=datetime.fromisoformat(meta["completed_at"]) if meta.get("completed_at") else None,
+                config=meta.get("config"),
+                started_at=(
+                    datetime.fromisoformat(meta["started_at"])
+                    if meta.get("started_at")
+                    else None
+                ),
+                completed_at=(
+                    datetime.fromisoformat(meta["completed_at"])
+                    if meta.get("completed_at")
+                    else None
+                ),
                 created_at=datetime.fromisoformat(meta["created_at"]),
             )
         )
 
+    # Include local training runs (no meta.json): e.g. CLI runs on a local GPU machine
+    seen_names = {r.name for r in runs}
+    local_index = 0
+    for run_dir in sorted(runs_dir.iterdir(), reverse=True):
+        if not run_dir.is_dir() or run_dir.name in seen_names:
+            continue
+        if not _is_local_training_run(run_dir):
+            continue
+        info = _local_run_info(project_name, run_dir, 900000 + local_index)
+        if info:
+            runs.append(info)
+            seen_names.add(run_dir.name)
+            local_index += 1
+
+    # Keep newest first (by created_at)
+    runs.sort(key=lambda r: r.created_at, reverse=True)
     return runs
 
 
-@router.get("/runs/{run_id}", response_model=TrainingRunInfo)
-async def get_training_run(project_name: str, run_id: int):
-    """Get training run details."""
+# ── Log streaming (SSE) ─────────────────────────────────────────────────
+
+
+@router.get("/runs/{run_name}/logs")
+async def stream_training_logs(project_name: str, run_name: str):
+    """Stream SLURM training logs via Server-Sent Events."""
     project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
+    meta_path = project_path / "runs" / run_name / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Training run not found")
 
-    runs_dir = project_path / "runs"
+    with open(meta_path) as f:
+        meta = json.load(f)
 
-    for run_dir in runs_dir.iterdir():
-        meta_path = run_dir / "meta.json"
-        if not meta_path.exists():
-            continue
+    job_id = meta.get("slurm_job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="No SLURM job ID for this run")
 
-        with open(meta_path) as f:
-            meta = json.load(f)
+    if not gpu_service.is_connected:
+        raise HTTPException(status_code=400, detail="Not connected to GPU cluster")
 
-        if meta["id"] == run_id:
-            return TrainingRunInfo(
-                id=meta["id"],
-                name=meta["name"],
-                label_iteration_id=meta.get("label_iteration_id", 0),
-                base_model=meta["base_model"],
-                status=meta.get("status", "unknown"),
-                progress=meta.get("progress", 0.0),
-                metrics=meta.get("metrics"),
-                checkpoint_path=meta.get("checkpoint_path"),
-                latency_ms=meta.get("latency_ms"),
-                started_at=datetime.fromisoformat(meta["started_at"]) if meta.get("started_at") else None,
-                completed_at=datetime.fromisoformat(meta["completed_at"]) if meta.get("completed_at") else None,
-                created_at=datetime.fromisoformat(meta["created_at"]),
-            )
+    # Derive the job name from the SLURM script naming convention
+    model = meta.get("config", {}).get("training", {}).get("model", "base")
+    gpu_type = meta.get("gpu_type", "a100-80")
+    job_name = f"rfdetr-{model}-{gpu_type}"
 
-    raise HTTPException(status_code=404, detail="Training run not found")
+    async def event_generator():
+        try:
+            async for line in gpu_service.stream_logs(job_id, job_name):
+                data = json.dumps({"type": "log", "line": line.rstrip("\n")})
+                yield f"data: {data}\n\n"
+        except Exception as e:
+            data = json.dumps({"type": "error", "message": str(e)})
+            yield f"data: {data}\n\n"
+        finally:
+            data = json.dumps({"type": "done"})
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
-@router.get("/runs/{run_id}/progress", response_model=TrainingProgress)
-async def get_training_progress(project_name: str, run_id: int):
-    """Get training progress."""
-    if str(run_id) not in _training_jobs:
-        raise HTTPException(status_code=404, detail="Training job not found")
+# ── Cancel ───────────────────────────────────────────────────────────────
 
-    return _training_jobs[str(run_id)]
+
+@router.post("/runs/{run_name}/cancel")
+async def cancel_training_run(project_name: str, run_name: str):
+    """Cancel a running/queued training job on the GPU cluster."""
+    project_path = get_project_path(project_name)
+    meta_path = project_path / "runs" / run_name / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    if meta.get("status") not in ("running", "queued", "pending"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel run with status '{meta.get('status')}'",
+        )
+
+    job_id = meta.get("slurm_job_id")
+    if job_id and gpu_service.is_connected:
+        try:
+            gpu_service.cancel_job(job_id)
+        except Exception as e:
+            logger.warning(f"scancel failed: {e}")
+
+    meta["status"] = "cancelled"
+    meta["completed_at"] = datetime.utcnow().isoformat()
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    tracked = gpu_service.get_tracked_job(run_name)
+    if tracked:
+        tracked.status = "cancelled"
+        tracked.completed_at = meta["completed_at"]
+
+    return {"status": "cancelled", "message": f"Training run '{run_name}' cancelled"}
+
+
+# ── TensorBoard (kept) ──────────────────────────────────────────────────
 
 
 @router.post("/runs/{run_name}/tensorboard/start")
 async def start_tensorboard(project_name: str, run_name: str):
     """Start TensorBoard for a training run."""
     project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
-
     run_dir = project_path / "runs" / run_name
     if not run_dir.exists():
         raise HTTPException(status_code=404, detail="Training run not found")
 
-    # Check if TensorBoard is already running for this run
+    # Also check SSHFS mount
+    sshfs_run = Path("gpu-server") / f"data/projects/{project_name}/runs/{run_name}"
+    logdir = str(sshfs_run) if sshfs_run.exists() else str(run_dir)
+
     tb_key = f"{project_name}_{run_name}"
     if tb_key in _tensorboard_processes:
         existing = _tensorboard_processes[tb_key]
-        # Check if process is still running
         if existing["process"].poll() is None:
             return {
                 "status": "already_running",
                 "port": existing["port"],
                 "url": f"http://localhost:{existing['port']}",
             }
-        else:
-            # Process died, clean up
-            del _tensorboard_processes[tb_key]
+        del _tensorboard_processes[tb_key]
 
-    # Find a free port
-    try:
-        port = _find_free_port(6006)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Start TensorBoard process
+    port = _find_free_port(6006)
     try:
         process = subprocess.Popen(
-            [
-                "tensorboard",
-                "--logdir", str(run_dir),
-                "--port", str(port),
-                "--bind_all",  # Allow access from any interface
-            ],
+            ["tensorboard", "--logdir", logdir, "--port", str(port), "--bind_all"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-
-        # Give it a moment to start
         await asyncio.sleep(1)
-
-        # Check if it started successfully
         if process.poll() is not None:
             stderr = process.stderr.read().decode() if process.stderr else ""
-            raise HTTPException(status_code=500, detail=f"TensorBoard failed to start: {stderr}")
+            raise HTTPException(
+                status_code=500, detail=f"TensorBoard failed: {stderr}"
+            )
 
-        _tensorboard_processes[tb_key] = {
-            "process": process,
-            "port": port,
-        }
-
-        logger.info(f"Started TensorBoard for {run_name} on port {port}")
-
-        return {
-            "status": "started",
-            "port": port,
-            "url": f"http://localhost:{port}",
-        }
-
+        _tensorboard_processes[tb_key] = {"process": process, "port": port}
+        return {"status": "started", "port": port, "url": f"http://localhost:{port}"}
     except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="TensorBoard not found. Install with: pip install tensorboard"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start TensorBoard: {e}")
+        raise HTTPException(status_code=500, detail="TensorBoard not installed")
 
 
 @router.post("/runs/{run_name}/tensorboard/stop")
 async def stop_tensorboard(project_name: str, run_name: str):
-    """Stop TensorBoard for a training run."""
     tb_key = f"{project_name}_{run_name}"
-    
     if tb_key not in _tensorboard_processes:
-        raise HTTPException(status_code=404, detail="TensorBoard not running for this run")
+        raise HTTPException(status_code=404, detail="TensorBoard not running")
 
-    existing = _tensorboard_processes[tb_key]
-    process = existing["process"]
-    
+    process = _tensorboard_processes[tb_key]["process"]
     if process.poll() is None:
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-
     del _tensorboard_processes[tb_key]
-    logger.info(f"Stopped TensorBoard for {run_name}")
-
     return {"status": "stopped"}
 
 
 @router.get("/runs/{run_name}/tensorboard/status")
 async def get_tensorboard_status(project_name: str, run_name: str):
-    """Get TensorBoard status for a training run."""
     tb_key = f"{project_name}_{run_name}"
-    
     if tb_key not in _tensorboard_processes:
         return {"running": False}
 
-    existing = _tensorboard_processes[tb_key]
-    process = existing["process"]
-    
-    if process.poll() is None:
-        return {
-            "running": True,
-            "port": existing["port"],
-            "url": f"http://localhost:{existing['port']}",
-        }
-    else:
-        # Process died, clean up
-        del _tensorboard_processes[tb_key]
-        return {"running": False}
-
-
-@router.post("/runs/{run_name}/cancel")
-async def cancel_training_run(project_name: str, run_name: str):
-    """Cancel a running training job."""
-    project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    run_dir = project_path / "runs" / run_name
-    meta_path = run_dir / "meta.json"
-    
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="Training run not found")
-
-    # Load current meta
-    with open(meta_path) as f:
-        meta = json.load(f)
-
-    if meta.get("status") not in ["running", "pending"]:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot cancel run with status '{meta.get('status')}'. Only 'running' or 'pending' runs can be cancelled."
-        )
-
-    # Cancel the asyncio task if it exists
-    if run_name in _training_tasks:
-        task = _training_tasks[run_name]
-        if not task.done():
-            task.cancel()
-            logger.info(f"Cancelled training task for {run_name}")
-        del _training_tasks[run_name]
-
-    # Try to kill any related training processes (RF-DETR spawns subprocesses)
-    try:
-        import os
-        import signal
-        
-        # Find processes by checking for the run directory in command line
-        result = subprocess.run(
-            ["pgrep", "-f", str(run_dir)],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            pids = result.stdout.strip().split('\n')
-            for pid_str in pids:
-                if pid_str:
-                    try:
-                        pid = int(pid_str)
-                        os.kill(pid, signal.SIGTERM)
-                        logger.info(f"Sent SIGTERM to process {pid}")
-                    except (ValueError, ProcessLookupError):
-                        pass
-    except Exception as e:
-        logger.warning(f"Could not kill training processes: {e}")
-
-    # Update meta.json to cancelled
-    meta["status"] = "cancelled"
-    meta["error"] = "Cancelled by user"
-    meta["completed_at"] = datetime.utcnow().isoformat()
-    
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-
-    # Update in-memory status
-    run_id = str(meta.get("id", ""))
-    if run_id in _training_jobs:
-        _training_jobs[run_id].status = "cancelled"
-
-    logger.info(f"Training run {run_name} cancelled")
-
-    return {
-        "status": "cancelled",
-        "message": f"Training run '{run_name}' has been cancelled",
-    }
-
-
-async def _monitor_training_progress(
-    run_id: str,
-    run_dir: Path,
-    total_epochs: int,
-    stop_event: asyncio.Event,
-):
-    """Monitor RF-DETR training progress by parsing log file."""
-    log_path = run_dir / "log.txt"
-    meta_path = run_dir / "meta.json"
-    
-    while not stop_event.is_set():
-        try:
-            if log_path.exists():
-                with open(log_path, 'r') as f:
-                    content = f.read()
-                
-                # Find the latest epoch from log
-                # RF-DETR logs like: {"epoch": 0, ...}
-                epoch_matches = re.findall(r'"epoch":\s*(\d+)', content)
-                if epoch_matches:
-                    current_epoch = int(epoch_matches[-1]) + 1  # +1 because epoch is 0-indexed
-                    progress = min(current_epoch / total_epochs, 0.99)  # Cap at 99% until done
-                    
-                    # Update in-memory status
-                    if run_id in _training_jobs:
-                        _training_jobs[run_id].progress = progress
-                        _training_jobs[run_id].current_epoch = current_epoch
-                    
-                    # Update meta.json
-                    if meta_path.exists():
-                        with open(meta_path, 'r') as f:
-                            meta = json.load(f)
-                        meta["progress"] = progress
-                        meta["current_epoch"] = current_epoch
-                        with open(meta_path, 'w') as f:
-                            json.dump(meta, f, indent=2)
-            
-            await asyncio.sleep(5)  # Check every 5 seconds
-        except Exception as e:
-            logger.warning(f"Progress monitor error: {e}")
-            await asyncio.sleep(5)
-
-
-async def _run_training(
-    run_id: str,
-    project_path: Path,
-    run_dir: Path,
-    dataset_path: Path,
-    config: TrainingConfig,
-):
-    """Background task for training."""
-    stop_event = asyncio.Event()
-    monitor_task = None
-    run_name = run_dir.name
-    
-    try:
-        _training_jobs[run_id].status = "running"
-
-        # Update meta
-        meta_path = run_dir / "meta.json"
-        with open(meta_path) as f:
-            meta = json.load(f)
-        meta["status"] = "running"
-        meta["started_at"] = datetime.utcnow().isoformat()
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
-
-        # Start progress monitor for RF-DETR
-        if config.base_model.startswith("rfdetr"):
-            monitor_task = asyncio.create_task(
-                _monitor_training_progress(run_id, run_dir, config.epochs, stop_event)
-            )
-
-        # Run training
-        trainer = ModelTrainer(project_path)
-        result = await trainer.train(
-            run_name=run_dir.name,
-            dataset_path=dataset_path,
-            base_model=config.base_model,
-            config=config.model_dump(),
-        )
-
-        # Stop monitor
-        stop_event.set()
-        if monitor_task:
-            monitor_task.cancel()
-            try:
-                await monitor_task
-            except asyncio.CancelledError:
-                pass
-
-        # Update meta with results
-        now = datetime.utcnow()
-        with open(meta_path) as f:
-            meta = json.load(f)
-        meta["status"] = result["status"]
-        meta["progress"] = 1.0
-        meta["checkpoint_path"] = result.get("checkpoint_path")
-        meta["metrics"] = result.get("metrics")
-        meta["latency_ms"] = result.get("latency_ms")
-        meta["completed_at"] = now.isoformat()
-
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
-
-        project_config = load_project_config(project_path)
-        class_info = {
-            "classes": project_config.get("classes", []),
-            "num_classes": len(project_config.get("classes", [])),
-            "model": config.base_model,
-        }
-        class_info_path = run_dir / "class_info.json"
-        with open(class_info_path, "w") as f_ci:
-            json.dump(class_info, f_ci, indent=2)
-
-        _training_jobs[run_id].status = "completed"
-        _training_jobs[run_id].progress = 1.0
-        _training_jobs[run_id].metrics = result.get("metrics")
-
-        logger.info(f"Training completed: {run_dir.name}")
-
-    except asyncio.CancelledError:
-        logger.info(f"Training cancelled: {run_dir.name}")
-        
-        # Stop monitor
-        stop_event.set()
-        if monitor_task:
-            monitor_task.cancel()
-            try:
-                await monitor_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Update meta to cancelled (may already be done by cancel endpoint)
-        meta_path = run_dir / "meta.json"
-        try:
-            with open(meta_path) as f:
-                meta = json.load(f)
-            if meta.get("status") != "cancelled":
-                meta["status"] = "cancelled"
-                meta["error"] = "Cancelled"
-                meta["completed_at"] = datetime.utcnow().isoformat()
-                with open(meta_path, "w") as f:
-                    json.dump(meta, f, indent=2)
-        except Exception:
-            pass
-        
-        if run_id in _training_jobs:
-            _training_jobs[run_id].status = "cancelled"
-        
-        # Re-raise to properly propagate cancellation
-        raise
-
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-
-        # Stop monitor
-        stop_event.set()
-        if monitor_task:
-            monitor_task.cancel()
-            try:
-                await monitor_task
-            except asyncio.CancelledError:
-                pass
-
-        meta_path = run_dir / "meta.json"
-        with open(meta_path) as f:
-            meta = json.load(f)
-        meta["status"] = "failed"
-        meta["error"] = str(e)
-        meta["completed_at"] = datetime.utcnow().isoformat()
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
-
-        _training_jobs[run_id].status = "failed"
-    
-    finally:
-        # Clean up the task from tracking dict
-        if run_name in _training_tasks:
-            del _training_tasks[run_name]
-
+    info = _tensorboard_processes[tb_key]
+    if info["process"].poll() is None:
+        return {"running": True, "port": info["port"], "url": f"http://localhost:{info['port']}"}
+    del _tensorboard_processes[tb_key]
+    return {"running": False}

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from backend.app.api import annotations, imports, inference, labeling, manual_data, projects, training, videos
+from backend.app.api import annotations, gpu, imports, inference, labeling, manual_data, projects, training, videos
 from backend.app.config import settings
 
 app = FastAPI(
@@ -33,6 +33,7 @@ app.include_router(training.router, prefix="/api")
 app.include_router(inference.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(manual_data.router, prefix="/api")
+app.include_router(gpu.router, prefix="/api")
 
 
 @app.get("/api/health")
@@ -52,7 +53,7 @@ async def get_config():
         "device": settings.device,
         "default_sample_interval": settings.default_sample_interval_seconds,
         "default_tracking_mode": settings.default_tracking_mode,
-        "available_models": ["yolo11n", "yolo11s", "yolo11m", "rfdetr-b", "rfdetr-l"],
+        "available_models": ["nano", "small", "base", "medium", "large"],
     }
 
 
@@ -68,6 +69,9 @@ async def startup():
 async def shutdown():
     """Application shutdown."""
     from backend.app.database import db_manager
+    from backend.app.services.gpu_service import gpu_service
+
+    gpu_service.disconnect()
     await db_manager.close_all()
     logger.info("Application shutdown complete")
 

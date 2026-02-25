@@ -205,7 +205,20 @@ export const api = {
       ),
   },
 
-  // Training
+  // GPU cluster connection
+  gpu: {
+    connect: (password: string) =>
+      request<{ status: string; hostname?: string }>('/gpu/connect', {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      }),
+    disconnect: () =>
+      request<{ status: string }>('/gpu/disconnect', { method: 'POST' }),
+    getStatus: () =>
+      request<import('@/types').GPUStatus>('/gpu/status'),
+  },
+
+  // Training (RF-DETR, GPU cluster)
   training: {
     exportDataset: (projectName: string, config?: import('@/types').DatasetExportConfig) =>
       request<{
@@ -220,29 +233,19 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(config || {}),
       }),
-    start: (projectName: string, data: {
-      name: string
-      label_iteration_id: number
-      config: import('@/types').TrainingConfig
-    }) =>
-      request<{ run_id: number }>(`/projects/${projectName}/training/start`, {
+    submit: (projectName: string, data: import('@/types').TrainingSubmitRequest) =>
+      request<{ job_id: string; run_name: string }>(
+        `/projects/${projectName}/training/submit`,
+        { method: 'POST', body: JSON.stringify(data) }
+      ),
+    cancel: (projectName: string, runName: string) =>
+      request<{ status: string }>(`/projects/${projectName}/training/runs/${runName}/cancel`, {
         method: 'POST',
-        body: JSON.stringify(data),
       }),
     listRuns: (projectName: string) =>
       request<import('@/types').TrainingRun[]>(`/projects/${projectName}/training/runs`),
-    getRun: (projectName: string, runId: number) =>
-      request<import('@/types').TrainingRun>(`/projects/${projectName}/training/runs/${runId}`),
-    getProgress: (projectName: string, runId: number) =>
-      request<{
-        run_id: number
-        status: string
-        progress: number
-        current_epoch: number
-        total_epochs: number
-        metrics?: object
-      }>(`/projects/${projectName}/training/runs/${runId}/progress`),
-    // TensorBoard management
+    streamLogsUrl: (projectName: string, runName: string) =>
+      `${API_BASE}/projects/${projectName}/training/runs/${runName}/logs`,
     startTensorBoard: (projectName: string, runName: string) =>
       request<{ status: string; port: number; url: string }>(
         `/projects/${projectName}/training/runs/${runName}/tensorboard/start`,
@@ -309,6 +312,18 @@ export const api = {
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,
         { method: 'DELETE' }
       ),
+    submitGpu: (projectName: string, data: import('@/types').InferenceGPUSubmitRequest) =>
+      request<{ job_id: string; run_name: string }>(
+        `/projects/${projectName}/inference/submit-gpu`,
+        { method: 'POST', body: JSON.stringify(data) }
+      ),
+    cancelGpu: (projectName: string, jobName: string) =>
+      request<{ status: string }>(
+        `/projects/${projectName}/inference/gpu-jobs/${jobName}/cancel`,
+        { method: 'POST' }
+      ),
+    gpuLogsUrl: (projectName: string, jobName: string) =>
+      `${API_BASE}/projects/${projectName}/inference/gpu-jobs/${jobName}/logs`,
   },
 
   // Import

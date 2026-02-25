@@ -11,12 +11,16 @@ import {
   X,
   Grid3X3,
   CheckCircle2,
+  Server,
+  Monitor,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { useToast } from '@/components/ui/Toaster'
-import type { InferenceConfig } from '@/types'
+import GpuConnectionPanel from '@/components/GpuConnectionPanel'
+import LogViewer from '@/components/LogViewer'
+import type { InferenceConfig, InferenceGPUSubmitRequest, RFDETRModelSize, GPUType } from '@/types'
 
 export default function InferencePage() {
   const { projectName } = useParams<{ projectName: string }>()
@@ -37,6 +41,33 @@ export default function InferencePage() {
     tracking_mode: 'visible_only',
     detection_interval: 5,
   })
+
+  // GPU inference state
+  const [runMode, setRunMode] = useState<'local' | 'gpu'>('gpu')
+  const [gpuInferConfig, setGpuInferConfig] = useState<{
+    run_name: string | null
+    confidence: number
+    frame_interval: number
+    track: boolean
+    track_thresh: number
+    model: RFDETRModelSize
+    gpu_type: GPUType
+    time_limit: string
+    test_only: boolean
+    no_video: boolean
+  }>({
+    run_name: null,
+    confidence: 0.5,
+    frame_interval: 1,
+    track: false,
+    track_thresh: 0.25,
+    model: 'base',
+    gpu_type: 'a100-80',
+    time_limit: '04:00:00',
+    test_only: false,
+    no_video: false,
+  })
+  const [gpuJobName, setGpuJobName] = useState<string | null>(null)
 
   const { data: videos } = useQuery({
     queryKey: ['videos', projectName],
@@ -107,6 +138,48 @@ export default function InferencePage() {
     },
   })
 
+  const { data: gpuStatus } = useQuery({
+    queryKey: ['gpu-status'],
+    queryFn: () => api.gpu.getStatus(),
+    refetchInterval: 10000,
+  })
+
+  const gpuSubmitMutation = useMutation({
+    mutationFn: () => {
+      const req: InferenceGPUSubmitRequest = {
+        run_name: gpuInferConfig.run_name,
+        video_ids: null,
+        test_only: gpuInferConfig.test_only,
+        model: gpuInferConfig.model,
+        confidence: gpuInferConfig.confidence,
+        frame_interval: gpuInferConfig.frame_interval,
+        track: gpuInferConfig.track,
+        track_thresh: gpuInferConfig.track_thresh,
+        track_buffer: 30,
+        match_thresh: 0.8,
+        no_video: gpuInferConfig.no_video,
+        gpu: {
+          gpu_type: gpuInferConfig.gpu_type,
+          num_gpus: 1,
+          time_limit: gpuInferConfig.time_limit,
+        },
+      }
+      return api.inference.submitGpu(projectName!, req)
+    },
+    onSuccess: (result) => {
+      setGpuJobName(result.run_name)
+      setShowRunPanel(false)
+      toast({
+        title: 'Inference submitted to GPU',
+        description: `Job ${result.job_id}`,
+        type: 'success',
+      })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'GPU submission failed', description: error.message, type: 'error' })
+    },
+  })
+
   const deleteMutation = useMutation({
     mutationFn: ({ run, video, inferenceId }: { run: string; video: string; inferenceId: string }) =>
       api.inference.deleteResult(projectName!, run, video, inferenceId),
@@ -139,10 +212,15 @@ export default function InferencePage() {
             Run trained models on project videos &mdash; results are saved automatically
           </p>
         </div>
-        <Button onClick={() => setShowRunPanel(true)} className="gap-2">
-          <Play className="h-4 w-4" />
-          Run Inference
-        </Button>
+        <div className="flex items-center gap-3">
+          <div className="w-64">
+            <GpuConnectionPanel />
+          </div>
+          <Button onClick={() => setShowRunPanel(true)} className="gap-2">
+            <Play className="h-4 w-4" />
+            Run Inference
+          </Button>
+        </div>
       </div>
 
       {/* Results Matrix */}
@@ -408,6 +486,21 @@ export default function InferencePage() {
         </Card>
       )}
 
+      {/* GPU Log Viewer */}
+      {gpuJobName && (
+        <Card className="mb-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">
+              GPU Inference Logs
+              <span className="ml-2 text-xs font-normal text-muted-foreground">{gpuJobName}</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <LogViewer url={api.inference.gpuLogsUrl(projectName!, gpuJobName)} />
+          </CardContent>
+        </Card>
+      )}
+
       {/* Run Inference Slide-over */}
       {showRunPanel && (
         <div className="fixed inset-0 z-50 bg-black/40" onClick={() => setShowRunPanel(false)}>
@@ -423,141 +516,284 @@ export default function InferencePage() {
                 </Button>
               </div>
 
-              {/* Select run */}
-              <div className="mb-6">
-                <label className="text-sm font-medium mb-2 block">
-                  <Zap className="h-4 w-4 inline mr-1" />
-                  Model (Training Run)
-                </label>
-                {completedRuns.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No trained models available</p>
-                ) : (
-                  <div className="space-y-2">
-                    {completedRuns.map((run) => (
-                      <button
-                        key={run.id}
-                        onClick={() =>
-                          setRunTarget((prev) => ({ ...prev!, runId: run.id }))
-                        }
-                        className={`
-                          w-full p-3 rounded-lg border text-left transition-colors
-                          ${runTarget?.runId === run.id
-                            ? 'border-primary bg-primary/10'
-                            : 'border-border hover:border-primary/50'
-                          }
-                        `}
-                      >
-                        <div className="font-medium text-sm">{run.name}</div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <span>{run.base_model}</span>
-                          {run.metrics?.mAP50 && (
-                            <span>• mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Select video */}
-              <div className="mb-6">
-                <label className="text-sm font-medium mb-2 block">
-                  <Video className="h-4 w-4 inline mr-1" />
-                  Video
-                </label>
-                <select
-                  value={runTarget?.videoId || ''}
-                  onChange={(e) =>
-                    setRunTarget((prev) => ({ runId: prev?.runId || 0, videoId: e.target.value }))
-                  }
-                  className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+              {/* Mode tabs */}
+              <div className="flex gap-1 mb-6 p-1 bg-muted rounded-lg">
+                <button
+                  onClick={() => setRunMode('gpu')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-sm font-medium transition-colors ${
+                    runMode === 'gpu' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+                  }`}
                 >
-                  <option value="">Select a video...</option>
-                  {videos?.map((video) => (
-                    <option key={video.id} value={String(video.id)}>
-                      {video.filename}
-                      {video.exclude_from_training ? ' [TEST]' : ''}
-                    </option>
-                  ))}
-                </select>
+                  <Server className="h-3.5 w-3.5" />
+                  GPU Cluster
+                </button>
+                <button
+                  onClick={() => setRunMode('local')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-sm font-medium transition-colors ${
+                    runMode === 'local' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+                  }`}
+                >
+                  <Monitor className="h-3.5 w-3.5" />
+                  Local
+                </button>
               </div>
 
-              {/* Settings */}
-              <div className="mb-6 space-y-4">
-                <h3 className="text-sm font-medium flex items-center gap-1">
-                  <Settings className="h-4 w-4" /> Settings
-                </h3>
-                <div>
-                  <label className="text-sm mb-1 block">
-                    Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
-                  </label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={(config.confidence_threshold || 0.5) * 100}
-                    onChange={(e) =>
-                      setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
-                    }
-                    className="w-full"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block">
-                    Detection Interval: every {config.detection_interval || 5} frames
-                  </label>
-                  <input
-                    type="range"
-                    min={1}
-                    max={15}
-                    value={config.detection_interval || 5}
-                    onChange={(e) =>
-                      setConfig({ ...config, detection_interval: Number(e.target.value) })
-                    }
-                    className="w-full"
-                  />
-                </div>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.enable_tracking}
-                    onChange={(e) => setConfig({ ...config, enable_tracking: e.target.checked })}
-                    className="rounded"
-                  />
-                  <span className="text-sm">Enable tracking</span>
-                </label>
-              </div>
+              {runMode === 'gpu' ? (
+                <>
+                  {/* GPU Inference Config */}
+                  <div className="mb-4">
+                    <label className="text-sm font-medium mb-2 block">Training Run</label>
+                    {completedRuns.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No trained models available</p>
+                    ) : (
+                      <select
+                        value={gpuInferConfig.run_name || ''}
+                        onChange={(e) =>
+                          setGpuInferConfig({
+                            ...gpuInferConfig,
+                            run_name: e.target.value || null,
+                          })
+                        }
+                        className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                      >
+                        <option value="">Latest run</option>
+                        {completedRuns.map((run) => (
+                          <option key={run.id} value={run.name}>
+                            {run.name} {run.metrics?.mAP50 ? `(mAP: ${(run.metrics.mAP50 * 100).toFixed(1)}%)` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
 
-              {/* Run Button */}
-              <Button
-                className="w-full gap-2"
-                disabled={
-                  !runTarget?.runId ||
-                  !runTarget?.videoId ||
-                  runInferenceMutation.isPending ||
-                  loadModelMutation.isPending
-                }
-                onClick={() => {
-                  if (runTarget?.runId && runTarget?.videoId) {
-                    runInferenceMutation.mutate({
-                      runId: runTarget.runId,
-                      videoId: runTarget.videoId,
-                    })
-                  }
-                }}
-              >
-                {runInferenceMutation.isPending || loadModelMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4" />
-                )}
-                {loadModelMutation.isPending
-                  ? 'Loading model...'
-                  : runInferenceMutation.isPending
-                  ? 'Running inference...'
-                  : 'Run & Save'}
-              </Button>
+                  <div className="mb-4">
+                    <label className="text-sm font-medium mb-2 block">GPU Type</label>
+                    <select
+                      value={gpuInferConfig.gpu_type}
+                      onChange={(e) =>
+                        setGpuInferConfig({ ...gpuInferConfig, gpu_type: e.target.value as GPUType })
+                      }
+                      className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                    >
+                      <option value="h200">H200 (141 GB)</option>
+                      <option value="h100-96">H100-96 (96 GB)</option>
+                      <option value="h100-47">H100-47 (47 GB)</option>
+                      <option value="a100-80">A100-80 (80 GB)</option>
+                      <option value="a100-40">A100-40 (40 GB)</option>
+                      <option value="nv">NV (misc)</option>
+                    </select>
+                  </div>
+
+                  <div className="mb-4 space-y-3">
+                    <h3 className="text-sm font-medium flex items-center gap-1">
+                      <Settings className="h-4 w-4" /> Settings
+                    </h3>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Confidence: {(gpuInferConfig.confidence * 100).toFixed(0)}%
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={gpuInferConfig.confidence * 100}
+                        onChange={(e) =>
+                          setGpuInferConfig({ ...gpuInferConfig, confidence: Number(e.target.value) / 100 })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Frame Interval: every {gpuInferConfig.frame_interval} frames
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={15}
+                        value={gpuInferConfig.frame_interval}
+                        onChange={(e) =>
+                          setGpuInferConfig({ ...gpuInferConfig, frame_interval: Number(e.target.value) })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={gpuInferConfig.track}
+                        onChange={(e) => setGpuInferConfig({ ...gpuInferConfig, track: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm">Enable tracking</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={gpuInferConfig.test_only}
+                        onChange={(e) => setGpuInferConfig({ ...gpuInferConfig, test_only: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm">Test-only videos</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={gpuInferConfig.no_video}
+                        onChange={(e) => setGpuInferConfig({ ...gpuInferConfig, no_video: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm">No output video (JSON only)</span>
+                    </label>
+                  </div>
+
+                  <Button
+                    className="w-full gap-2"
+                    disabled={!gpuStatus?.connected || gpuSubmitMutation.isPending}
+                    onClick={() => gpuSubmitMutation.mutate()}
+                  >
+                    {gpuSubmitMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Server className="h-4 w-4" />
+                    )}
+                    {!gpuStatus?.connected ? 'Connect GPU First' : 'Submit to GPU'}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  {/* Local Inference (original) */}
+                  <div className="mb-6">
+                    <label className="text-sm font-medium mb-2 block">
+                      <Zap className="h-4 w-4 inline mr-1" />
+                      Model (Training Run)
+                    </label>
+                    {completedRuns.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No trained models available</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {completedRuns.map((run) => (
+                          <button
+                            key={run.id}
+                            onClick={() =>
+                              setRunTarget((prev) => ({ ...prev!, runId: run.id }))
+                            }
+                            className={`w-full p-3 rounded-lg border text-left transition-colors ${
+                              runTarget?.runId === run.id
+                                ? 'border-primary bg-primary/10'
+                                : 'border-border hover:border-primary/50'
+                            }`}
+                          >
+                            <div className="font-medium text-sm">{run.name}</div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                              <span>{run.model}</span>
+                              {run.metrics?.mAP50 && (
+                                <span>&middot; mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mb-6">
+                    <label className="text-sm font-medium mb-2 block">
+                      <Video className="h-4 w-4 inline mr-1" />
+                      Video
+                    </label>
+                    <select
+                      value={runTarget?.videoId || ''}
+                      onChange={(e) =>
+                        setRunTarget((prev) => ({ runId: prev?.runId || 0, videoId: e.target.value }))
+                      }
+                      className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                    >
+                      <option value="">Select a video...</option>
+                      {videos?.map((video) => (
+                        <option key={video.id} value={String(video.id)}>
+                          {video.filename}
+                          {video.exclude_from_training ? ' [TEST]' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="mb-6 space-y-4">
+                    <h3 className="text-sm font-medium flex items-center gap-1">
+                      <Settings className="h-4 w-4" /> Settings
+                    </h3>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={(config.confidence_threshold || 0.5) * 100}
+                        onChange={(e) =>
+                          setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Detection Interval: every {config.detection_interval || 5} frames
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={15}
+                        value={config.detection_interval || 5}
+                        onChange={(e) =>
+                          setConfig({ ...config, detection_interval: Number(e.target.value) })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={config.enable_tracking}
+                        onChange={(e) => setConfig({ ...config, enable_tracking: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm">Enable tracking</span>
+                    </label>
+                  </div>
+
+                  <Button
+                    className="w-full gap-2"
+                    disabled={
+                      !runTarget?.runId ||
+                      !runTarget?.videoId ||
+                      runInferenceMutation.isPending ||
+                      loadModelMutation.isPending
+                    }
+                    onClick={() => {
+                      if (runTarget?.runId && runTarget?.videoId) {
+                        runInferenceMutation.mutate({
+                          runId: runTarget.runId,
+                          videoId: runTarget.videoId,
+                        })
+                      }
+                    }}
+                  >
+                    {runInferenceMutation.isPending || loadModelMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                    {loadModelMutation.isPending
+                      ? 'Loading model...'
+                      : runInferenceMutation.isPending
+                        ? 'Running inference...'
+                        : 'Run & Save'}
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         </div>

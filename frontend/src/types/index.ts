@@ -104,23 +104,48 @@ export interface Track {
   needs_review: boolean
 }
 
-// Training types
-export interface TrainingConfig {
-  base_model: string
-  image_size: number
-  batch_size: number
-  epochs: number
-  lr_preset: 'small' | 'medium' | 'large'
-  augmentation_preset: 'none' | 'light' | 'standard' | 'heavy'
-  val_split: number
-  test_split: number
-  freeze_backbone: boolean
-  mixed_precision: boolean
-  early_stopping_patience: number
-}
-
+// Training types (RF-DETR only, GPU cluster execution)
+export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large'
+export type GPUType = 'h200' | 'h100-96' | 'h100-47' | 'a100-80' | 'a100-40' | 'nv'
 export type DataSource = 'manual_data' | 'imports'
 export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'all_splits'
+
+export interface TrainingConfig {
+  model: RFDETRModelSize
+  epochs: number
+  batch_size: number | null  // null = auto based on GPU
+  image_size: number
+  lr: number
+  patience: number
+  grad_accum: number
+}
+
+export interface GPUConfig {
+  gpu_type: GPUType
+  num_gpus: number
+  time_limit: string
+}
+
+export interface DataConfig {
+  sources?: DataSource[] | null
+  manual_split_strategy: ManualDataSplitStrategy
+  manual_datasets?: string[] | null
+  exclude_manual_datasets?: string[] | null
+  filter_classes?: string[] | null
+  max_frames_per_class?: number | null
+  train_split: number
+  val_split: number
+  test_split: number
+}
+
+export interface TrainingSubmitRequest {
+  label?: string | null
+  training: TrainingConfig
+  gpu: GPUConfig
+  data: DataConfig
+  infer_after: boolean
+  infer_test_only: boolean
+}
 
 export interface DatasetExportConfig {
   format?: 'yolo' | 'coco' | 'both'
@@ -128,14 +153,17 @@ export interface DatasetExportConfig {
   split_by_video?: boolean
   data_sources?: DataSource[] | null
   manual_data_split_strategy?: ManualDataSplitStrategy
+  manual_datasets?: string[] | null
+  exclude_manual_datasets?: string[] | null
 }
 
 export interface TrainingRun {
   id: number
   name: string
-  label_iteration_id: number
-  base_model: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout'
+  model: string
+  gpu_type?: string
+  slurm_job_id?: string
   progress: number
   metrics?: {
     mAP50?: number
@@ -146,9 +174,31 @@ export interface TrainingRun {
   checkpoint_path?: string
   latency_ms?: number
   tensorboard_url?: string
+  config?: Record<string, unknown>
   started_at?: string
   completed_at?: string
   created_at: string
+}
+
+export interface InferenceGPUSubmitRequest {
+  run_name?: string | null
+  video_ids?: string[] | null
+  test_only: boolean
+  model: RFDETRModelSize
+  confidence: number
+  frame_interval: number
+  track: boolean
+  track_thresh: number
+  track_buffer: number
+  match_thresh: number
+  no_video: boolean
+  gpu: GPUConfig
+}
+
+export interface GPUStatus {
+  connected: boolean
+  host: string
+  user: string
 }
 
 // Labeling types

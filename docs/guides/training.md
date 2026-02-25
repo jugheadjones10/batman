@@ -120,7 +120,29 @@ Or use gradient accumulation:
 
 ## Step 4: Train Model
 
-### Local Training
+### Local Training (e.g. Windows with GPU)
+
+When you train on a **local machine** with a GPU (e.g. a Windows PC with CUDA), run the CLI from the project root. Output and TensorBoard logs are written to the run directory on disk.
+
+```bash
+python -m cli.train \
+  --project data/projects/MyProject \
+  --model base \
+  --epochs 50 \
+  --batch-size 8 \
+  --image-size 640 \
+  --lr 1e-4 \
+  --patience 10
+```
+
+By default the run is saved under `data/projects/MyProject/runs/rfdetr_<timestamp>`. To track training in TensorBoard, either:
+
+- **From the Batman UI**: Open the Training page; local runs (no cluster) appear in the list with *gpu_type: local*. Click **Launch TensorBoard** to start TensorBoard and open the link.
+- **From the command line**: `tensorboard --logdir data/projects/MyProject/runs/<run_name> --port 6006` then open http://localhost:6006.
+
+No SSHFS or cluster connection is required for local GPU training.
+
+### Local Training (explicit output dir)
 
 ```bash
 python -m cli.train \
@@ -148,6 +170,24 @@ Use `run_training.sh` to push data, train, and sync results in one command:
 ```
 
 This automatically pushes your local `manual_data/`, frame metadata, labels, and `project.json` to the cluster before training, and syncs JSON metadata back when done. Requires the SSHFS mount (`./mount_gpu.sh`).
+
+### Web UI (GPU Cluster)
+
+The Batman web UI can submit training directly to the GPU cluster without needing SSH or shell scripts:
+
+1. Start the dev server: `./scripts/run_dev.sh`
+2. Navigate to **Training** in the sidebar
+3. Enter your SSH password in the **GPU Connection Panel** (top-right)
+4. Configure:
+   - **Model Size** (nano / small / base / medium / large)
+   - **GPU Type** and number of GPUs
+   - **Training Params** (epochs, batch size, learning rate, patience, etc.)
+   - **Data Sources** (manual data, imports, dataset filters)
+5. Click **Submit Training**
+
+The UI pushes your project data to the cluster, generates a SLURM script, submits it via `sbatch`, and streams the job logs in real time. You can cancel jobs, launch TensorBoard, and view metrics directly from the UI.
+
+Results are automatically synced back to your local project when training completes.
 
 ### From the Cluster Directly
 
@@ -187,9 +227,15 @@ tail -f logs/slurm_*_rfdetr-*.out
 
 ### Check TensorBoard
 
+**Local GPU training** (run directory on this machine):
+
 ```bash
-tensorboard --logdir runs/my_training_run/tensorboard --port 6006
+tensorboard --logdir runs/my_training_run --port 6006
 ```
+
+Or use the Batman UI: open the Training page and click **Launch TensorBoard** for the run (works for both cluster runs with SSHFS and local runs).
+
+**Cluster training**: If you use the SSHFS mount (`./mount_gpu.sh`), launch TensorBoard from the UI so it reads from the mounted run directory. Otherwise run on the cluster: `tensorboard --logdir <run_path>/tensorboard --port 6006`.
 
 Open http://localhost:6006
 

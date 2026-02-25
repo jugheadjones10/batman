@@ -220,7 +220,9 @@ OPT_FLAGS=""
 #-------------------------------------------------------------------------------
 # Generate SLURM Script (identical to submit_inference.sh)
 #-------------------------------------------------------------------------------
-SLURM_SCRIPT=$(mktemp /tmp/inference_slurm_XXXXXX.sh)
+SLURM_SCRIPT=$(mktemp /tmp/inference_slurm_XXXXXX)
+mv "$SLURM_SCRIPT" "${SLURM_SCRIPT}.sh"
+SLURM_SCRIPT="${SLURM_SCRIPT}.sh"
 
 cat > "$SLURM_SCRIPT" << SLURM_EOF
 #!/bin/bash

@@ -16,6 +16,8 @@ import {
   LineChart,
   ExternalLink,
   Square,
+  XCircle,
+  Eye,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -23,33 +25,79 @@ import { Input } from '@/components/ui/Input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Progress } from '@/components/ui/Progress'
 import { useToast } from '@/components/ui/Toaster'
-import type { TrainingConfig, TrainingRun, DataSource, ManualDataSplitStrategy } from '@/types'
+import GpuConnectionPanel from '@/components/GpuConnectionPanel'
+import LogViewer from '@/components/LogViewer'
+import type {
+  TrainingConfig,
+  GPUConfig,
+  DataConfig,
+  TrainingSubmitRequest,
+  TrainingRun,
+  DataSource,
+  ManualDataSplitStrategy,
+  RFDETRModelSize,
+  GPUType,
+} from '@/types'
+
+const MODEL_OPTIONS: { id: RFDETRModelSize; name: string; desc: string }[] = [
+  { id: 'nano', name: 'RF-DETR Nano', desc: 'Fastest' },
+  { id: 'small', name: 'RF-DETR Small', desc: 'Fast & light' },
+  { id: 'base', name: 'RF-DETR Base', desc: 'Balanced' },
+  { id: 'medium', name: 'RF-DETR Medium', desc: 'More accurate' },
+  { id: 'large', name: 'RF-DETR Large', desc: 'Most accurate' },
+]
+
+const GPU_OPTIONS: { id: GPUType; name: string; desc: string }[] = [
+  { id: 'h200', name: 'H200', desc: '141 GB' },
+  { id: 'h100-96', name: 'H100-96', desc: '96 GB' },
+  { id: 'h100-47', name: 'H100-47', desc: '47 GB' },
+  { id: 'a100-80', name: 'A100-80', desc: '80 GB' },
+  { id: 'a100-40', name: 'A100-40', desc: '40 GB' },
+  { id: 'nv', name: 'NV', desc: 'Misc GPU' },
+]
 
 export default function TrainingPage() {
   const { projectName } = useParams<{ projectName: string }>()
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
-  const [runName, setRunName] = useState('')
-  const [config, setConfig] = useState<TrainingConfig>({
-    base_model: 'yolo11s',
+  // Config state
+  const [label, setLabel] = useState('')
+  const [training, setTraining] = useState<TrainingConfig>({
+    model: 'base',
+    epochs: 50,
+    batch_size: null,
     image_size: 640,
-    batch_size: 16,
-    epochs: 100,
-    lr_preset: 'medium',
-    augmentation_preset: 'standard',
-    val_split: 0.2,
-    test_split: 0.1,
-    freeze_backbone: false,
-    mixed_precision: true,
-    early_stopping_patience: 20,
+    lr: 1e-4,
+    patience: 10,
+    grad_accum: 1,
   })
+  const [gpu, setGpu] = useState<GPUConfig>({
+    gpu_type: 'a100-80',
+    num_gpus: 1,
+    time_limit: '24:00:00',
+  })
+  const [data, setData] = useState<DataConfig>({
+    sources: null,
+    manual_split_strategy: 'train_only',
+    manual_datasets: null,
+    exclude_manual_datasets: null,
+    filter_classes: null,
+    max_frames_per_class: null,
+    train_split: 0.70,
+    val_split: 0.15,
+    test_split: 0.15,
+  })
+  const [inferAfter, setInferAfter] = useState(false)
+  const [inferTestOnly, setInferTestOnly] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
-  // Data source selection state
+  // Data source toggles
   const [includeManualData, setIncludeManualData] = useState(true)
   const [includeImports, setIncludeImports] = useState(true)
-  const [splitStrategy, setSplitStrategy] = useState<ManualDataSplitStrategy>('train_only')
+
+  // Log viewer state
+  const [selectedRunName, setSelectedRunName] = useState<string | null>(null)
 
   const { data: project } = useQuery({
     queryKey: ['project', projectName],
@@ -57,9 +105,21 @@ export default function TrainingPage() {
     enabled: !!projectName,
   })
 
+  const { data: gpuStatus } = useQuery({
+    queryKey: ['gpu-status'],
+    queryFn: () => api.gpu.getStatus(),
+    refetchInterval: 10000,
+  })
+
   const { data: manualImages } = useQuery({
     queryKey: ['manual-data-images', projectName],
     queryFn: () => api.manualData.listImages(projectName!, 0, 1),
+    enabled: !!projectName,
+  })
+
+  const { data: manualDatasets } = useQuery({
+    queryKey: ['manual-data-datasets', projectName],
+    queryFn: () => api.manualData.listDatasets(projectName!),
     enabled: !!projectName,
   })
 
@@ -71,6 +131,7 @@ export default function TrainingPage() {
 
   const hasManualData = (manualImages?.total ?? 0) > 0
   const hasImports = (importedDatasets?.length ?? 0) > 0
+  const gpuConnected = gpuStatus?.connected ?? false
 
   const { data: runs, isLoading: runsLoading } = useQuery({
     queryKey: ['training-runs', projectName],
@@ -79,22 +140,22 @@ export default function TrainingPage() {
     refetchInterval: 5000,
   })
 
-  const buildExportConfig = () => {
-    const sources: DataSource[] = []
-    if (includeManualData && hasManualData) sources.push('manual_data')
-    if (includeImports && hasImports) sources.push('imports')
-    return {
-      data_sources: sources.length > 0 ? sources : null,
-      manual_data_split_strategy: splitStrategy,
-    }
-  }
-
   const exportMutation = useMutation({
-    mutationFn: () => api.training.exportDataset(projectName!, buildExportConfig()),
-    onSuccess: (data) => {
+    mutationFn: () => {
+      const sources: DataSource[] = []
+      if (includeManualData && hasManualData) sources.push('manual_data')
+      if (includeImports && hasImports) sources.push('imports')
+      return api.training.exportDataset(projectName!, {
+        data_sources: sources.length > 0 ? sources : null,
+        manual_data_split_strategy: data.manual_split_strategy,
+        manual_datasets: data.manual_datasets,
+        exclude_manual_datasets: data.exclude_manual_datasets,
+      })
+    },
+    onSuccess: (result) => {
       toast({
         title: 'Dataset exported',
-        description: `${data.train_images} train, ${data.val_images} val images`,
+        description: `${result.train_images} train, ${result.val_images} val images`,
         type: 'success',
       })
     },
@@ -103,33 +164,38 @@ export default function TrainingPage() {
     },
   })
 
-  const trainMutation = useMutation({
-    mutationFn: () =>
-      api.training.start(projectName!, {
-        name: runName || (() => {
-          const d = new Date()
-          const pad = (n: number) => String(n).padStart(2, '0')
-          return `rfdetr_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
-        })(),
-        label_iteration_id: project?.current_iteration || 0,
-        config,
-      }),
-    onSuccess: () => {
+  const submitMutation = useMutation({
+    mutationFn: () => {
+      const sources: DataSource[] = []
+      if (includeManualData && hasManualData) sources.push('manual_data')
+      if (includeImports && hasImports) sources.push('imports')
+
+      const req: TrainingSubmitRequest = {
+        label: label || null,
+        training,
+        gpu,
+        data: { ...data, sources: sources.length > 0 ? sources : null },
+        infer_after: inferAfter,
+        infer_test_only: inferTestOnly,
+      }
+      return api.training.submit(projectName!, req)
+    },
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['training-runs', projectName] })
-      toast({ title: 'Training started', type: 'success' })
-      setRunName('')
+      toast({ title: 'Training submitted', description: `Job ${result.job_id}`, type: 'success' })
+      setSelectedRunName(result.run_name)
+      setLabel('')
     },
     onError: (error: Error) => {
-      toast({ title: 'Training failed to start', description: error.message, type: 'error' })
+      toast({ title: 'Submission failed', description: error.message, type: 'error' })
     },
   })
 
-  const handleStartTraining = async () => {
+  const handleSubmit = async () => {
     if (!project?.annotation_count) {
       toast({ title: 'No annotations', description: 'Add annotations before training', type: 'error' })
       return
     }
-
     const sources: DataSource[] = []
     if (includeManualData && hasManualData) sources.push('manual_data')
     if (includeImports && hasImports) sources.push('imports')
@@ -137,13 +203,17 @@ export default function TrainingPage() {
       toast({ title: 'No data sources', description: 'Enable at least one data source', type: 'error' })
       return
     }
-
+    // Export first, then submit
     await exportMutation.mutateAsync()
-    trainMutation.mutate()
+    submitMutation.mutate()
   }
 
+  const logsUrl = selectedRunName
+    ? api.training.streamLogsUrl(projectName!, selectedRunName)
+    : null
+
   return (
-    <div className="container max-w-6xl py-8 px-6 lg:px-8">
+    <div className="container max-w-7xl py-8 px-6 lg:px-8">
       <div className="flex items-start justify-between mb-8">
         <div>
           <h1 className="font-display text-3xl font-bold flex items-center gap-3">
@@ -151,33 +221,158 @@ export default function TrainingPage() {
             Model Training
           </h1>
           <p className="text-muted-foreground mt-1">
-            Fine-tune detection models on your labeled data
+            Train RF-DETR models on the GPU cluster
           </p>
+        </div>
+        <div className="w-72">
+          <GpuConnectionPanel />
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Training config */}
+        {/* ─── Section 1: Configuration ─── */}
         <div className="lg:col-span-2 space-y-6">
           <Card>
             <CardHeader>
               <CardTitle>Training Configuration</CardTitle>
-              <CardDescription>
-                Configure your training run
-              </CardDescription>
+              <CardDescription>RF-DETR model training on GPU cluster</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Run name */}
+              {/* Run label */}
               <div>
-                <label className="text-sm font-medium mb-2 block">Run Name</label>
+                <label className="text-sm font-medium mb-2 block">Run Label (optional)</label>
                 <Input
-                  placeholder="my-detector-v1"
-                  value={runName}
-                  onChange={(e) => setRunName(e.target.value)}
+                  placeholder="e.g. experiment-v2"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
                 />
+                <p className="text-xs text-muted-foreground mt-1">Appended to auto-generated run name</p>
               </div>
 
-              {/* Data Sources */}
+              {/* Model selection */}
+              <div>
+                <label className="text-sm font-medium mb-2 block">Model Size</label>
+                <div className="grid grid-cols-5 gap-2">
+                  {MODEL_OPTIONS.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => setTraining({ ...training, model: m.id })}
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        training.model === m.id
+                          ? 'border-primary bg-primary/10'
+                          : 'border-border hover:border-primary/50'
+                      }`}
+                    >
+                      <div className="font-medium text-sm">{m.name}</div>
+                      <div className="text-xs text-muted-foreground">{m.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* GPU config */}
+              <div>
+                <label className="text-sm font-medium mb-2 block">GPU Configuration</label>
+                <div className="grid grid-cols-6 gap-2 mb-3">
+                  {GPU_OPTIONS.map((g) => (
+                    <button
+                      key={g.id}
+                      onClick={() => setGpu({ ...gpu, gpu_type: g.id })}
+                      className={`p-2.5 rounded-lg border text-center transition-colors ${
+                        gpu.gpu_type === g.id
+                          ? 'border-primary bg-primary/10'
+                          : 'border-border hover:border-primary/50'
+                      }`}
+                    >
+                      <div className="font-medium text-xs">{g.name}</div>
+                      <div className="text-[10px] text-muted-foreground">{g.desc}</div>
+                    </button>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Num GPUs</label>
+                    <select
+                      value={gpu.num_gpus}
+                      onChange={(e) => setGpu({ ...gpu, num_gpus: Number(e.target.value) })}
+                      className="w-full h-9 px-3 rounded-md border border-border bg-background text-sm"
+                    >
+                      {[1, 2, 3, 4].map((n) => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Time Limit</label>
+                    <select
+                      value={gpu.time_limit}
+                      onChange={(e) => setGpu({ ...gpu, time_limit: e.target.value })}
+                      className="w-full h-9 px-3 rounded-md border border-border bg-background text-sm"
+                    >
+                      <option value="03:00:00">3 hours</option>
+                      <option value="06:00:00">6 hours</option>
+                      <option value="12:00:00">12 hours</option>
+                      <option value="24:00:00">24 hours</option>
+                      <option value="48:00:00">48 hours</option>
+                      <option value="72:00:00">72 hours</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Training params */}
+              <div className="grid grid-cols-4 gap-4">
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Epochs</label>
+                  <Input
+                    type="number"
+                    value={training.epochs}
+                    onChange={(e) => setTraining({ ...training, epochs: Number(e.target.value) })}
+                    min={1}
+                    max={1000}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Batch Size</label>
+                  <Input
+                    type="number"
+                    value={training.batch_size ?? ''}
+                    onChange={(e) =>
+                      setTraining({
+                        ...training,
+                        batch_size: e.target.value ? Number(e.target.value) : null,
+                      })
+                    }
+                    placeholder="auto"
+                    min={1}
+                    max={128}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Learning Rate</label>
+                  <Input
+                    type="number"
+                    value={training.lr}
+                    onChange={(e) => setTraining({ ...training, lr: Number(e.target.value) })}
+                    step={0.0001}
+                    min={0.00001}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Image Size</label>
+                  <select
+                    value={training.image_size}
+                    onChange={(e) => setTraining({ ...training, image_size: Number(e.target.value) })}
+                    className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                  >
+                    {[320, 416, 512, 560, 640, 800, 1024].map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Data sources */}
               {(hasManualData || hasImports) && (
                 <div>
                   <label className="text-sm font-medium mb-2 block">Data Sources</label>
@@ -193,9 +388,7 @@ export default function TrainingPage() {
                           />
                           <span className="text-sm">
                             Manual Data
-                            <span className="text-muted-foreground ml-1">
-                              ({manualImages?.total ?? 0} images)
-                            </span>
+                            <span className="text-muted-foreground ml-1">({manualImages?.total ?? 0} images)</span>
                           </span>
                         </label>
                       )}
@@ -209,9 +402,7 @@ export default function TrainingPage() {
                           />
                           <span className="text-sm">
                             Imported Datasets
-                            <span className="text-muted-foreground ml-1">
-                              ({importedDatasets?.length ?? 0} datasets)
-                            </span>
+                            <span className="text-muted-foreground ml-1">({importedDatasets?.length ?? 0} datasets)</span>
                           </span>
                         </label>
                       )}
@@ -223,132 +414,61 @@ export default function TrainingPage() {
                           Manual Data Strategy
                         </label>
                         <select
-                          value={splitStrategy}
-                          onChange={(e) => setSplitStrategy(e.target.value as ManualDataSplitStrategy)}
+                          value={data.manual_split_strategy}
+                          onChange={(e) =>
+                            setData({ ...data, manual_split_strategy: e.target.value as ManualDataSplitStrategy })
+                          }
                           className="w-full h-9 px-3 rounded-md border border-border bg-background text-sm"
                         >
                           <option value="proportional">Proportional - Distribute across all splits</option>
-                          <option value="val_only">Validation Only - Use only for model evaluation</option>
-                          <option value="train_only">Training Only - Use only for training</option>
-                          <option value="all_splits">All Splits - Include in every split</option>
+                          <option value="val_only">Validation Only</option>
+                          <option value="train_only">Training Only</option>
+                          <option value="all_splits">All Splits</option>
                         </select>
                       </div>
                     )}
+
+                    {/* Manual dataset filter */}
+                    {hasManualData &&
+                      includeManualData &&
+                      manualDatasets?.datasets &&
+                      manualDatasets.datasets.length > 1 && (
+                        <div>
+                          <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+                            Filter Manual Datasets (leave empty for all)
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            {manualDatasets.datasets.map((ds) => {
+                              const selected = data.manual_datasets?.includes(ds.name) ?? false
+                              return (
+                                <button
+                                  key={ds.name}
+                                  onClick={() => {
+                                    const current = data.manual_datasets ?? []
+                                    const next = selected
+                                      ? current.filter((n) => n !== ds.name)
+                                      : [...current, ds.name]
+                                    setData({
+                                      ...data,
+                                      manual_datasets: next.length > 0 ? next : null,
+                                    })
+                                  }}
+                                  className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                                    selected
+                                      ? 'border-primary bg-primary/10 text-primary'
+                                      : 'border-border hover:border-primary/50'
+                                  }`}
+                                >
+                                  {ds.name} ({ds.image_count})
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
                   </div>
                 </div>
               )}
-
-              {/* Base model */}
-              <div>
-                <label className="text-sm font-medium mb-2 block">Base Model</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: 'yolo11n', name: 'YOLO11-N', desc: 'Fastest, smallest' },
-                    { id: 'yolo11s', name: 'YOLO11-S', desc: 'Good balance' },
-                    { id: 'yolo11m', name: 'YOLO11-M', desc: 'More accurate' },
-                    { id: 'rfdetr-b', name: 'RF-DETR-B', desc: 'Transformer-based' },
-                    { id: 'rfdetr-l', name: 'RF-DETR-L', desc: 'Largest, most accurate' },
-                  ].map((model) => (
-                    <button
-                      key={model.id}
-                      onClick={() => setConfig({ ...config, base_model: model.id })}
-                      className={`
-                        p-3 rounded-lg border text-left transition-colors
-                        ${config.base_model === model.id
-                          ? 'border-primary bg-primary/10'
-                          : 'border-border hover:border-primary/50'
-                        }
-                      `}
-                    >
-                      <div className="font-medium text-sm">{model.name}</div>
-                      <div className="text-xs text-muted-foreground">{model.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Basic params */}
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Epochs</label>
-                  <Input
-                    type="number"
-                    value={config.epochs}
-                    onChange={(e) => setConfig({ ...config, epochs: Number(e.target.value) })}
-                    min={1}
-                    max={1000}
-                  />
-                </div>
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Batch Size</label>
-                  <Input
-                    type="number"
-                    value={config.batch_size}
-                    onChange={(e) => setConfig({ ...config, batch_size: Number(e.target.value) })}
-                    min={1}
-                    max={128}
-                  />
-                </div>
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Image Size</label>
-                  <select
-                    value={config.image_size}
-                    onChange={(e) => setConfig({ ...config, image_size: Number(e.target.value) })}
-                    className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
-                  >
-                    <option value={320}>320</option>
-                    <option value={416}>416</option>
-                    <option value={512}>512</option>
-                    <option value={640}>640</option>
-                    <option value={800}>800</option>
-                    <option value={1024}>1024</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Learning rate */}
-              <div>
-                <label className="text-sm font-medium mb-2 block">Learning Rate</label>
-                <div className="flex gap-2">
-                  {['small', 'medium', 'large'].map((preset) => (
-                    <button
-                      key={preset}
-                      onClick={() => setConfig({ ...config, lr_preset: preset as any })}
-                      className={`
-                        flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors
-                        ${config.lr_preset === preset
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted hover:bg-muted/80'
-                        }
-                      `}
-                    >
-                      {preset.charAt(0).toUpperCase() + preset.slice(1)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Augmentation */}
-              <div>
-                <label className="text-sm font-medium mb-2 block">Augmentation</label>
-                <div className="flex gap-2">
-                  {['none', 'light', 'standard', 'heavy'].map((preset) => (
-                    <button
-                      key={preset}
-                      onClick={() => setConfig({ ...config, augmentation_preset: preset as any })}
-                      className={`
-                        flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors
-                        ${config.augmentation_preset === preset
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted hover:bg-muted/80'
-                        }
-                      `}
-                    >
-                      {preset.charAt(0).toUpperCase() + preset.slice(1)}
-                    </button>
-                  ))}
-                </div>
-              </div>
 
               {/* Advanced options */}
               <div>
@@ -368,73 +488,152 @@ export default function TrainingPage() {
                     animate={{ opacity: 1, height: 'auto' }}
                     className="mt-4 space-y-4 pt-4 border-t border-border"
                   >
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                       <div>
-                        <label className="text-sm font-medium mb-2 block">Validation Split</label>
+                        <label className="text-sm font-medium mb-2 block">Patience</label>
                         <Input
                           type="number"
-                          value={config.val_split}
-                          onChange={(e) => setConfig({ ...config, val_split: Number(e.target.value) })}
+                          value={training.patience}
+                          onChange={(e) => setTraining({ ...training, patience: Number(e.target.value) })}
+                          min={1}
+                          max={100}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium mb-2 block">Grad Accumulation</label>
+                        <Input
+                          type="number"
+                          value={training.grad_accum}
+                          onChange={(e) => setTraining({ ...training, grad_accum: Number(e.target.value) })}
+                          min={1}
+                          max={16}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium mb-2 block">Max Frames/Class</label>
+                        <Input
+                          type="number"
+                          value={data.max_frames_per_class ?? ''}
+                          onChange={(e) =>
+                            setData({
+                              ...data,
+                              max_frames_per_class: e.target.value ? Number(e.target.value) : null,
+                            })
+                          }
+                          placeholder="unlimited"
+                          min={1}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Class filter */}
+                    {project?.classes && project.classes.length > 0 && (
+                      <div>
+                        <label className="text-sm font-medium mb-2 block">Filter Classes (leave empty for all)</label>
+                        <div className="flex flex-wrap gap-2">
+                          {project.classes.map((cls) => {
+                            const selected = data.filter_classes?.includes(cls) ?? false
+                            return (
+                              <button
+                                key={cls}
+                                onClick={() => {
+                                  const current = data.filter_classes ?? []
+                                  const next = selected
+                                    ? current.filter((c) => c !== cls)
+                                    : [...current, cls]
+                                  setData({ ...data, filter_classes: next.length > 0 ? next : null })
+                                }}
+                                className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                                  selected
+                                    ? 'border-primary bg-primary/10 text-primary'
+                                    : 'border-border hover:border-primary/50'
+                                }`}
+                              >
+                                {cls}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Splits */}
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <label className="text-sm font-medium mb-2 block">Train Split</label>
+                        <Input
+                          type="number"
+                          value={data.train_split}
+                          onChange={(e) => setData({ ...data, train_split: Number(e.target.value) })}
                           min={0.1}
+                          max={1}
+                          step={0.05}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium mb-2 block">Val Split</label>
+                        <Input
+                          type="number"
+                          value={data.val_split}
+                          onChange={(e) => setData({ ...data, val_split: Number(e.target.value) })}
+                          min={0.05}
                           max={0.5}
                           step={0.05}
                         />
                       </div>
                       <div>
-                        <label className="text-sm font-medium mb-2 block">Early Stopping</label>
+                        <label className="text-sm font-medium mb-2 block">Test Split</label>
                         <Input
                           type="number"
-                          value={config.early_stopping_patience}
-                          onChange={(e) =>
-                            setConfig({ ...config, early_stopping_patience: Number(e.target.value) })
-                          }
-                          min={5}
-                          max={100}
+                          value={data.test_split}
+                          onChange={(e) => setData({ ...data, test_split: Number(e.target.value) })}
+                          min={0}
+                          max={0.5}
+                          step={0.05}
                         />
                       </div>
                     </div>
 
+                    {/* Post-training inference */}
                     <div className="flex items-center gap-6">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={config.freeze_backbone}
-                          onChange={(e) =>
-                            setConfig({ ...config, freeze_backbone: e.target.checked })
-                          }
+                          checked={inferAfter}
+                          onChange={(e) => setInferAfter(e.target.checked)}
                           className="rounded"
                         />
-                        <span className="text-sm">Freeze backbone</span>
+                        <span className="text-sm">Run inference after training</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={config.mixed_precision}
-                          onChange={(e) =>
-                            setConfig({ ...config, mixed_precision: e.target.checked })
-                          }
-                          className="rounded"
-                        />
-                        <span className="text-sm">Mixed precision</span>
-                      </label>
+                      {inferAfter && (
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={inferTestOnly}
+                            onChange={(e) => setInferTestOnly(e.target.checked)}
+                            className="rounded"
+                          />
+                          <span className="text-sm">Test-only videos</span>
+                        </label>
+                      )}
                     </div>
                   </motion.div>
                 )}
               </div>
 
-              {/* Start button */}
+              {/* Action buttons */}
               <div className="flex gap-2 pt-4">
                 <Button
-                  onClick={handleStartTraining}
-                  disabled={trainMutation.isPending || exportMutation.isPending}
+                  onClick={handleSubmit}
+                  disabled={!gpuConnected || submitMutation.isPending || exportMutation.isPending}
                   className="gap-2"
                 >
-                  {trainMutation.isPending ? (
+                  {submitMutation.isPending || exportMutation.isPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Play className="h-4 w-4" />
                   )}
-                  Start Training
+                  {!gpuConnected ? 'Connect GPU First' : 'Submit Training'}
                 </Button>
                 <Button
                   variant="outline"
@@ -452,16 +651,31 @@ export default function TrainingPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* ─── Section 3: Log Viewer ─── */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">
+                Job Logs
+                {selectedRunName && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    {selectedRunName}
+                  </span>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <LogViewer url={logsUrl} />
+            </CardContent>
+          </Card>
         </div>
 
-        {/* Training runs sidebar */}
+        {/* ─── Section 2: Active/Recent Jobs ─── */}
         <div className="space-y-6">
           <Card>
             <CardHeader>
               <CardTitle>Training Runs</CardTitle>
-              <CardDescription>
-                {runs?.length || 0} total runs
-              </CardDescription>
+              <CardDescription>{runs?.length || 0} total runs</CardDescription>
             </CardHeader>
             <CardContent>
               {runsLoading ? (
@@ -471,13 +685,17 @@ export default function TrainingPage() {
                   ))}
                 </div>
               ) : runs?.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">
-                  No training runs yet
-                </p>
+                <p className="text-sm text-muted-foreground text-center py-8">No training runs yet</p>
               ) : (
                 <div className="space-y-3">
                   {runs?.map((run) => (
-                    <TrainingRunCard key={run.id} run={run} projectName={projectName!} />
+                    <TrainingRunCard
+                      key={run.id}
+                      run={run}
+                      projectName={projectName!}
+                      isSelected={selectedRunName === run.name}
+                      onSelect={() => setSelectedRunName(run.name)}
+                    />
                   ))}
                 </div>
               )}
@@ -489,46 +707,60 @@ export default function TrainingPage() {
   )
 }
 
-function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: string }) {
+function TrainingRunCard({
+  run,
+  projectName,
+  isSelected,
+  onSelect,
+}: {
+  run: TrainingRun
+  projectName: string
+  isSelected: boolean
+  onSelect: () => void
+}) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const [isStartingTB, setIsStartingTB] = useState(false)
 
+  const cancelMutation = useMutation({
+    mutationFn: () => api.training.cancel(projectName, run.name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['training-runs', projectName] })
+      toast({ title: 'Job cancelled', type: 'success' })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Cancel failed', description: error.message, type: 'error' })
+    },
+  })
+
   const statusColors: Record<string, string> = {
     pending: 'text-muted-foreground',
+    queued: 'text-yellow-500',
     running: 'text-accent',
     completed: 'text-green-500',
     failed: 'text-destructive',
-    stopped: 'text-muted-foreground',
+    cancelled: 'text-muted-foreground',
+    timeout: 'text-orange-500',
   }
 
-  const statusIcons: Record<string, typeof Clock> = {
+  const StatusIcon = {
     pending: Clock,
+    queued: Clock,
     running: Loader2,
     completed: Check,
     failed: X,
-    stopped: Square,
-  }
-
-  const Icon = statusIcons[run.status] || Clock
+    cancelled: XCircle,
+    timeout: Clock,
+  }[run.status] || Clock
 
   const startTensorBoard = async () => {
     setIsStartingTB(true)
     try {
       const result = await api.training.startTensorBoard(projectName, run.name)
-      toast({
-        title: 'TensorBoard started',
-        description: `Running at ${result.url}`,
-        type: 'success',
-      })
-      // Refresh runs to get the new tensorboard_url
+      toast({ title: 'TensorBoard started', description: `Running at ${result.url}`, type: 'success' })
       queryClient.invalidateQueries({ queryKey: ['training-runs', projectName] })
     } catch (error: any) {
-      toast({
-        title: 'Failed to start TensorBoard',
-        description: error.message,
-        type: 'error',
-      })
+      toast({ title: 'Failed to start TensorBoard', description: error.message, type: 'error' })
     } finally {
       setIsStartingTB(false)
     }
@@ -540,33 +772,60 @@ function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: 
       toast({ title: 'TensorBoard stopped', type: 'success' })
       queryClient.invalidateQueries({ queryKey: ['training-runs', projectName] })
     } catch (error: any) {
-      toast({
-        title: 'Failed to stop TensorBoard',
-        description: error.message,
-        type: 'error',
-      })
+      toast({ title: 'Failed to stop TensorBoard', description: error.message, type: 'error' })
     }
   }
 
   return (
-    <div className="p-4 rounded-lg border border-border hover:border-primary/30 transition-colors">
+    <div
+      className={`p-4 rounded-lg border transition-colors cursor-pointer ${
+        isSelected ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/30'
+      }`}
+      onClick={onSelect}
+    >
       <div className="flex items-start justify-between mb-2">
-        <div>
-          <h4 className="font-medium text-sm">{run.name}</h4>
-          <p className="text-xs text-muted-foreground">{run.base_model}</p>
+        <div className="min-w-0">
+          <h4 className="font-medium text-sm truncate">{run.name}</h4>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{run.model}</span>
+            {run.gpu_type && (
+              <>
+                <span>&middot;</span>
+                <span>{run.gpu_type.toUpperCase()}</span>
+              </>
+            )}
+            {run.slurm_job_id && (
+              <>
+                <span>&middot;</span>
+                <span>#{run.slurm_job_id}</span>
+              </>
+            )}
+          </div>
         </div>
-        <div className={`flex items-center gap-1 ${statusColors[run.status]}`}>
-          <Icon className={`h-4 w-4 ${run.status === 'running' ? 'animate-spin' : ''}`} />
-          <span className="text-xs capitalize">{run.status}</span>
+        <div className="flex items-center gap-1.5">
+          {(run.status === 'queued' || run.status === 'running' || run.status === 'pending') && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                cancelMutation.mutate()
+              }}
+              className="text-muted-foreground hover:text-destructive transition-colors"
+              title="Cancel"
+            >
+              <XCircle className="h-4 w-4" />
+            </button>
+          )}
+          <div className={`flex items-center gap-1 ${statusColors[run.status]}`}>
+            <StatusIcon className={`h-4 w-4 ${run.status === 'running' ? 'animate-spin' : ''}`} />
+            <span className="text-xs capitalize">{run.status}</span>
+          </div>
         </div>
       </div>
 
       {run.status === 'running' && (
         <div className="mb-2">
           <Progress value={run.progress * 100} className="h-1.5" />
-          <p className="text-xs text-muted-foreground mt-1">
-            {Math.round(run.progress * 100)}% complete
-          </p>
+          <p className="text-xs text-muted-foreground mt-1">{Math.round(run.progress * 100)}%</p>
         </div>
       )}
 
@@ -576,7 +835,7 @@ function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: 
             <BarChart3 className="h-3 w-3" />
             mAP50: {((run.metrics.mAP50 || 0) * 100).toFixed(1)}%
           </span>
-          {run.latency_ms && (
+          {run.latency_ms != null && (
             <span className="flex items-center gap-1">
               <Zap className="h-3 w-3" />
               {run.latency_ms.toFixed(1)}ms
@@ -585,8 +844,8 @@ function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: 
         </div>
       )}
 
-      {/* TensorBoard section - show for running or completed RF-DETR runs */}
-      {run.base_model.startsWith('rfdetr') && (run.status === 'running' || run.status === 'completed') && (
+      {/* TensorBoard */}
+      {(run.status === 'running' || run.status === 'completed') && (
         <div className="mt-3 pt-3 border-t border-border">
           {run.tensorboard_url ? (
             <div className="flex items-center gap-2">
@@ -595,22 +854,28 @@ function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: 
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 text-xs text-primary hover:underline"
+                onClick={(e) => e.stopPropagation()}
               >
                 <LineChart className="h-3.5 w-3.5" />
                 TensorBoard
                 <ExternalLink className="h-3 w-3" />
               </a>
               <button
-                onClick={stopTensorBoard}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  stopTensorBoard()
+                }}
                 className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive transition-colors ml-auto"
-                title="Stop TensorBoard"
               >
                 <Square className="h-3 w-3" />
               </button>
             </div>
           ) : (
             <button
-              onClick={startTensorBoard}
+              onClick={(e) => {
+                e.stopPropagation()
+                startTensorBoard()
+              }}
               disabled={isStartingTB}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors"
             >
@@ -624,7 +889,14 @@ function TrainingRunCard({ run, projectName }: { run: TrainingRun; projectName: 
           )}
         </div>
       )}
+
+      {/* Show logs button for selected */}
+      {isSelected && (run.status === 'queued' || run.status === 'running') && (
+        <div className="mt-2 flex items-center gap-1 text-xs text-primary">
+          <Eye className="h-3 w-3" />
+          Viewing logs
+        </div>
+      )}
     </div>
   )
 }
-

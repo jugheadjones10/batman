@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # Device settings
     device: str = "mps"  # mps for Mac, cuda for NVIDIA, cpu for fallback
 
+    # GPU cluster SSH settings
+    ssh_host: str = "xlogin.comp.nus.edu.sg"
+    ssh_user: str = "youngjin"
+    remote_dir: str = "/home/y/youngjin/batman"
+
     class Config:
         env_file = ".env"
         env_prefix = "BATMAN_"

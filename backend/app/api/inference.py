@@ -1,5 +1,6 @@
 """Inference API routes."""
 
+import asyncio
 import json
 import shutil
 from datetime import datetime, timezone, timedelta
@@ -7,11 +8,13 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
 from backend.app.api.projects import get_project_path, load_project_config
-from backend.app.models.training import InferenceConfig
+from backend.app.models.training import InferenceConfig, InferenceGPUSubmitRequest
+from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
 from src.core.project import Project
@@ -37,7 +40,7 @@ async def load_model(project_name: str, request: LoadModelRequest):
 
     runs_dir = project_path / "runs"
     checkpoint_path = None
-    model_type = "yolo"
+    model_type = "rfdetr"
     run_name = None
 
     for run_dir in runs_dir.iterdir():
@@ -51,7 +54,8 @@ async def load_model(project_name: str, request: LoadModelRequest):
         if meta["id"] == request.run_id:
             checkpoint_path = meta.get("checkpoint_path")
             run_name = run_dir.name
-            if meta["base_model"].startswith("rfdetr"):
+            model_field = meta.get("model", meta.get("base_model", ""))
+            if "rfdetr" in model_field or "rf-detr" in model_field:
                 model_type = "rfdetr"
 
             class_info_path = run_dir / "class_info.json"
@@ -341,6 +345,126 @@ async def export_annotated_video(
         "avg_fps": result["avg_fps"],
         "avg_inference_time_ms": result["avg_inference_time_ms"],
     }
+
+
+# ── GPU cluster inference submission ──────────────────────────────────────
+
+
+@router.post("/submit-gpu")
+async def submit_inference_gpu(project_name: str, request: InferenceGPUSubmitRequest):
+    """Submit an inference job to the GPU cluster."""
+    if not gpu_service.is_connected:
+        raise HTTPException(status_code=400, detail="Not connected to GPU cluster")
+
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = f"data/projects/{project_name}"
+
+    # Push project data
+    try:
+        gpu_service.push_project_data(project_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to push data: {e}")
+
+    script, job_name = gpu_service.generate_inference_script(
+        project_dir=project_dir,
+        run_name=request.run_name,
+        use_latest=request.run_name is None,
+        video_ids=request.video_ids,
+        test_only=request.test_only,
+        model=request.model,
+        confidence=request.confidence,
+        frame_interval=request.frame_interval,
+        track=request.track,
+        track_thresh=request.track_thresh,
+        track_buffer=request.track_buffer,
+        match_thresh=request.match_thresh,
+        no_video=request.no_video,
+        gpu_type=request.gpu.gpu_type,
+        time_limit=request.gpu.time_limit,
+    )
+
+    try:
+        job_id = gpu_service.submit_slurm_job(script)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SLURM submission failed: {e}")
+
+    now = datetime.utcnow()
+    infer_run_name = f"inference_{request.gpu.gpu_type}_{now.strftime('%Y%m%d_%H%M%S')}"
+
+    job_state = GPUJobState(
+        job_id=job_id,
+        run_name=infer_run_name,
+        job_type="inference",
+        gpu_type=request.gpu.gpu_type,
+        project_name=project_name,
+        project_dir=project_dir,
+        output_dir=f"{project_dir}/inference",
+        submitted_at=now.isoformat(),
+        log_file=f"logs/slurm_{job_id}_{job_name}.out",
+        err_file=f"logs/slurm_{job_id}_{job_name}.err",
+    )
+    gpu_service.track_job(job_state)
+    asyncio.create_task(gpu_service.poll_job_until_done(job_state, project_path))
+
+    return {
+        "job_id": job_id,
+        "run_name": infer_run_name,
+        "message": "Inference job submitted to GPU cluster",
+    }
+
+
+@router.get("/gpu-jobs/{job_name}/logs")
+async def stream_inference_logs(project_name: str, job_name: str):
+    """Stream GPU inference logs via SSE."""
+    tracked = gpu_service.get_tracked_job(job_name)
+    if not tracked:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not gpu_service.is_connected:
+        raise HTTPException(status_code=400, detail="Not connected to GPU cluster")
+
+    async def event_generator():
+        try:
+            async for line in gpu_service.stream_logs(tracked.job_id, "rfdetr-inference"):
+                data = json.dumps({"type": "log", "line": line.rstrip("\n")})
+                yield f"data: {data}\n\n"
+        except Exception as e:
+            data = json.dumps({"type": "error", "message": str(e)})
+            yield f"data: {data}\n\n"
+        finally:
+            data = json.dumps({"type": "done"})
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/gpu-jobs/{job_name}/cancel")
+async def cancel_inference_gpu(project_name: str, job_name: str):
+    """Cancel a GPU inference job."""
+    tracked = gpu_service.get_tracked_job(job_name)
+    if not tracked:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if gpu_service.is_connected:
+        try:
+            gpu_service.cancel_job(tracked.job_id)
+        except Exception as e:
+            logger.warning(f"scancel failed: {e}")
+
+    tracked.status = "cancelled"
+    tracked.completed_at = datetime.utcnow().isoformat()
+    return {"status": "cancelled", "message": f"Inference job '{job_name}' cancelled"}
 
 
 @router.websocket("/stream/{video_id}")
