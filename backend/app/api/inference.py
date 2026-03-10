@@ -7,17 +7,19 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
 from backend.app.api.projects import get_project_path, load_project_config
+from backend.app.config import settings
 from backend.app.models.training import InferenceConfig, InferenceGPUSubmitRequest
 from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
 from src.core.project import Project
+from src.core.trainer import find_best_checkpoint
 
 SGT = timezone(timedelta(hours=8))
 
@@ -26,6 +28,7 @@ router = APIRouter(prefix="/projects/{project_name}/inference", tags=["inference
 
 class LoadModelRequest(BaseModel):
     run_id: int
+    device: Optional[str] = None  # auto, cuda, mps, cpu; default from settings
 
 
 @router.post("/load-model")
@@ -41,6 +44,7 @@ async def load_model(project_name: str, request: LoadModelRequest):
     runs_dir = project_path / "runs"
     checkpoint_path = None
     model_type = "rfdetr"
+    model_size = "base"
     run_name = None
 
     for run_dir in runs_dir.iterdir():
@@ -58,6 +62,30 @@ async def load_model(project_name: str, request: LoadModelRequest):
             if "rfdetr" in model_field or "rf-detr" in model_field:
                 model_type = "rfdetr"
 
+            # Extract variant: "rf-detr-small" → "small", or from config
+            for variant in ("nano", "small", "medium", "base", "large"):
+                if variant in model_field:
+                    model_size = variant
+                    break
+            cfg_model = (meta.get("config") or {}).get("training", {}).get("model")
+            if cfg_model:
+                model_size = cfg_model
+
+            # Fallback: meta may not have checkpoint_path (e.g. local run before backend wrote it)
+            if not checkpoint_path:
+                results_path = run_dir / "results.json"
+                if results_path.exists():
+                    try:
+                        with open(results_path) as rf:
+                            results = json.load(rf)
+                        checkpoint_path = results.get("checkpoint_path")
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                if not checkpoint_path:
+                    best = find_best_checkpoint(run_dir)
+                    if best is not None:
+                        checkpoint_path = str(best)
+
             class_info_path = run_dir / "class_info.json"
             if class_info_path.exists():
                 with open(class_info_path) as f:
@@ -72,7 +100,8 @@ async def load_model(project_name: str, request: LoadModelRequest):
     if not checkpoint_path.exists():
         raise HTTPException(status_code=404, detail="Checkpoint file not found")
 
-    await inference_runner.load_model(checkpoint_path, classes, model_type)
+    device = request.device if request.device else settings.device
+    await inference_runner.load_model(checkpoint_path, classes, model_type, device=device, model_size=model_size)
     inference_runner.current_run_name = run_name
 
     return {"message": "Model loaded successfully", "run_name": run_name}
@@ -159,8 +188,15 @@ async def run_on_video(
     else:
         tracking_config = TrackingConfig.occlusion_tolerant()
 
+    project = Project.load(project_path)
+    inference_id = datetime.now(SGT).strftime("%Y%m%d_%H%M%S")
+    result_dir = project_path / "inference" / run_name / video_id / inference_id
+    result_dir.mkdir(parents=True, exist_ok=True)
+    output_path = result_dir / "detected.mp4"
+
     result = await inference_runner.run_on_video_full(
         video_path,
+        output_path=output_path,
         confidence_threshold=config.confidence_threshold,
         iou_threshold=config.iou_threshold,
         enable_tracking=config.enable_tracking,
@@ -168,10 +204,11 @@ async def run_on_video(
         detection_interval=config.detection_interval,
     )
 
-    project = Project.load(project_path)
     persist_data = {
         "run_name": run_name,
         "video_id": video_id,
+        "inference_id": inference_id,
+        "created_at": datetime.now(SGT).isoformat(),
         "config": {
             "confidence_threshold": config.confidence_threshold,
             "iou_threshold": config.iou_threshold,
@@ -187,11 +224,12 @@ async def run_on_video(
         },
         "frames": result.get("results", []),
     }
-    result_dir = project.save_inference_result(run_name, video_id, persist_data)
+    with open(result_dir / "result.json", "w") as f:
+        json.dump(persist_data, f, indent=2)
 
     result["persisted"] = True
     result["run_name"] = run_name
-    result["inference_id"] = persist_data.get("inference_id")
+    result["inference_id"] = inference_id
     return result
 
 
@@ -274,6 +312,82 @@ async def get_inference_result(
             project.inference_dir / run_name / video_id / "detected.mp4"
         ).exists()
     return result
+
+
+@router.get("/results/{run_name}/{video_id}/{inference_id}/video")
+async def get_inference_result_video(
+    request: Request,
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+):
+    """Stream the detected video (with overlay) for an inference result. Supports Range for seeking."""
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if inference_id == "legacy":
+        video_path = project_path / "inference" / run_name / video_id / "detected.mp4"
+    else:
+        video_path = project_path / "inference" / run_name / video_id / inference_id / "detected.mp4"
+
+    video_path = video_path.resolve()
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    # #region agent log
+    import time as _time; open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(json.dumps({"sessionId":"b2be69","hypothesisId":"H3","location":"inference.py:video_endpoint","message":"video endpoint hit","data":{"video_path":str(video_path),"file_size":file_size,"range":range_header,"exists":video_path.exists()},"timestamp":int(_time.time()*1000)})+'\n')
+    # #endregion
+
+    if range_header:
+        # Parse "bytes=start-end" (end may be missing)
+        try:
+            range_str = range_header.strip().lower().replace("bytes=", "")
+            parts = range_str.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+            end = min(end, file_size - 1)
+            if start > end or start < 0:
+                raise ValueError("Invalid range")
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=416, detail="Requested range not satisfiable")
+
+        content_length = end - start + 1
+
+        async def stream_range():
+            with open(video_path, "rb") as f:
+                f.seek(start)
+                remaining = content_length
+                chunk_size = 64 * 1024
+                while remaining > 0:
+                    read_size = min(chunk_size, remaining)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            stream_range(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(content_length),
+            },
+        )
+
+    # No Range header: return full file (some players need this for initial load)
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+    )
 
 
 @router.delete("/results/{run_name}/{video_id}/{inference_id}")

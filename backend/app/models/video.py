@@ -19,6 +19,7 @@ class VideoInfo(BaseModel):
     has_proxy: bool = False
     frame_count: int = 0  # Number of sampled frames
     annotation_count: int = 0  # Number of annotations
+    annotated_frame_count: int = 0  # Frames with at least one annotation
     exclude_from_training: bool = False
     created_at: datetime
 

@@ -37,13 +37,13 @@ export default function InferencePage() {
   const [config, setConfig] = useState<Partial<InferenceConfig>>({
     confidence_threshold: 0.5,
     iou_threshold: 0.45,
-    enable_tracking: true,
+    enable_tracking: false,
     tracking_mode: 'visible_only',
-    detection_interval: 5,
+    detection_interval: 1,
   })
 
   // GPU inference state
-  const [runMode, setRunMode] = useState<'local' | 'gpu'>('gpu')
+  const [runMode, setRunMode] = useState<'local' | 'gpu'>('local')
   const [gpuInferConfig, setGpuInferConfig] = useState<{
     run_name: string | null
     confidence: number
@@ -119,9 +119,9 @@ export default function InferencePage() {
         confidence_threshold: config.confidence_threshold || 0.5,
         iou_threshold: config.iou_threshold || 0.45,
         max_detections: 100,
-        enable_tracking: config.enable_tracking ?? true,
+        enable_tracking: config.enable_tracking ?? false,
         tracking_mode: config.tracking_mode || 'visible_only',
-        detection_interval: config.detection_interval || 5,
+        detection_interval: config.detection_interval ?? 1,
       })
     },
     onSuccess: (data: any) => {
@@ -142,6 +142,12 @@ export default function InferencePage() {
     queryKey: ['gpu-status'],
     queryFn: () => api.gpu.getStatus(),
     refetchInterval: 10000,
+  })
+
+  const { data: deviceInfo } = useQuery({
+    queryKey: ['device-info'],
+    queryFn: () => api.device.getInfo(),
+    enabled: runMode === 'local',
   })
 
   const gpuSubmitMutation = useMutation({
@@ -202,25 +208,14 @@ export default function InferencePage() {
 
   return (
     <div className="container max-w-7xl py-8 px-6 lg:px-8">
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="font-display text-3xl font-bold flex items-center gap-3">
-            <Grid3X3 className="h-8 w-8 text-primary" />
-            Inference Results
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            Run trained models on project videos &mdash; results are saved automatically
-          </p>
+      <div className="flex items-center justify-end gap-3 mb-6">
+        <div className="w-64">
+          <GpuConnectionPanel />
         </div>
-        <div className="flex items-center gap-3">
-          <div className="w-64">
-            <GpuConnectionPanel />
-          </div>
-          <Button onClick={() => setShowRunPanel(true)} className="gap-2">
-            <Play className="h-4 w-4" />
-            Run Inference
-          </Button>
-        </div>
+        <Button onClick={() => setShowRunPanel(true)} className="gap-2">
+          <Play className="h-4 w-4" />
+          Run Inference
+        </Button>
       </div>
 
       {/* Results Matrix */}
@@ -415,6 +410,42 @@ export default function InferencePage() {
               </div>
             ) : detailResult ? (
               <div className="space-y-4">
+                {/* Video with detection overlay */}
+                {detailResult.has_video && selectedCell && (
+                  <div>
+                    <h4 className="text-sm font-medium mb-2">Detected Video</h4>
+                    <video
+                      key={`${selectedCell.run}-${selectedCell.video}-${selectedCell.inferenceId}`}
+                      src={api.inference.videoUrl(
+                        projectName!,
+                        selectedCell.run,
+                        selectedCell.video,
+                        selectedCell.inferenceId
+                      )}
+                      controls
+                      className="w-full rounded-lg border border-border bg-black max-h-[400px]"
+                      preload="auto"
+                      playsInline
+                    />
+                    <p className="text-xs text-muted-foreground mt-2">
+                      If the video does not load above,{' '}
+                      <a
+                        href={api.inference.videoUrl(
+                          projectName!,
+                          selectedCell.run,
+                          selectedCell.video,
+                          selectedCell.inferenceId
+                        )}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline"
+                      >
+                        open it in a new tab
+                      </a>
+                      .
+                    </p>
+                  </div>
+                )}
                 {/* Stats row */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-3 bg-muted/50 rounded-lg">
@@ -519,15 +550,6 @@ export default function InferencePage() {
               {/* Mode tabs */}
               <div className="flex gap-1 mb-6 p-1 bg-muted rounded-lg">
                 <button
-                  onClick={() => setRunMode('gpu')}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-sm font-medium transition-colors ${
-                    runMode === 'gpu' ? 'bg-background shadow-sm' : 'text-muted-foreground'
-                  }`}
-                >
-                  <Server className="h-3.5 w-3.5" />
-                  GPU Cluster
-                </button>
-                <button
                   onClick={() => setRunMode('local')}
                   className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-sm font-medium transition-colors ${
                     runMode === 'local' ? 'bg-background shadow-sm' : 'text-muted-foreground'
@@ -536,9 +558,160 @@ export default function InferencePage() {
                   <Monitor className="h-3.5 w-3.5" />
                   Local
                 </button>
+                <button
+                  onClick={() => setRunMode('gpu')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-sm font-medium transition-colors ${
+                    runMode === 'gpu' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+                  }`}
+                >
+                  <Server className="h-3.5 w-3.5" />
+                  GPU Cluster
+                </button>
               </div>
 
-              {runMode === 'gpu' ? (
+              {runMode === 'local' ? (
+                <>
+                  {/* Local Inference */}
+                  {deviceInfo && (
+                    <div className="mb-4 p-3 rounded-lg bg-muted/50 text-sm">
+                      <span className="text-muted-foreground">Running on </span>
+                      <span className="font-medium">{deviceInfo.name}</span>
+                      {deviceInfo.memory_gb != null && (
+                        <span className="text-muted-foreground"> ({deviceInfo.memory_gb} GB)</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="mb-6">
+                    <label className="text-sm font-medium mb-2 block">
+                      <Zap className="h-4 w-4 inline mr-1" />
+                      Model (Training Run)
+                    </label>
+                    {completedRuns.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No trained models available</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {completedRuns.map((run) => (
+                          <button
+                            key={run.id}
+                            onClick={() =>
+                              setRunTarget((prev) => ({ ...prev!, runId: run.id }))
+                            }
+                            className={`w-full p-3 rounded-lg border text-left transition-colors ${
+                              runTarget?.runId === run.id
+                                ? 'border-primary bg-primary/10'
+                                : 'border-border hover:border-primary/50'
+                            }`}
+                          >
+                            <div className="font-medium text-sm">{run.name}</div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                              <span>{run.model}</span>
+                              {run.metrics?.mAP50 && (
+                                <span>&middot; mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mb-6">
+                    <label className="text-sm font-medium mb-2 block">
+                      <Video className="h-4 w-4 inline mr-1" />
+                      Video
+                    </label>
+                    <select
+                      value={runTarget?.videoId || ''}
+                      onChange={(e) =>
+                        setRunTarget((prev) => ({ runId: prev?.runId || 0, videoId: e.target.value }))
+                      }
+                      className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
+                    >
+                      <option value="">Select a video...</option>
+                      {videos?.map((video) => (
+                        <option key={video.id} value={String(video.id)}>
+                          {video.filename}
+                          {video.exclude_from_training ? ' [TEST]' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="mb-6 space-y-4">
+                    <h3 className="text-sm font-medium flex items-center gap-1">
+                      <Settings className="h-4 w-4" /> Settings
+                    </h3>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={(config.confidence_threshold || 0.5) * 100}
+                        onChange={(e) =>
+                          setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm mb-1 block">
+                        Detection Interval: every {config.detection_interval ?? 1} frames
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={15}
+                        value={config.detection_interval ?? 1}
+                        onChange={(e) =>
+                          setConfig({ ...config, detection_interval: Number(e.target.value) })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={config.enable_tracking}
+                        onChange={(e) => setConfig({ ...config, enable_tracking: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm">Enable tracking</span>
+                    </label>
+                  </div>
+
+                  <Button
+                    className="w-full gap-2"
+                    disabled={
+                      !runTarget?.runId ||
+                      !runTarget?.videoId ||
+                      runInferenceMutation.isPending ||
+                      loadModelMutation.isPending
+                    }
+                    onClick={() => {
+                      if (runTarget?.runId && runTarget?.videoId) {
+                        runInferenceMutation.mutate({
+                          runId: runTarget.runId,
+                          videoId: runTarget.videoId,
+                        })
+                      }
+                    }}
+                  >
+                    {runInferenceMutation.isPending || loadModelMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                    {loadModelMutation.isPending
+                      ? 'Loading model...'
+                      : runInferenceMutation.isPending
+                        ? 'Running inference...'
+                        : 'Run & Save'}
+                  </Button>
+                </>
+              ) : (
                 <>
                   {/* GPU Inference Config */}
                   <div className="mb-4">
@@ -658,139 +831,6 @@ export default function InferencePage() {
                       <Server className="h-4 w-4" />
                     )}
                     {!gpuStatus?.connected ? 'Connect GPU First' : 'Submit to GPU'}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  {/* Local Inference (original) */}
-                  <div className="mb-6">
-                    <label className="text-sm font-medium mb-2 block">
-                      <Zap className="h-4 w-4 inline mr-1" />
-                      Model (Training Run)
-                    </label>
-                    {completedRuns.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">No trained models available</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {completedRuns.map((run) => (
-                          <button
-                            key={run.id}
-                            onClick={() =>
-                              setRunTarget((prev) => ({ ...prev!, runId: run.id }))
-                            }
-                            className={`w-full p-3 rounded-lg border text-left transition-colors ${
-                              runTarget?.runId === run.id
-                                ? 'border-primary bg-primary/10'
-                                : 'border-border hover:border-primary/50'
-                            }`}
-                          >
-                            <div className="font-medium text-sm">{run.name}</div>
-                            <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                              <span>{run.model}</span>
-                              {run.metrics?.mAP50 && (
-                                <span>&middot; mAP50: {(run.metrics.mAP50 * 100).toFixed(1)}%</span>
-                              )}
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mb-6">
-                    <label className="text-sm font-medium mb-2 block">
-                      <Video className="h-4 w-4 inline mr-1" />
-                      Video
-                    </label>
-                    <select
-                      value={runTarget?.videoId || ''}
-                      onChange={(e) =>
-                        setRunTarget((prev) => ({ runId: prev?.runId || 0, videoId: e.target.value }))
-                      }
-                      className="w-full h-10 px-3 rounded-md border border-border bg-background text-sm"
-                    >
-                      <option value="">Select a video...</option>
-                      {videos?.map((video) => (
-                        <option key={video.id} value={String(video.id)}>
-                          {video.filename}
-                          {video.exclude_from_training ? ' [TEST]' : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="mb-6 space-y-4">
-                    <h3 className="text-sm font-medium flex items-center gap-1">
-                      <Settings className="h-4 w-4" /> Settings
-                    </h3>
-                    <div>
-                      <label className="text-sm mb-1 block">
-                        Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={(config.confidence_threshold || 0.5) * 100}
-                        onChange={(e) =>
-                          setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
-                        }
-                        className="w-full"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm mb-1 block">
-                        Detection Interval: every {config.detection_interval || 5} frames
-                      </label>
-                      <input
-                        type="range"
-                        min={1}
-                        max={15}
-                        value={config.detection_interval || 5}
-                        onChange={(e) =>
-                          setConfig({ ...config, detection_interval: Number(e.target.value) })
-                        }
-                        className="w-full"
-                      />
-                    </div>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={config.enable_tracking}
-                        onChange={(e) => setConfig({ ...config, enable_tracking: e.target.checked })}
-                        className="rounded"
-                      />
-                      <span className="text-sm">Enable tracking</span>
-                    </label>
-                  </div>
-
-                  <Button
-                    className="w-full gap-2"
-                    disabled={
-                      !runTarget?.runId ||
-                      !runTarget?.videoId ||
-                      runInferenceMutation.isPending ||
-                      loadModelMutation.isPending
-                    }
-                    onClick={() => {
-                      if (runTarget?.runId && runTarget?.videoId) {
-                        runInferenceMutation.mutate({
-                          runId: runTarget.runId,
-                          videoId: runTarget.videoId,
-                        })
-                      }
-                    }}
-                  >
-                    {runInferenceMutation.isPending || loadModelMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Play className="h-4 w-4" />
-                    )}
-                    {loadModelMutation.isPending
-                      ? 'Loading model...'
-                      : runInferenceMutation.isPending
-                        ? 'Running inference...'
-                        : 'Run & Save'}
                   </Button>
                 </>
               )}

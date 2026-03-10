@@ -3,12 +3,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Plus, Folder, Video, Tag, Trash2, ArrowRight, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { useToast } from '@/components/ui/Toaster'
-import { formatDate, formatNumber } from '@/lib/utils'
+import { formatDate } from '@/lib/utils'
 import type { Project } from '@/types'
 
 export default function ProjectsPage() {
@@ -19,6 +20,7 @@ export default function ProjectsPage() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const queryClient = useQueryClient()
   const { toast } = useToast()
+  const { t } = useTranslation()
 
   const { data: projects, isLoading } = useQuery({
     queryKey: ['projects'],
@@ -32,10 +34,10 @@ export default function ProjectsPage() {
       setShowCreate(false)
       setNewProjectName('')
       setNewProjectDesc('')
-      toast({ title: 'Project created', type: 'success' })
+      toast({ title: t('projects.created'), type: 'success' })
     },
     onError: (error: Error) => {
-      toast({ title: 'Failed to create project', description: error.message, type: 'error' })
+      toast({ title: t('projects.failedCreate'), description: error.message, type: 'error' })
     },
   })
 
@@ -45,10 +47,10 @@ export default function ProjectsPage() {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setProjectToDelete(null)
       setDeleteConfirmName('')
-      toast({ title: 'Project moved to Trash', type: 'success' })
+      toast({ title: t('projects.movedToTrash'), type: 'success' })
     },
     onError: (error: Error) => {
-      toast({ title: 'Failed to delete project', description: error.message, type: 'error' })
+      toast({ title: t('projects.failedDelete'), description: error.message, type: 'error' })
     },
   })
 
@@ -64,14 +66,14 @@ export default function ProjectsPage() {
     <div className="container max-w-6xl py-8 px-6 lg:px-8">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="font-display text-3xl font-bold">Projects</h1>
+          <h1 className="font-display text-3xl font-bold">{t('projects.title')}</h1>
           <p className="text-muted-foreground mt-1">
-            Manage your video labeling projects
+            {t('projects.subtitle')}
           </p>
         </div>
         <Button onClick={() => setShowCreate(true)} className="gap-2">
           <Plus className="h-4 w-4" />
-          New Project
+          {t('projects.newProject')}
         </Button>
       </div>
 
@@ -84,35 +86,35 @@ export default function ProjectsPage() {
         >
           <Card className="border-primary">
             <CardHeader>
-              <CardTitle>Create New Project</CardTitle>
+              <CardTitle>{t('projects.createTitle')}</CardTitle>
               <CardDescription>
-                Set up a new project for video labeling
+                {t('projects.createSubtitle')}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label className="text-sm font-medium mb-2 block">Project Name</label>
+                <label className="text-sm font-medium mb-2 block">{t('projects.nameLabel')}</label>
                 <Input
-                  placeholder="My Detection Project"
+                  placeholder={t('projects.namePlaceholder')}
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
                 />
               </div>
               <div>
-                <label className="text-sm font-medium mb-2 block">Description (optional)</label>
+                <label className="text-sm font-medium mb-2 block">{t('projects.descLabel')}</label>
                 <Input
-                  placeholder="Brief description of your project"
+                  placeholder={t('projects.descPlaceholder')}
                   value={newProjectDesc}
                   onChange={(e) => setNewProjectDesc(e.target.value)}
                 />
               </div>
               <div className="flex gap-2 pt-2">
                 <Button onClick={handleCreate} disabled={!newProjectName.trim()}>
-                  Create Project
+                  {t('projects.createBtn')}
                 </Button>
                 <Button variant="ghost" onClick={() => setShowCreate(false)}>
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
               </div>
             </CardContent>
@@ -133,13 +135,13 @@ export default function ProjectsPage() {
         <Card className="border-dashed">
           <CardContent className="flex flex-col items-center justify-center py-16">
             <Folder className="h-12 w-12 text-muted-foreground mb-4" />
-            <h3 className="font-semibold text-lg mb-2">No projects yet</h3>
+            <h3 className="font-semibold text-lg mb-2">{t('projects.noProjects')}</h3>
             <p className="text-muted-foreground text-center mb-4">
-              Create your first project to start labeling videos
+              {t('projects.noProjectsDesc')}
             </p>
             <Button onClick={() => setShowCreate(true)} className="gap-2">
               <Plus className="h-4 w-4" />
-              Create Project
+              {t('projects.createBtn')}
             </Button>
           </CardContent>
         </Card>
@@ -176,9 +178,9 @@ export default function ProjectsPage() {
           >
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle className="text-destructive">Delete project?</CardTitle>
+                <CardTitle className="text-destructive">{t('projects.deleteTitle')}</CardTitle>
                 <CardDescription>
-                  This will move <strong>{projectToDelete.name}</strong> to Trash. You can restore it from your system Trash (or from <code className="text-xs">data/.trash</code> on the server) if needed.
+                  {t('projects.deleteDesc', { name: projectToDelete.name })}
                 </CardDescription>
               </div>
               <Button
@@ -194,7 +196,7 @@ export default function ProjectsPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Type <strong>{projectToDelete.name}</strong> to confirm:
+                {t('projects.deleteConfirmLabel', { name: projectToDelete.name })}
               </p>
               <Input
                 placeholder={projectToDelete.name}
@@ -220,7 +222,7 @@ export default function ProjectsPage() {
                   className="gap-2"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  Move to Trash
+                  {t('projects.moveToTrash')}
                 </Button>
                 <Button
                   variant="ghost"
@@ -229,7 +231,7 @@ export default function ProjectsPage() {
                     setDeleteConfirmName('')
                   }}
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
               </div>
             </CardContent>
@@ -241,6 +243,8 @@ export default function ProjectsPage() {
 }
 
 function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => void }) {
+  const { t } = useTranslation()
+
   return (
     <Card className="group hover:border-primary/50 transition-colors">
       <CardContent className="p-6">
@@ -276,11 +280,11 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
         <div className="flex items-center gap-4 text-sm text-muted-foreground mb-4">
           <span className="flex items-center gap-1.5">
             <Video className="h-4 w-4" />
-            {formatNumber(project.video_count)} videos
+            {t('projects.videoCount', { count: project.video_count })}
           </span>
           <span className="flex items-center gap-1.5">
             <Tag className="h-4 w-4" />
-            {formatNumber(project.annotation_count)} labels
+            {t('projects.labelCount', { count: project.annotation_count })}
           </span>
         </div>
 
@@ -296,7 +300,7 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
             ))}
             {project.classes.length > 3 && (
               <span className="px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground">
-                +{project.classes.length - 3} more
+                {t('common.more', { count: project.classes.length - 3 })}
               </span>
             )}
           </div>
@@ -306,11 +310,10 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
           to={`/projects/${project.name}`}
           className="flex items-center gap-2 text-sm font-medium text-primary hover:underline"
         >
-          Open Project
+          {t('common.openProject')}
           <ArrowRight className="h-4 w-4" />
         </Link>
       </CardContent>
     </Card>
   )
 }
-

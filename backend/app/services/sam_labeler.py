@@ -1,5 +1,9 @@
 """SAM3-based auto-labeling service using SAM3SemanticPredictor."""
 
+import asyncio
+import json
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,17 +13,41 @@ from PIL import Image
 from backend.app.config import settings
 
 
+def _sam_worker_argv():
+    """Return argv for the SAM worker subprocess."""
+    return [sys.executable, "-m", "backend.app.services.sam_worker"]
+
+
+def _resolve_device_for_worker() -> str:
+    """Resolve sam_device to an explicit value. LD_PRELOAD breaks torch.cuda.is_available()
+    inside the worker, so we detect CUDA in the parent and pass '0' (or 'cpu') explicitly."""
+    device = settings.sam_device
+    if device in ("auto", ""):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "0"
+            return "cpu"
+        except Exception:
+            return "cpu"
+    if device in ("cuda", "gpu"):
+        return "0"
+    return device
+
+
 class SAMLabeler:
     """Auto-labeling service using SAM3SemanticPredictor for text-based segmentation."""
 
     def __init__(self):
         self.predictor = None
-        self.device = settings.device
-        self.model_path = Path("sam3.pt")  # Default to sam3.pt in project root
+        self.device = settings.sam_device
+        self.model_path = Path(settings.sam_model_path)  # e.g. ./sam3.pt in project root
         self.current_image_path: Path | None = None
+        self._worker_process = None
+        self._worker_lock = asyncio.Lock()
 
     async def load_model(self):
-        """Load SAM3SemanticPredictor."""
+        """Load SAM3SemanticPredictor. Must run on main thread to avoid PyTorch double-free."""
         if self.predictor is not None:
             return
 
@@ -33,12 +61,13 @@ class SAMLabeler:
                 "task": "segment",
                 "mode": "predict",
                 "model": str(self.model_path),
-                "half": True,  # Use FP16 for faster inference
-                "save": False,  # Don't save results
+                "half": False,
+                "save": False,
                 "device": self.device,
                 "verbose": False,
             }
 
+            # Load on main thread: PyTorch/CUDA can double-free when loaded in a worker thread
             self.predictor = SAM3SemanticPredictor(overrides=overrides)
             logger.info(f"SAM3SemanticPredictor loaded successfully on {self.device}")
 
@@ -48,6 +77,126 @@ class SAMLabeler:
         except Exception as e:
             logger.error(f"Failed to load SAM3: {e}")
             self.predictor = None
+
+    async def _ensure_worker(self):
+        """Spawn the SAM worker subprocess if not running. Caller must hold _worker_lock."""
+        if self._worker_process is not None and self._worker_process.returncode is None:
+            return
+        if self._worker_process is not None:
+            try:
+                self._worker_process.kill()
+            except Exception:
+                pass
+            self._worker_process = None
+        env = os.environ.copy()
+        # Use mimalloc to replace glibc malloc, avoiding heap corruption (double-free,
+        # corrupted-double-linked-list) in PyTorch/Ultralytics on WSL2.
+        # Also force device=0 because LD_PRELOAD breaks torch.cuda.is_available().
+        mimalloc_path = Path.home() / ".local" / "lib" / "libmimalloc.so"
+        if mimalloc_path.exists():
+            env["LD_PRELOAD"] = str(mimalloc_path)
+            logger.info(f"SAM worker will use mimalloc: {mimalloc_path}")
+        else:
+            jemalloc_path = Path.home() / ".local" / "lib" / "libjemalloc.so"
+            if jemalloc_path.exists():
+                env["LD_PRELOAD"] = str(jemalloc_path)
+                logger.info(f"SAM worker will use jemalloc: {jemalloc_path}")
+            else:
+                logger.warning("No alternative allocator found; SAM worker may crash on WSL2")
+        # Resolve device in parent (where CUDA detection works) and pass to worker
+        resolved_device = _resolve_device_for_worker()
+        env["BATMAN_SAM_DEVICE"] = resolved_device
+        env["BATMAN_SAM_MODEL_PATH"] = str(self.model_path)
+        try:
+            self._worker_process = await asyncio.create_subprocess_exec(
+                *_sam_worker_argv(),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=os.getcwd(),
+                env=env,
+            )
+            logger.info(f"SAM worker subprocess started (mimalloc, device={resolved_device})")
+        except Exception as e:
+            logger.error(f"Failed to start SAM worker: {e}")
+            raise RuntimeError(f"SAM worker failed to start: {e}") from e
+        # Wait for worker to finish model load and signal readiness
+        try:
+            line = await asyncio.wait_for(self._worker_process.stdout.readline(), timeout=180.0)
+            msg = json.loads(line.decode())
+            if not msg.get("ready"):
+                raise RuntimeError("Worker did not signal ready")
+            worker_device = msg.get("device", "?")
+            logger.info(f"SAM worker model loaded and ready (device={worker_device})")
+        except asyncio.TimeoutError:
+            stderr_out = await self._drain_worker_stderr(self._worker_process)
+            logger.error(f"SAM worker timed out during model load: {stderr_out}")
+            self._worker_process.kill()
+            self._worker_process = None
+            raise RuntimeError("SAM worker timed out loading model")
+        except Exception as e:
+            stderr_out = await self._drain_worker_stderr(self._worker_process)
+            logger.error(f"SAM worker failed during model load: {e} | stderr: {stderr_out}")
+            try:
+                self._worker_process.kill()
+            except Exception:
+                pass
+            self._worker_process = None
+            raise RuntimeError(f"SAM worker crashed during model load: {e}") from e
+
+    async def _label_frame_via_worker(
+        self,
+        image_path: Path,
+        class_prompts: list[str],
+    ) -> list[dict]:
+        """Run one frame through the SAM worker subprocess. On worker crash, raises and clears worker."""
+        async with self._worker_lock:
+            await self._ensure_worker()
+            proc = self._worker_process
+            if proc.returncode is not None:
+                stderr_out = await self._drain_worker_stderr(proc)
+                logger.error(f"SAM worker died before request: {stderr_out}")
+                self._worker_process = None
+                raise RuntimeError("SAM worker exited unexpectedly; please retry auto-label")
+            try:
+                req = json.dumps({"image_path": str(image_path), "class_prompts": class_prompts}) + "\n"
+                proc.stdin.write(req.encode())
+                await proc.stdin.drain()
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=120.0)
+            except (BrokenPipeError, ConnectionResetError, asyncio.TimeoutError) as e:
+                stderr_out = await self._drain_worker_stderr(proc)
+                logger.error(f"SAM worker crashed: {stderr_out}")
+                self._worker_process = None
+                raise RuntimeError("SAM worker crashed or timed out; please retry auto-label") from e
+            except Exception as e:
+                stderr_out = await self._drain_worker_stderr(proc)
+                logger.error(f"SAM worker error ({e}): {stderr_out}")
+                self._worker_process = None
+                raise RuntimeError("SAM worker crashed or timed out; please retry auto-label") from e
+            if not line or proc.returncode is not None:
+                stderr_out = await self._drain_worker_stderr(proc)
+                logger.error(f"SAM worker exited mid-request: {stderr_out}")
+                self._worker_process = None
+                raise RuntimeError("SAM worker exited unexpectedly; please retry auto-label")
+        try:
+            out = json.loads(line.decode())
+        except (ValueError, json.JSONDecodeError) as e:
+            self._worker_process = None
+            raise RuntimeError("SAM worker crashed or timed out; please retry auto-label") from e
+        if out.get("error"):
+            raise RuntimeError(out["error"])
+        return out.get("detections") or []
+
+    @staticmethod
+    async def _drain_worker_stderr(proc) -> str:
+        """Read whatever stderr the worker wrote (non-blocking)."""
+        try:
+            if proc.stderr is None:
+                return ""
+            data = await asyncio.wait_for(proc.stderr.read(4096), timeout=1.0)
+            return data.decode(errors="replace").strip()
+        except Exception:
+            return ""
 
     async def label_frame(
         self,
@@ -70,6 +219,15 @@ class SAMLabeler:
         Returns:
             List of detections with bounding boxes
         """
+        if not settings.sam_in_process:
+            try:
+                return await self._label_frame_via_worker(image_path, class_prompts)
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning(f"SAM worker failed for {image_path.name}: {e}, falling back to YOLO")
+                return await self._fallback_detect(image_path, class_prompts)
+
         await self.load_model()
 
         if self.predictor is None:

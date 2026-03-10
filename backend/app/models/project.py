@@ -36,6 +36,7 @@ class ProjectInfo(BaseModel):
     path: str
     description: Optional[str] = None
     classes: list[str] = []
+    class_descriptions: dict[str, str] = {}
     config: ProjectConfig
     video_count: int = 0
     frame_count: int = 0

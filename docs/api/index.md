@@ -66,14 +66,34 @@ Moves the project to the system Trash (or to `data/.trash` if Trash is unavailab
 
 ### Manual Data
 
-Images placed in `project_root/manual_data/` can be synced and used for annotation.
+Images placed in `project_root/manual_data/` can be synced and used for annotation. You can upload images from the UI or place them on disk.
+
+#### Upload Manual Data (UI)
+```http
+POST /api/projects/{name}/manual-data/upload?dataset={subfolder}
+Content-Type: multipart/form-data
+
+files: <one or more image files>
+```
+
+- **dataset** (query, optional): Subfolder name under `manual_data/`. For example `dataset=crane_closeups` stores files in `manual_data/crane_closeups/`. Omit to store in the root `manual_data/` folder.
+- **files** (form): One or more image files (jpg, png, webp, bmp).
+
+After upload, the server runs a sync so new images appear in the project. Response includes `uploaded`, `dataset`, `filenames`, and `sync` summary.
 
 #### Sync Manual Data
 ```http
 POST /api/projects/{name}/manual-data/sync
 ```
 
-Scans the `manual_data/` folder for images (jpg, png, webp, bmp) and updates `frames/manual_data/frames.json`. Returns `{ images_found, images_added, images_removed, total }`.
+Scans the `manual_data/` folder for images (jpg, png, webp, bmp) and updates frame metadata. Supports subfolders: each subdirectory (e.g. `manual_data/crane_closeups/`) becomes a named dataset. Returns `{ images_found, images_added, images_removed, total, datasets }`.
+
+#### List Datasets
+```http
+GET /api/projects/{name}/manual-data/datasets
+```
+
+Returns `{ datasets: [{ name, source_key, image_count }] }`. Root-level images are listed as dataset `(root)`.
 
 #### List Images
 ```http
@@ -275,9 +295,10 @@ Content-Type: application/json
 
 - `data_sources`: Array of sources to include. Defaults to both `["manual_data", "imports"]` when omitted or `null`.
 - `manual_data_split_strategy`: Controls how manual data is distributed across train/val/test splits:
-    - `"proportional"` (default) -- Distribute across all splits proportionally
-    - `"val_only"` -- All manual data goes to the validation set (useful for honest evaluation with human-annotated ground truth)
+    - `"proportional"` (default) -- All data is pooled together and split uniformly by the train/val/test ratios
+    - `"val_only"` -- All manual data goes to the validation set
     - `"train_only"` -- All manual data goes to the training set
+    - `"train_and_val"` -- Distribute manual data between train and validation only (none in test)
     - `"all_splits"` -- Manual data is duplicated into every split
 
 #### Start Training

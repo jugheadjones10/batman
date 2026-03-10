@@ -26,7 +26,7 @@ class DatasetExporter:
         train_ratio: float = 0.7,
         val_ratio: float = 0.2,
         manual_data_split_strategy: Literal[
-            "proportional", "val_only", "train_only", "all_splits"
+            "proportional", "val_only", "train_only", "train_and_val", "all_splits"
         ] = "proportional",
     ) -> dict:
         """
@@ -117,6 +117,13 @@ class DatasetExporter:
                 splits["train"].extend(manual_frames[:n_m_train])
                 splits["val"].extend(manual_frames[n_m_train : n_m_train + n_m_val])
                 splits["test"].extend(manual_frames[n_m_train + n_m_val :])
+            elif manual_data_split_strategy == "train_and_val":
+                n_manual = len(manual_frames)
+                n_m_train = int(n_manual * train_ratio)
+                n_m_val = int(n_manual * val_ratio)
+                splits["train"].extend(manual_frames[:n_m_train])
+                splits["val"].extend(manual_frames[n_m_train : n_m_train + n_m_val])
+                splits["train"].extend(manual_frames[n_m_train + n_m_val :])  # remainder -> train
             elif manual_data_split_strategy == "val_only":
                 splits["val"].extend(manual_frames)
             elif manual_data_split_strategy == "train_only":

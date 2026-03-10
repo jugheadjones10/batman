@@ -1,9 +1,12 @@
-"""Training API routes — GPU cluster submission via Fabric/SLURM."""
+"""Training API routes — GPU cluster submission via Fabric/SLURM and local GPU training."""
 
 import asyncio
 import json
+import os
+import re
 import socket
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -15,16 +18,21 @@ from backend.app.api.projects import get_project_path, load_project_config
 from backend.app.models.training import (
     DatasetExportConfig,
     DatasetExportResult,
+    LocalTrainingSubmitRequest,
     TrainingRunInfo,
     TrainingSubmitRequest,
 )
 from backend.app.services.dataset_exporter import DatasetExporter
 from backend.app.services.gpu_service import GPU_CONFIGS, GPUJobState, gpu_service
+from src.core.trainer import find_best_checkpoint
 
 router = APIRouter(prefix="/projects/{project_name}/training", tags=["training"])
 
 # TensorBoard process tracking (kept from previous implementation)
 _tensorboard_processes: dict[str, dict] = {}
+
+# Local training process tracking: run_name -> subprocess.Popen
+_local_training_processes: dict[str, subprocess.Popen] = {}
 
 
 def _find_free_port(start_port: int = 6006, max_attempts: int = 100) -> int:
@@ -63,11 +71,19 @@ async def export_dataset(
             videos_meta = json.load(f)
         video_dir_names = set(videos_meta.keys())
 
-    allowed_sources = set(config.data_sources or ["manual_data", "imports"])
+    allowed_sources = set(config.data_sources or ["manual_data", "imports", "videos"])
     manual_ds_include = set(config.manual_datasets) if config.manual_datasets else None
     manual_ds_exclude = (
         set(config.exclude_manual_datasets) if config.exclude_manual_datasets else None
     )
+
+    excluded_videos: set[str] = set()
+    if videos_meta_path.exists():
+        with open(videos_meta_path) as f:
+            vm = json.load(f)
+        for vid_key, vid_meta in vm.items():
+            if vid_meta.get("exclude_from_training", False):
+                excluded_videos.add(vid_key)
 
     def _is_manual_dir(name: str) -> bool:
         return name == "manual_data" or name.startswith("manual_data__")
@@ -98,13 +114,13 @@ async def export_dataset(
             if _is_manual_dir(sub_dir.name):
                 source_type = "manual_data"
             elif sub_dir.name in video_dir_names:
-                source_type = "video"
+                source_type = "videos"
             else:
                 source_type = "imports"
 
-            if source_type == "video":
-                continue
             if source_type not in allowed_sources:
+                continue
+            if source_type == "videos" and sub_dir.name in excluded_videos:
                 continue
             if source_type == "manual_data" and not _should_include_manual(sub_dir.name):
                 continue
@@ -205,6 +221,7 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
         manual_split_strategy=request.data.manual_split_strategy,
         manual_datasets=request.data.manual_datasets,
         exclude_manual_datasets=request.data.exclude_manual_datasets,
+        exclude_videos=request.data.exclude_videos,
         infer_after=request.infer_after,
         infer_test_only=request.infer_test_only,
     )
@@ -266,7 +283,221 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
     }
 
 
+# ── Submit training locally (e.g. Windows GPU) ───────────────────────────
+
+
+def _build_local_train_argv(
+    project_path: Path,
+    run_dir: Path,
+    request: LocalTrainingSubmitRequest,
+) -> list[str]:
+    """Build argv for python -m cli.train (local run)."""
+    argv = [
+        sys.executable,
+        "-m",
+        "cli.train",
+        "--project",
+        str(project_path),
+        "--output-dir",
+        str(run_dir),
+        "--device",
+        "auto",
+        "--model",
+        request.training.model,
+        "--epochs",
+        str(request.training.epochs),
+        "--image-size",
+        str(request.training.image_size),
+        "--lr",
+        str(request.training.lr),
+        "--patience",
+        str(request.training.patience),
+        "--grad-accum",
+        str(request.training.grad_accum),
+        "--train-split",
+        str(request.data.train_split),
+        "--val-split",
+        str(request.data.val_split),
+        "--test-split",
+        str(request.data.test_split),
+    ]
+    if request.training.batch_size is not None:
+        argv.extend(["--batch-size", str(request.training.batch_size)])
+    if request.data.sources:
+        argv.extend(["--sources", ",".join(request.data.sources)])
+    if request.data.manual_split_strategy:
+        argv.extend(["--manual-split-strategy", request.data.manual_split_strategy])
+    if request.data.manual_datasets:
+        argv.extend(["--manual-datasets", ",".join(request.data.manual_datasets)])
+    if request.data.exclude_manual_datasets:
+        argv.extend(["--exclude-manual-datasets", ",".join(request.data.exclude_manual_datasets)])
+    if request.data.exclude_videos:
+        argv.extend(["--exclude-videos", ",".join(request.data.exclude_videos)])
+    if request.data.filter_classes:
+        argv.extend(["--filter-classes", "|".join(request.data.filter_classes)])
+    if request.data.max_frames_per_class is not None:
+        argv.extend(["--max-frames-per-class", str(request.data.max_frames_per_class)])
+    if request.infer_after:
+        argv.append("--infer-after")
+    if request.infer_test_only:
+        argv.append("--infer-test-only")
+    return argv
+
+
+@router.post("/submit-local")
+async def submit_training_local(project_name: str, request: LocalTrainingSubmitRequest):
+    """Run training locally (e.g. on Windows GPU). Exports dataset then launches cli.train in background."""
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_config = load_project_config(project_path)
+    classes = project_config.get("classes", [])
+    if not classes:
+        raise HTTPException(status_code=400, detail="No classes defined")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"rfdetr_local_{timestamp}"
+    if request.label:
+        run_name = f"{run_name}_{request.label}"
+
+    runs_dir = project_path / "runs"
+    runs_dir.mkdir(exist_ok=True)
+    run_dir = runs_dir / run_name
+    run_dir.mkdir(exist_ok=True)
+
+    run_id = len(list(runs_dir.iterdir()))
+    now = datetime.utcnow()
+
+    meta = {
+        "id": run_id,
+        "name": run_name,
+        "model": f"rf-detr-{request.training.model}",
+        "status": "running",
+        "progress": 0.0,
+        "gpu_type": "local",
+        "local_pid": None,
+        "config": {
+            "training": request.training.model_dump(),
+            "data": request.data.model_dump(),
+        },
+        "created_at": now.isoformat(),
+    }
+    meta_path = run_dir / "meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    log_file = run_dir / "training.log"
+    argv = _build_local_train_argv(project_path, run_dir, request)
+
+    try:
+        with open(log_file, "w") as log_f:
+            process = subprocess.Popen(
+                argv,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                cwd=os.getcwd(),
+                env=os.environ.copy(),
+            )
+    except Exception as e:
+        meta["status"] = "failed"
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+        raise HTTPException(status_code=500, detail=f"Failed to start training: {e}")
+
+    meta["local_pid"] = process.pid
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    _local_training_processes[run_name] = process
+
+    async def poll_local_job():
+        try:
+            process.wait()
+        except Exception:
+            pass
+        if run_name in _local_training_processes:
+            del _local_training_processes[run_name]
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            return
+        meta["status"] = "completed" if process.returncode == 0 else "failed"
+        meta["completed_at"] = datetime.utcnow().isoformat()
+        if process.returncode != 0:
+            meta["progress"] = 0.0
+        # Set checkpoint_path and metrics when run completed successfully (for inference load-model)
+        if process.returncode == 0:
+            run_dir = meta_path.parent
+            results_path = run_dir / "results.json"
+            if results_path.exists():
+                try:
+                    with open(results_path) as rf:
+                        results = json.load(rf)
+                    meta["checkpoint_path"] = results.get("checkpoint_path")
+                    if results.get("metrics"):
+                        meta["metrics"] = results["metrics"]
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if not meta.get("checkpoint_path"):
+                best = find_best_checkpoint(run_dir)
+                if best is not None:
+                    meta["checkpoint_path"] = str(best)
+        try:
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+        except Exception:
+            pass
+
+    asyncio.create_task(asyncio.to_thread(poll_local_job))
+
+    return {
+        "run_name": run_name,
+        "pid": process.pid,
+        "message": "Local training started",
+    }
+
+
 # ── List / get training runs ────────────────────────────────────────────
+
+_EPOCH_HEADER_RE = re.compile(r"Epoch:\s*\[(\d+)\]")
+_BATCH_PROGRESS_RE = re.compile(r"Epoch:\s*\[\d+\]\s*\[\s*(\d+)/(\d+)\]")
+
+
+def _parse_progress_from_log(log_path: Path, total_epochs: int) -> tuple[float, int | None]:
+    """Read the tail of a training log and extract epoch-level progress.
+
+    Returns (progress_fraction, current_epoch).  progress is 0.0-1.0.
+    """
+    if total_epochs <= 0 or not log_path.exists():
+        return 0.0, None
+    try:
+        size = log_path.stat().st_size
+        read_bytes = min(size, 8192)
+        with open(log_path, "rb") as f:
+            f.seek(max(0, size - read_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return 0.0, None
+
+    current_epoch = None
+    batch_step = 0
+    batch_total = 1
+    for line in tail.splitlines():
+        m = _EPOCH_HEADER_RE.search(line)
+        if m:
+            current_epoch = int(m.group(1))
+            bm = _BATCH_PROGRESS_RE.search(line)
+            if bm:
+                batch_step = int(bm.group(1))
+                batch_total = max(int(bm.group(2)), 1)
+
+    if current_epoch is None:
+        return 0.0, None
+
+    progress = (current_epoch + batch_step / batch_total) / total_epochs
+    return min(max(progress, 0.0), 1.0), current_epoch
 
 
 def _is_local_training_run(run_dir: Path) -> bool:
@@ -362,6 +593,7 @@ async def list_training_runs(project_name: str):
         # Check live SLURM status for runs that still appear active (so UI updates when job finishes)
         current_status = meta.get("status", "unknown")
         job_id = meta.get("slurm_job_id")
+        local_pid = meta.get("local_pid")
         if job_id and current_status in ("queued", "running", "pending") and gpu_service.is_connected:
             try:
                 status_info = gpu_service.get_job_status(job_id)
@@ -374,6 +606,26 @@ async def list_training_runs(project_name: str):
                         json.dump(meta, mf, indent=2)
             except Exception:
                 pass
+        elif local_pid and current_status == "running":
+            proc = _local_training_processes.get(meta["name"])
+            if proc is not None:
+                ret = proc.poll()
+                if ret is not None:
+                    current_status = "completed" if ret == 0 else "failed"
+                    meta["status"] = current_status
+                    meta["completed_at"] = meta.get("completed_at") or datetime.utcnow().isoformat()
+                    del _local_training_processes[meta["name"]]
+                    with open(meta_path, "w") as mf:
+                        json.dump(meta, mf, indent=2)
+            else:
+                # Process finished and was already cleaned up; re-read meta from disk
+                # (poll_local_job may have written completed/failed)
+                try:
+                    with open(meta_path) as mf:
+                        meta = json.load(mf)
+                    current_status = meta.get("status", current_status)
+                except Exception:
+                    pass
         else:
             tracked = gpu_service.get_tracked_job(meta["name"])
             if tracked and tracked.status != meta.get("status"):
@@ -387,15 +639,31 @@ async def list_training_runs(project_name: str):
             if tb_info["process"].poll() is None:
                 tensorboard_url = f"http://localhost:{tb_info['port']}"
 
+        # Parse live progress from training log for running jobs
+        run_progress = meta.get("progress", 0.0)
+        current_epoch = None
+        total_epochs = None
+        if current_status == "running":
+            total_epochs = (meta.get("config") or {}).get("training", {}).get("epochs")
+            if total_epochs:
+                log_path = run_dir / "training.log"
+                if not log_path.exists() and meta.get("gpu_type") != "local":
+                    sshfs_log = Path("gpu-server") / f"data/projects/{project_name}/runs/{meta['name']}/training.log"
+                    if sshfs_log.exists():
+                        log_path = sshfs_log
+                run_progress, current_epoch = _parse_progress_from_log(log_path, total_epochs)
+
         runs.append(
             TrainingRunInfo(
                 id=meta["id"],
                 name=meta["name"],
-                status=meta.get("status", "unknown"),
+                status=current_status,
                 model=meta.get("model", meta.get("base_model", "unknown")),
                 gpu_type=meta.get("gpu_type"),
                 slurm_job_id=meta.get("slurm_job_id"),
-                progress=meta.get("progress", 0.0),
+                progress=run_progress,
+                current_epoch=current_epoch,
+                total_epochs=total_epochs,
                 metrics=meta.get("metrics"),
                 checkpoint_path=meta.get("checkpoint_path"),
                 latency_ms=meta.get("latency_ms"),
@@ -483,12 +751,66 @@ async def stream_training_logs(project_name: str, run_name: str):
     )
 
 
+@router.get("/runs/{run_name}/local-logs")
+async def stream_local_training_logs(project_name: str, run_name: str):
+    """Stream local training log file via Server-Sent Events."""
+    project_path = get_project_path(project_name)
+    run_dir = project_path / "runs" / run_name
+    log_path = run_dir / "training.log"
+    meta_path = run_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Training run not found")
+    with open(meta_path) as f:
+        meta = json.load(f)
+    if meta.get("gpu_type") != "local":
+        raise HTTPException(status_code=400, detail="Not a local training run")
+
+    async def event_generator():
+        try:
+            if log_path.exists():
+                with open(log_path) as f:
+                    for line in f:
+                        data = json.dumps({"type": "log", "stream": "stdout", "line": line.rstrip("\n")})
+                        yield f"data: {data}\n\n"
+            last_size = log_path.stat().st_size if log_path.exists() else 0
+            for _ in range(3600):
+                await asyncio.sleep(1)
+                if not log_path.exists():
+                    break
+                try:
+                    size = log_path.stat().st_size
+                    if size > last_size:
+                        with open(log_path) as f:
+                            f.seek(last_size)
+                            for line in f:
+                                data = json.dumps({"type": "log", "stream": "stdout", "line": line.rstrip("\n")})
+                                yield f"data: {data}\n\n"
+                        last_size = log_path.stat().st_size
+                except (OSError, IOError):
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            data = json.dumps({"type": "done"})
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ── Cancel ───────────────────────────────────────────────────────────────
 
 
 @router.post("/runs/{run_name}/cancel")
 async def cancel_training_run(project_name: str, run_name: str):
-    """Cancel a running/queued training job on the GPU cluster."""
+    """Cancel a running/queued training job (GPU cluster or local)."""
     project_path = get_project_path(project_name)
     meta_path = project_path / "runs" / run_name / "meta.json"
     if not meta_path.exists():
@@ -504,11 +826,24 @@ async def cancel_training_run(project_name: str, run_name: str):
         )
 
     job_id = meta.get("slurm_job_id")
+    local_pid = meta.get("local_pid")
     if job_id and gpu_service.is_connected:
         try:
             gpu_service.cancel_job(job_id)
         except Exception as e:
             logger.warning(f"scancel failed: {e}")
+    elif local_pid and run_name in _local_training_processes:
+        proc = _local_training_processes[run_name]
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            logger.warning(f"Failed to kill local process: {e}")
+        if run_name in _local_training_processes:
+            del _local_training_processes[run_name]
 
     meta["status"] = "cancelled"
     meta["completed_at"] = datetime.utcnow().isoformat()
@@ -521,6 +856,136 @@ async def cancel_training_run(project_name: str, run_name: str):
         tracked.completed_at = meta["completed_at"]
 
     return {"status": "cancelled", "message": f"Training run '{run_name}' cancelled"}
+
+
+# ── Delete ────────────────────────────────────────────────────────────────
+
+
+@router.delete("/runs/{run_name}")
+async def delete_training_run(project_name: str, run_name: str):
+    """Delete a training run and all associated inference results."""
+    import shutil
+
+    project_path = get_project_path(project_name)
+    run_dir = project_path / "runs" / run_name
+
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    # Cancel if still running
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        local_pid = meta.get("local_pid")
+        if run_name in _local_training_processes:
+            proc = _local_training_processes[run_name]
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except (subprocess.TimeoutExpired, Exception):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            del _local_training_processes[run_name]
+        job_id = meta.get("slurm_job_id")
+        if job_id and gpu_service.is_connected:
+            try:
+                gpu_service.cancel_job(job_id)
+            except Exception:
+                pass
+
+    # Stop TensorBoard if running
+    tb_key = f"{project_name}_{run_name}"
+    if tb_key in _tensorboard_processes:
+        proc = _tensorboard_processes[tb_key]["process"]
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        del _tensorboard_processes[tb_key]
+
+    # Delete the run directory
+    shutil.rmtree(run_dir, ignore_errors=True)
+
+    # Delete associated inference results
+    inference_dir = project_path / "inference" / run_name
+    if inference_dir.exists():
+        shutil.rmtree(inference_dir, ignore_errors=True)
+
+    return {"message": f"Training run '{run_name}' and associated inference results deleted"}
+
+
+# ── Rename ────────────────────────────────────────────────────────────────
+
+_VALID_NAME_RE = re.compile(r"^[\w\-. ]+$")
+
+
+@router.patch("/runs/{run_name}/rename")
+async def rename_training_run(project_name: str, run_name: str, body: dict):
+    """Rename a training run directory, meta.json, and associated inference results."""
+    new_name = (body.get("new_name") or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name is required")
+    if not _VALID_NAME_RE.match(new_name):
+        raise HTTPException(status_code=400, detail="Invalid name. Use only letters, numbers, dashes, underscores, dots, and spaces.")
+    if len(new_name) > 200:
+        raise HTTPException(status_code=400, detail="Name too long (max 200 chars)")
+
+    project_path = get_project_path(project_name)
+    runs_dir = project_path / "runs"
+    old_dir = runs_dir / run_name
+    new_dir = runs_dir / new_name
+
+    if not old_dir.exists():
+        raise HTTPException(status_code=404, detail="Training run not found")
+    if new_name == run_name:
+        return {"name": new_name}
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"A run named '{new_name}' already exists")
+
+    old_dir.rename(new_dir)
+
+    meta_path = new_dir / "meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+        meta["name"] = new_name
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+
+    # Rename inference results directory
+    inference_dir = project_path / "inference"
+    old_inf = inference_dir / run_name
+    new_inf = inference_dir / new_name
+    if old_inf.exists() and not new_inf.exists():
+        old_inf.rename(new_inf)
+        # Update run_name in result.json files
+        for result_json in new_inf.rglob("result.json"):
+            try:
+                with open(result_json) as f:
+                    data = json.load(f)
+                if data.get("run_name") == run_name:
+                    data["run_name"] = new_name
+                    with open(result_json, "w") as f:
+                        json.dump(data, f, indent=2)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Update TensorBoard tracking if running
+    old_tb_key = f"{project_name}_{run_name}"
+    new_tb_key = f"{project_name}_{new_name}"
+    if old_tb_key in _tensorboard_processes:
+        _tensorboard_processes[new_tb_key] = _tensorboard_processes.pop(old_tb_key)
+
+    # Update local training process tracking
+    if run_name in _local_training_processes:
+        _local_training_processes[new_name] = _local_training_processes.pop(run_name)
+
+    return {"name": new_name}
 
 
 # ── TensorBoard (kept) ──────────────────────────────────────────────────

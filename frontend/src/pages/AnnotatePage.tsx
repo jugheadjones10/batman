@@ -9,19 +9,26 @@ import {
   Trash2,
   ArrowLeft,
   FolderOpen,
+  Plus,
+  Wand2,
+  XCircle,
+  Loader2,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
+import { useToast } from '@/components/ui/Toaster'
 import { useStore } from '@/store/useStore'
 import { cn } from '@/lib/utils'
 import type { Annotation, BoundingBox } from '@/types'
-
-type DragMode = 'none' | 'draw' | 'move' | 'resize'
-type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se' | null
+import { AnnotationCanvas, type AnnotationCanvasHandle } from '@/components/AnnotationCanvas'
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Progress } from '@/components/ui/Progress'
 
 export default function AnnotatePage() {
   const { projectName } = useParams<{ projectName: string }>()
   const queryClient = useQueryClient()
+  const { toast } = useToast()
 
   const currentImageIndex = useStore((s) => s.currentImageIndex)
   const setCurrentImageIndex = useStore((s) => s.setCurrentImageIndex)
@@ -30,20 +37,21 @@ export default function AnnotatePage() {
   const selectedClassId = useStore((s) => s.selectedClassId)
   const setSelectedClassId = useStore((s) => s.setSelectedClassId)
 
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const thumbnailStripRef = useRef<HTMLDivElement>(null)
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
-
-  // Drag state
-  const [dragMode, setDragMode] = useState<DragMode>('none')
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null)
-  const [drawingBox, setDrawingBox] = useState<BoundingBox | null>(null)
-  const [resizeHandle, setResizeHandle] = useState<ResizeHandle>(null)
-  const [originalBox, setOriginalBox] = useState<BoundingBox | null>(null)
-  const [cursor, setCursor] = useState('crosshair')
+  const annotationCanvasRef = useRef<AnnotationCanvasHandle>(null)
 
   const [selectedDataset, setSelectedDataset] = useState<string | null>(null)
+  const [newClassName, setNewClassName] = useState('')
+  const [selectedImageIndices, setSelectedImageIndices] = useState<Set<number>>(new Set())
+  const lastClickedIndexRef = useRef<number | null>(null)
+  const [samModalOpen, setSamModalOpen] = useState(false)
+  const [samClassDescriptions, setSamClassDescriptions] = useState<Record<string, string>>({})
+  const [samConfidence, setSamConfidence] = useState(0.25)
+  const [samSkipLabeled, setSamSkipLabeled] = useState(true)
+  const [labelingJobId, setLabelingJobId] = useState<string | null>(null)
+  const [isLabelingRunning, setIsLabelingRunning] = useState(false)
+  const [labelingProgress, setLabelingProgress] = useState<{ progress: number; message: string } | null>(null)
 
   // Fetch project data
   const { data: project } = useQuery({
@@ -79,18 +87,37 @@ export default function AnnotatePage() {
   const createAnnotationMutation = useMutation({
     mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
       api.annotations.create(projectName!, data),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
       queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
+      annotationCanvasRef.current?.onAnnotationCreated(data)
     },
   })
 
   // Update annotation mutation
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box, class_label_id }: { id: number; box?: BoundingBox; class_label_id?: number }) =>
-      api.annotations.update(projectName!, id, { ...(box && { box }), ...(class_label_id !== undefined && { class_label_id }) }),
+    mutationFn: ({ id, box, class_label_id }: { id: number; box?: BoundingBox; class_label_id?: number }) => {
+      return api.annotations.update(projectName!, id, { ...(box && { box }), ...(class_label_id !== undefined && { class_label_id }) })
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
+    },
+  })
+
+  const addClassMutation = useMutation({
+    mutationFn: (name: string) => {
+      const next = [...(project?.classes ?? []), name.trim()]
+      return api.projects.updateClasses(projectName!, next)
+    },
+    onSuccess: (_, addedName) => {
+      queryClient.invalidateQueries({ queryKey: ['project', projectName] })
+      const nextIndex = (project?.classes?.length ?? 0)
+      setSelectedClassId(nextIndex)
+      setNewClassName('')
+      toast({ title: 'Class added', description: `"${addedName.trim()}" is now selected.`, type: 'success' })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Add class failed', description: error.message, type: 'error' })
     },
   })
 
@@ -113,6 +140,37 @@ export default function AnnotatePage() {
     },
   })
 
+  const clearFrameMutation = useMutation({
+    mutationFn: (frameId: string | number) => api.annotations.clearFrame(projectName!, frameId),
+    onSuccess: (data, frameId) => {
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, frameId] })
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
+      setSelectedAnnotation(null)
+      toast({ title: 'Image cleared', description: `Removed ${data.deleted} annotation(s)`, type: 'success' })
+    },
+    onError: (e: Error) => {
+      toast({ title: 'Clear failed', description: e.message, type: 'error' })
+    },
+  })
+
+  const clearSelectedImagesMutation = useMutation({
+    mutationFn: (frameIds: string[]) => api.annotations.clearFrames(projectName!, frameIds),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
+      setSelectedAnnotation(null)
+      setSelectedImageIndices(new Set())
+      toast({
+        title: 'Images cleared',
+        description: `Removed ${data.deleted} annotation(s) from ${data.frames_cleared} image(s)`,
+        type: 'success',
+      })
+    },
+    onError: (e: Error) => {
+      toast({ title: 'Clear failed', description: e.message, type: 'error' })
+    },
+  })
+
   const updateClassMutateRef = useRef(updateAnnotationClassMutation.mutate)
   updateClassMutateRef.current = updateAnnotationClassMutation.mutate
 
@@ -132,348 +190,121 @@ export default function AnnotatePage() {
     }
   }, [images.length, currentImageIndex, setCurrentImageIndex])
 
-  // Update canvas size based on current image dimensions
-  useEffect(() => {
-    const updateSize = () => {
-      if (containerRef.current && currentImage && currentImage.width > 0 && currentImage.height > 0) {
-        const container = containerRef.current
-        const aspectRatio = currentImage.width / currentImage.height
-        const maxWidth = container.clientWidth - 16
-        const maxHeight = container.clientHeight - 16
-
-        let width = maxWidth
-        let height = width / aspectRatio
-
-        if (height > maxHeight) {
-          height = maxHeight
-          width = height * aspectRatio
-        }
-
-        setCanvasSize({ width: Math.floor(width), height: Math.floor(height) })
-      }
-    }
-
-    updateSize()
-    window.addEventListener('resize', updateSize)
-    return () => window.removeEventListener('resize', updateSize)
-  }, [currentImage])
-
   const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
-  // Draw annotations
-  const drawAnnotations = useCallback(() => {
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!canvas || !ctx || !currentImage) return
+  const handleCreateAnnotation = useCallback(
+    (box: BoundingBox, classId: number) => {
+      if (!currentImage) return
+      createAnnotationMutation.mutate({ frame_id: currentImage.frame_id, class_label_id: classId, box })
+    },
+    [currentImage, createAnnotationMutation]
+  )
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+  const handleUpdateAnnotation = useCallback(
+    (id: number, box: BoundingBox) => updateAnnotationMutation.mutate({ id, box }),
+    [updateAnnotationMutation]
+  )
 
-    // Draw existing annotations
-    annotations?.forEach((ann) => {
-      const isSelected = ann.id === selectedAnnotationId
-      const color = ann.class_color || colors[0]
-      drawBox(ctx, ann.box, color, isSelected, ann.class_name)
-    })
+  const handleDeleteAnnotation = useCallback(
+    (id: number) => deleteAnnotationMutation.mutate(id),
+    [deleteAnnotationMutation]
+  )
 
-    // Draw current drawing box
-    if (drawingBox) {
-      const color = colors[selectedClassId % colors.length]
-      drawBox(ctx, drawingBox, color, true)
-    }
-  }, [annotations, selectedAnnotationId, drawingBox, currentImage, selectedClassId, canvasSize])
-
-  useEffect(() => {
-    drawAnnotations()
-  }, [drawAnnotations])
-
-  const drawBox = (
-    ctx: CanvasRenderingContext2D,
-    box: BoundingBox,
-    color: string,
-    isSelected: boolean,
-    label?: string
-  ) => {
-    const { width, height } = canvasSize
-    if (width === 0 || height === 0) return
-
-    // Convert normalized coords to pixel coords
-    const x = (box.x - box.width / 2) * width
-    const y = (box.y - box.height / 2) * height
-    const w = box.width * width
-    const h = box.height * height
-
-    // Draw fill
-    ctx.fillStyle = color + (isSelected ? '30' : '15')
-    ctx.fillRect(x, y, w, h)
-
-    // Draw border
-    ctx.strokeStyle = color
-    ctx.lineWidth = isSelected ? 2 : 1.5
-    ctx.strokeRect(x, y, w, h)
-
-    // Draw label
-    if (label) {
-      ctx.font = '11px system-ui, sans-serif'
-      const metrics = ctx.measureText(label)
-      const padding = 4
-      const labelHeight = 16
-
-      ctx.fillStyle = color
-      ctx.fillRect(x, y - labelHeight, metrics.width + padding * 2, labelHeight)
-      ctx.fillStyle = '#fff'
-      ctx.fillText(label, x + padding, y - 4)
-    }
-
-    // Draw corner handles for selected
-    if (isSelected) {
-      const handleSize = 8
-      ctx.fillStyle = '#fff'
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1.5
-      ;[
-        [x, y],
-        [x + w, y],
-        [x, y + h],
-        [x + w, y + h],
-      ].forEach(([hx, hy]) => {
-        ctx.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize)
-        ctx.strokeRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize)
+  const handleRestoreAnnotation = useCallback(
+    async (annotation: Annotation): Promise<Annotation | void> => {
+      if (!currentImage || !projectName) return
+      const created = await api.annotations.create(projectName, {
+        frame_id: currentImage.frame_id,
+        class_label_id: annotation.class_label_id,
+        box: annotation.box,
       })
-    }
-  }
-
-  // Get normalized coordinates from mouse event
-  const getNormalizedCoords = (e: React.MouseEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect()
-    if (!rect) return null
-    return {
-      x: (e.clientX - rect.left) / canvasSize.width,
-      y: (e.clientY - rect.top) / canvasSize.height,
-    }
-  }
-
-  // Check if point is on a resize handle
-  const getResizeHandle = (x: number, y: number, box: BoundingBox): ResizeHandle => {
-    const handleSize = 12 / canvasSize.width
-
-    const left = box.x - box.width / 2
-    const right = box.x + box.width / 2
-    const top = box.y - box.height / 2
-    const bottom = box.y + box.height / 2
-
-    if (Math.abs(x - left) < handleSize && Math.abs(y - top) < handleSize) return 'nw'
-    if (Math.abs(x - right) < handleSize && Math.abs(y - top) < handleSize) return 'ne'
-    if (Math.abs(x - left) < handleSize && Math.abs(y - bottom) < handleSize) return 'sw'
-    if (Math.abs(x - right) < handleSize && Math.abs(y - bottom) < handleSize) return 'se'
-
-    return null
-  }
-
-  // Check if point is inside a box
-  const isInsideBox = (x: number, y: number, box: BoundingBox): boolean => {
-    const left = box.x - box.width / 2
-    const right = box.x + box.width / 2
-    const top = box.y - box.height / 2
-    const bottom = box.y + box.height / 2
-    return x >= left && x <= right && y >= top && y <= bottom
-  }
-
-  // Get annotation at point
-  const getAnnotationAtPoint = (x: number, y: number): Annotation | null => {
-    if (!annotations) return null
-    for (let i = annotations.length - 1; i >= 0; i--) {
-      if (isInsideBox(x, y, annotations[i].box)) {
-        return annotations[i]
-      }
-    }
-    return null
-  }
-
-  // Update cursor based on mouse position
-  const updateCursor = (x: number, y: number) => {
-    if (selectedAnnotationId) {
-      const selectedAnn = annotations?.find((a) => a.id === selectedAnnotationId)
-      if (selectedAnn) {
-        const handle = getResizeHandle(x, y, selectedAnn.box)
-        if (handle === 'nw' || handle === 'se') {
-          setCursor('nwse-resize')
-          return
-        }
-        if (handle === 'ne' || handle === 'sw') {
-          setCursor('nesw-resize')
-          return
-        }
-        if (isInsideBox(x, y, selectedAnn.box)) {
-          setCursor('move')
-          return
-        }
-      }
-    }
-
-    const hovered = getAnnotationAtPoint(x, y)
-    if (hovered) {
-      setCursor('pointer')
-      return
-    }
-
-    setCursor('crosshair')
-  }
-
-  // Mouse handlers
-  const handleMouseDown = (e: React.MouseEvent) => {
-    const coords = getNormalizedCoords(e)
-    if (!coords) return
-
-    const { x, y } = coords
-
-    if (selectedAnnotationId) {
-      const selectedAnn = annotations?.find((a) => a.id === selectedAnnotationId)
-      if (selectedAnn) {
-        const handle = getResizeHandle(x, y, selectedAnn.box)
-        if (handle) {
-          setDragMode('resize')
-          setResizeHandle(handle)
-          setDragStart({ x, y })
-          setOriginalBox({ ...selectedAnn.box })
-          return
-        }
-
-        if (isInsideBox(x, y, selectedAnn.box)) {
-          setDragMode('move')
-          setDragStart({ x, y })
-          setOriginalBox({ ...selectedAnn.box })
-          return
-        }
-      }
-    }
-
-    const clickedAnn = getAnnotationAtPoint(x, y)
-    if (clickedAnn) {
-      setSelectedAnnotation(clickedAnn.id)
-      setDragMode('move')
-      setDragStart({ x, y })
-      setOriginalBox({ ...clickedAnn.box })
-      return
-    }
-
-    setSelectedAnnotation(null)
-    setDragMode('draw')
-    setDragStart({ x, y })
-  }
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    const coords = getNormalizedCoords(e)
-    if (!coords) return
-
-    const { x, y } = coords
-
-    if (dragMode === 'none') {
-      updateCursor(x, y)
-      return
-    }
-
-    if (!dragStart) return
-
-    if (dragMode === 'draw') {
-      const box: BoundingBox = {
-        x: (dragStart.x + x) / 2,
-        y: (dragStart.y + y) / 2,
-        width: Math.abs(x - dragStart.x),
-        height: Math.abs(y - dragStart.y),
-      }
-      setDrawingBox(box)
-    }
-
-    if (dragMode === 'move' && originalBox && selectedAnnotationId) {
-      const dx = x - dragStart.x
-      const dy = y - dragStart.y
-      const newBox: BoundingBox = {
-        x: Math.max(originalBox.width / 2, Math.min(1 - originalBox.width / 2, originalBox.x + dx)),
-        y: Math.max(originalBox.height / 2, Math.min(1 - originalBox.height / 2, originalBox.y + dy)),
-        width: originalBox.width,
-        height: originalBox.height,
-      }
-      setDrawingBox(null)
-      queryClient.setQueryData(
-        ['annotations', projectName, currentImage?.frame_id],
-        (old: Annotation[] | undefined) =>
-          old?.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox } : a))
-      )
-    }
-
-    if (dragMode === 'resize' && originalBox && selectedAnnotationId && resizeHandle) {
-      let left = originalBox.x - originalBox.width / 2
-      let right = originalBox.x + originalBox.width / 2
-      let top = originalBox.y - originalBox.height / 2
-      let bottom = originalBox.y + originalBox.height / 2
-
-      if (resizeHandle.includes('w')) left = Math.min(x, right - 0.01)
-      if (resizeHandle.includes('e')) right = Math.max(x, left + 0.01)
-      if (resizeHandle.includes('n')) top = Math.min(y, bottom - 0.01)
-      if (resizeHandle.includes('s')) bottom = Math.max(y, top + 0.01)
-
-      left = Math.max(0, left)
-      right = Math.min(1, right)
-      top = Math.max(0, top)
-      bottom = Math.min(1, bottom)
-
-      const newBox: BoundingBox = {
-        x: (left + right) / 2,
-        y: (top + bottom) / 2,
-        width: right - left,
-        height: bottom - top,
-      }
-
-      queryClient.setQueryData(
-        ['annotations', projectName, currentImage?.frame_id],
-        (old: Annotation[] | undefined) =>
-          old?.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox } : a))
-      )
-    }
-  }
-
-  const handleMouseUp = () => {
-    if (dragMode === 'draw' && drawingBox && currentImage) {
-      if (drawingBox.width > 0.01 && drawingBox.height > 0.01) {
-        createAnnotationMutation.mutate({
-          frame_id: currentImage.frame_id,
-          class_label_id: selectedClassId,
-          box: drawingBox,
-        })
-      }
-      setDrawingBox(null)
-    }
-
-    if ((dragMode === 'move' || dragMode === 'resize') && selectedAnnotationId) {
-      const currentAnnotations = queryClient.getQueryData<Annotation[]>([
-        'annotations',
-        projectName,
-        currentImage?.frame_id,
-      ])
-      const ann = currentAnnotations?.find((a) => a.id === selectedAnnotationId)
-      if (ann && originalBox) {
-        if (
-          ann.box.x !== originalBox.x ||
-          ann.box.y !== originalBox.y ||
-          ann.box.width !== originalBox.width ||
-          ann.box.height !== originalBox.height
-        ) {
-          updateAnnotationMutation.mutate({ id: selectedAnnotationId, box: ann.box })
-        }
-      }
-    }
-
-    setDragMode('none')
-    setDragStart(null)
-    setOriginalBox(null)
-    setResizeHandle(null)
-  }
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage.frame_id] })
+      return created
+    },
+    [currentImage, projectName, queryClient]
+  )
 
   const handleDatasetChange = useCallback((ds: string | null) => {
     setSelectedDataset(ds)
     setCurrentImageIndex(0)
     setSelectedAnnotation(null)
+    setSelectedImageIndices(new Set())
+    lastClickedIndexRef.current = null
   }, [setCurrentImageIndex, setSelectedAnnotation])
+
+  // Init SAM modal class descriptions from project when opening
+  useEffect(() => {
+    if (samModalOpen && project) {
+      const desc: Record<string, string> = {}
+      project.classes.forEach((c) => {
+        desc[c] = project.class_descriptions?.[c] ?? c
+      })
+      setSamClassDescriptions(desc)
+    }
+  }, [samModalOpen, project])
+
+  // Poll labeling job status
+  useEffect(() => {
+    if (!labelingJobId || !projectName) return
+    const t = setInterval(async () => {
+      try {
+        const status = await api.labeling.getLabelingStatus(projectName, labelingJobId)
+        setLabelingProgress({ progress: status.progress, message: status.message })
+        if (status.status === 'completed') {
+          setLabelingJobId(null)
+          setIsLabelingRunning(false)
+          setLabelingProgress(null)
+          setSamModalOpen(false)
+          queryClient.invalidateQueries({ queryKey: ['annotations', projectName] })
+          queryClient.invalidateQueries({ queryKey: ['manual-data-images', projectName] })
+          queryClient.invalidateQueries({ queryKey: ['manual-data-datasets', projectName] })
+          toast({ title: 'Auto-label complete', description: status.message, type: 'success' })
+        } else if (status.status === 'failed') {
+          setLabelingJobId(null)
+          setIsLabelingRunning(false)
+          setLabelingProgress(null)
+          toast({ title: 'Auto-label failed', description: status.message, type: 'error' })
+        }
+      } catch {
+        // ignore
+      }
+    }, 1000)
+    return () => clearInterval(t)
+  }, [labelingJobId, projectName, queryClient, toast])
+
+  const runSamAutoLabel = useCallback(async () => {
+    if (!projectName || !project || !manualDatasets) return
+    // Save class descriptions to project
+    await api.projects.updateClassDescriptions(projectName, samClassDescriptions)
+    queryClient.invalidateQueries({ queryKey: ['project', projectName] })
+    const sourceKeys =
+      selectedDataset === null
+        ? manualDatasets.datasets.map((d) => d.source_key)
+        : [manualDatasets.datasets.find((d) => d.name === selectedDataset)?.source_key].filter(Boolean) as string[]
+    if (sourceKeys.length === 0) {
+      toast({ title: 'No dataset', description: 'Select a dataset first.', type: 'error' })
+      return
+    }
+    const { job_id } = await api.labeling.autoLabel(projectName, {
+      source_keys: sourceKeys,
+      class_descriptions: samClassDescriptions,
+      confidence: samConfidence,
+      skip_labeled_frames: samSkipLabeled,
+    })
+    setLabelingJobId(job_id)
+    setIsLabelingRunning(true)
+    setLabelingProgress({ progress: 0, message: 'Starting...' })
+  }, [
+    projectName,
+    project,
+    manualDatasets,
+    selectedDataset,
+    samClassDescriptions,
+    samConfidence,
+    samSkipLabeled,
+    queryClient,
+    toast,
+  ])
 
   // Navigation
   const goToImage = useCallback((index: number) => {
@@ -483,25 +314,61 @@ export default function AnnotatePage() {
     }
   }, [images.length, setCurrentImageIndex, setSelectedAnnotation])
 
-  // Keep mutable refs for values that change often, so the keyboard handler is always current
+  const handleFilmstripClick = useCallback(
+    (index: number, e: React.MouseEvent) => {
+      const isMetaKey = e.metaKey || e.ctrlKey
+      const isShift = e.shiftKey
+
+      if (isShift && lastClickedIndexRef.current !== null) {
+        const start = Math.min(lastClickedIndexRef.current, index)
+        const end = Math.max(lastClickedIndexRef.current, index)
+        setSelectedImageIndices((prev) => {
+          const next = new Set(prev)
+          for (let i = start; i <= end; i++) next.add(i)
+          return next
+        })
+      } else if (isMetaKey) {
+        setSelectedImageIndices((prev) => {
+          const next = new Set(prev)
+          if (next.has(index)) next.delete(index)
+          else next.add(index)
+          return next
+        })
+        lastClickedIndexRef.current = index
+      } else {
+        setSelectedImageIndices(new Set())
+        lastClickedIndexRef.current = index
+        goToImage(index)
+        return
+      }
+
+      lastClickedIndexRef.current = index
+    },
+    [goToImage]
+  )
+
+  // Keep mutable refs
   const stateRef = useRef({ currentImageIndex, classCount: project?.classes.length || 0 })
   stateRef.current = { currentImageIndex, classCount: project?.classes.length || 0 }
 
   const goToImageRef = useRef(goToImage)
   goToImageRef.current = goToImage
 
-  const deleteMutateRef = useRef(deleteAnnotationMutation.mutate)
-  deleteMutateRef.current = deleteAnnotationMutation.mutate
-
-  // Keyboard shortcuts — registered once, reads latest state from refs
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return
       }
 
+      if (e.key === 'Escape') {
+        if (selectedImageIndices.size > 0) {
+          e.preventDefault()
+          setSelectedImageIndices(new Set())
+          return
+        }
+      }
+
       const { currentImageIndex: idx, classCount } = stateRef.current
-      const selId = useStore.getState().selectedAnnotationId
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
@@ -510,13 +377,6 @@ export default function AnnotatePage() {
       if (e.key === 'ArrowRight') {
         e.preventDefault()
         goToImageRef.current(idx + 1)
-      }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selId !== null) {
-        e.preventDefault()
-        deleteMutateRef.current(selId)
-      }
-      if (e.key === 'Escape') {
-        setSelectedAnnotation(null)
       }
       const num = parseInt(e.key)
       if (!isNaN(num) && num >= 1 && num <= classCount) {
@@ -527,7 +387,7 @@ export default function AnnotatePage() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [setSelectedAnnotation, handleSelectClass])
+  }, [handleSelectClass, selectedImageIndices.size])
 
   // Scroll thumbnail into view when current image changes
   useEffect(() => {
@@ -586,6 +446,17 @@ export default function AnnotatePage() {
               </div>
             </>
           )}
+          <div className="flex-1" />
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 h-8"
+            onClick={() => setSamModalOpen(true)}
+            disabled={!project?.classes?.length}
+          >
+            <Wand2 className="h-3.5 w-3.5" />
+            Auto-label with SAM3
+          </Button>
         </div>
 
         {/* Canvas area */}
@@ -594,28 +465,21 @@ export default function AnnotatePage() {
           className="flex-1 flex items-center justify-center p-2 overflow-hidden min-h-0"
         >
           {currentImage ? (
-            <div
-              className="relative flex-shrink-0"
-              style={{ width: canvasSize.width, height: canvasSize.height }}
-            >
-              <img
-                src={currentImage.url}
-                alt={currentImage.filename}
-                className="absolute inset-0 w-full h-full object-contain"
-                draggable={false}
-              />
-              <canvas
-                ref={canvasRef}
-                width={canvasSize.width}
-                height={canvasSize.height}
-                className="absolute inset-0"
-                style={{ cursor }}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onMouseLeave={handleMouseUp}
-              />
-            </div>
+            <AnnotationCanvas
+              ref={annotationCanvasRef}
+              imageUrl={currentImage.url}
+              imageWidth={currentImage.width}
+              imageHeight={currentImage.height}
+              annotations={annotations ?? []}
+              selectedAnnotationId={selectedAnnotationId}
+              selectedClassId={selectedClassId}
+              classes={project?.classes ?? []}
+              onCreateAnnotation={handleCreateAnnotation}
+              onUpdateAnnotation={handleUpdateAnnotation}
+              onDeleteAnnotation={handleDeleteAnnotation}
+              onSelectAnnotation={setSelectedAnnotation}
+              onRestoreAnnotation={handleRestoreAnnotation}
+            />
           ) : (
             <div className="text-center text-muted-foreground">
               <p>No images to annotate</p>
@@ -632,7 +496,7 @@ export default function AnnotatePage() {
         </div>
 
         {/* Navigation bar with thumbnail strip */}
-        <div className="flex-shrink-0 bg-secondary border-t border-border px-4 py-2">
+        <div className="relative flex-shrink-0 bg-secondary border-t border-border px-4 py-2">
           <div className="flex items-center gap-2 mb-2">
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToImage(0)}>
               <SkipBack className="h-3.5 w-3.5" />
@@ -653,9 +517,65 @@ export default function AnnotatePage() {
             <div className="flex-1" />
 
             <span className="text-[10px] text-muted-foreground hidden sm:block">
-              ← → navigate • Del delete • 1-9 class
+              ← → navigate • 1-9 class • Del delete • ⌘Z undo • ⌘⇧Z redo • ⌘-click / Shift-click multi-select
             </span>
           </div>
+          {selectedImageIndices.size > 0 && (
+            <div className="absolute left-4 right-4 bottom-full mb-1 z-10 flex items-center gap-2 px-2 py-1.5 rounded-md bg-neutral-900/90 border border-blue-500/40 backdrop-blur-md shadow-lg">
+              <span className="text-xs font-medium text-blue-400">
+                {selectedImageIndices.size} image{selectedImageIndices.size !== 1 ? 's' : ''} selected
+              </span>
+              <div className="flex-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-[11px] px-2 text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  const allIndices = new Set<number>()
+                  images.forEach((_, i) => allIndices.add(i))
+                  setSelectedImageIndices(allIndices)
+                }}
+              >
+                Select all
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-[11px] px-2 text-destructive hover:text-destructive"
+                disabled={clearSelectedImagesMutation.isPending}
+                onClick={() => {
+                  const frameIds = Array.from(selectedImageIndices)
+                    .filter((i) => images[i])
+                    .map((i) => String(images[i].frame_id))
+                  const annotatedCount = Array.from(selectedImageIndices).filter(
+                    (i) => images[i] && images[i].annotation_count > 0
+                  ).length
+                  if (frameIds.length === 0) return
+                  if (annotatedCount === 0) {
+                    toast({ title: 'Nothing to clear', description: 'Selected images have no annotations.', type: 'error' })
+                    return
+                  }
+                  if (confirm(`Clear annotations from ${frameIds.length} image(s)? (${annotatedCount} have annotations)`)) {
+                    clearSelectedImagesMutation.mutate(frameIds)
+                  }
+                }}
+              >
+                {clearSelectedImagesMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                ) : (
+                  <XCircle className="h-3 w-3 mr-1" />
+                )}
+                Clear annotations
+              </Button>
+              <button
+                onClick={() => setSelectedImageIndices(new Set())}
+                className="text-[11px] text-muted-foreground hover:text-foreground ml-1"
+                title="Deselect all (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
           {/* Thumbnail strip */}
           <div
@@ -663,27 +583,41 @@ export default function AnnotatePage() {
             className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin"
             style={{ maxHeight: 56 }}
           >
-            {images.map((img, i) => (
-              <button
-                key={img.frame_id}
-                data-index={i}
-                onClick={() => goToImage(i)}
-                className={cn(
-                  'flex-shrink-0 w-12 h-12 rounded overflow-hidden border-2 transition-colors',
-                  i === currentImageIndex
-                    ? 'border-amber-400 ring-1 ring-amber-400'
-                    : img.annotation_count > 0
-                    ? 'border-green-500/50 hover:border-green-500/80'
-                    : 'border-border hover:border-primary/50'
-                )}
-              >
-                <img
-                  src={img.url}
-                  alt={img.filename}
-                  className="w-full h-full object-cover"
-                />
-              </button>
-            ))}
+            {images.map((img, i) => {
+              const isSelected = selectedImageIndices.has(i)
+              return (
+                <button
+                  key={img.frame_id}
+                  data-index={i}
+                  onClick={(e) => handleFilmstripClick(i, e)}
+                  className={cn(
+                    'relative flex-shrink-0 w-12 h-12 rounded overflow-hidden border-2 transition-colors',
+                    isSelected
+                      ? 'border-blue-500 ring-1 ring-blue-500'
+                      : i === currentImageIndex
+                      ? 'border-amber-400 ring-1 ring-amber-400'
+                      : img.annotation_count > 0
+                      ? 'border-green-500/50 hover:border-green-500/80'
+                      : 'border-border hover:border-primary/50'
+                  )}
+                >
+                  <img
+                    src={img.url}
+                    alt={img.filename}
+                    className={cn('w-full h-full object-cover', isSelected && 'brightness-75')}
+                  />
+                  {isSelected && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center">
+                        <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="2,6 5,9 10,3" />
+                        </svg>
+                      </div>
+                    </div>
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       </div>
@@ -696,9 +630,9 @@ export default function AnnotatePage() {
             Label ({project?.classes.length || 0})
           </label>
           {project?.classes.length === 0 ? (
-            <p className="text-xs text-muted-foreground py-2">Add classes in project settings</p>
+            <p className="text-xs text-muted-foreground py-2 mb-2">Add your first class below.</p>
           ) : (
-            <div className="space-y-0.5 max-h-32 overflow-y-auto">
+            <div className="space-y-0.5 max-h-32 overflow-y-auto mb-2">
               {project?.classes.map((cls, i) => (
                 <button
                   key={cls}
@@ -718,13 +652,57 @@ export default function AnnotatePage() {
               ))}
             </div>
           )}
+          <div className="flex gap-1.5">
+            <Input
+              placeholder="New class name"
+              value={newClassName}
+              onChange={(e) => setNewClassName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const name = newClassName.trim()
+                  if (name && !addClassMutation.isPending) addClassMutation.mutate(name)
+                }
+              }}
+              className="h-8 text-xs flex-1 min-w-0"
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-8 px-2 shrink-0"
+              disabled={
+                !newClassName.trim() ||
+                addClassMutation.isPending ||
+                (project?.classes ?? []).includes(newClassName.trim())
+              }
+              onClick={() => addClassMutation.mutate(newClassName)}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
 
         {/* Annotations list */}
         <div className="flex-1 overflow-y-auto p-3 min-h-0">
-          <label className="text-[10px] font-medium text-muted-foreground mb-1 block uppercase tracking-wide">
-            Regions ({annotations?.length || 0})
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+              Regions ({annotations?.length || 0})
+            </label>
+            {annotations && annotations.length > 0 && currentImage && (
+              <button
+                onClick={() => {
+                  if (confirm(`Remove all ${annotations.length} annotation(s) from this image?`)) {
+                    clearFrameMutation.mutate(String(currentImage.frame_id))
+                  }
+                }}
+                disabled={clearFrameMutation.isPending}
+                className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-destructive transition-colors"
+                title="Clear all annotations on this image"
+              >
+                <XCircle className="h-3 w-3" />
+                Clear image
+              </button>
+            )}
+          </div>
 
           {annotations?.length === 0 ? (
             <p className="text-xs text-muted-foreground py-4 text-center">Click and drag to draw</p>
@@ -759,6 +737,92 @@ export default function AnnotatePage() {
           )}
         </div>
       </div>
+
+      {/* SAM3 Auto-label modal */}
+      {samModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => !isLabelingRunning && setSamModalOpen(false)}
+        >
+          <Card
+            className="w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <CardHeader className="py-4">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Wand2 className="h-5 w-5" />
+                Auto-label with SAM3
+              </CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Run SAM3 on all images in the current dataset. Edit class descriptions to improve detection.
+              </p>
+            </CardHeader>
+            <CardContent className="flex-1 overflow-y-auto py-0 space-y-4">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Class descriptions (SAM prompts)</label>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {project?.classes.map((cls) => (
+                    <div key={cls}>
+                      <span className="text-xs text-muted-foreground block mb-0.5">{cls}</span>
+                      <Input
+                        value={samClassDescriptions[cls] ?? cls}
+                        onChange={(e) =>
+                          setSamClassDescriptions((prev) => ({ ...prev, [cls]: e.target.value }))
+                        }
+                        placeholder={cls}
+                        className="h-8 text-sm"
+                        disabled={isLabelingRunning}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                  Confidence threshold: {samConfidence.toFixed(2)}
+                </label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="0.9"
+                  step="0.05"
+                  value={samConfidence}
+                  onChange={(e) => setSamConfidence(Number(e.target.value))}
+                  disabled={isLabelingRunning}
+                  className="w-full"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={samSkipLabeled}
+                  onChange={(e) => setSamSkipLabeled(e.target.checked)}
+                  disabled={isLabelingRunning}
+                />
+                <span className="text-sm">Skip already-labeled images</span>
+              </label>
+              {labelingProgress && (
+                <div className="space-y-1">
+                  <Progress value={labelingProgress.progress * 100} className="h-2" />
+                  <p className="text-xs text-muted-foreground">{labelingProgress.message}</p>
+                </div>
+              )}
+            </CardContent>
+            <CardFooter className="py-4 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => !isLabelingRunning && setSamModalOpen(false)}
+                disabled={isLabelingRunning}
+              >
+                Cancel
+              </Button>
+              <Button onClick={runSamAutoLabel} disabled={isLabelingRunning}>
+                {isLabelingRunning ? 'Running...' : 'Run'}
+              </Button>
+            </CardFooter>
+          </Card>
+        </div>
+      )}
     </div>
   )
 }

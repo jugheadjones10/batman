@@ -27,11 +27,17 @@ class VideoProcessor:
             str(video_path),
         ]
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "ffprobe not found. Video metadata requires FFmpeg. "
+                "Install it with: sudo apt install ffmpeg (Linux) or brew install ffmpeg (macOS)."
+            ) from None
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:

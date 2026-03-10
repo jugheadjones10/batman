@@ -89,7 +89,7 @@ uv run python -m cli.train \
   --output-dir runs/my_first_run
 ```
 
-To control which data sources are used and how manual data is split:
+To control which data sources are used:
 
 ```bash
 # Use only manual data for training
@@ -98,20 +98,14 @@ uv run python -m cli.train \
   --sources manual_data \
   --epochs 50
 
-# Use both sources, with manual data reserved for validation
+# Use both sources
 uv run python -m cli.train \
   --project data/projects/MyProject \
   --sources manual_data,imports \
-  --manual-split-strategy val_only \
   --epochs 50
 ```
 
-Available `--manual-split-strategy` options:
-
-- `train_only` (default) -- use manual data only for training
-- `val_only` -- use manual data only for validation
-- `proportional` -- distribute across all splits
-- `all_splits` -- include manual data in every split
+By default, all data is pooled together and split uniformly by the train/val/test ratios (70/15/15). To override how manual data is placed, use `--manual-split-strategy` (e.g. `val_only`, `train_only`).
 
 See [Training CLI](cli/train.md) for detailed options.
 

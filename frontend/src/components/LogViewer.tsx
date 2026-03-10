@@ -24,10 +24,8 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
   const errRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
 
-  const scrollToBottom = useCallback((ref: React.RefObject<HTMLDivElement | null>, autoscroll: boolean) => {
-    if (ref.current && autoscroll) {
-      ref.current.scrollTop = ref.current.scrollHeight
-    }
+  const scrollToBottom = useCallback((el: HTMLDivElement | null) => {
+    if (el) el.scrollTop = el.scrollHeight
   }, [])
 
   useEffect(() => {
@@ -100,9 +98,15 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
     }
   }, [url, maxLines])
 
+  // Double-rAF ensures the DOM has been laid out with the new content before scrolling
   useEffect(() => {
-    scrollToBottom(outRef, autoscrollOut)
-    scrollToBottom(errRef, autoscrollErr)
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (autoscrollOut) scrollToBottom(outRef.current)
+        if (autoscrollErr) scrollToBottom(errRef.current)
+      })
+    })
+    return () => cancelAnimationFrame(id)
   }, [lines, scrollToBottom, autoscrollOut, autoscrollErr])
 
   const outLines = lines.filter((l) => l.stream === 'stdout' || l.stream === 'system')
@@ -139,7 +143,7 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
   }
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-[#0d1117] flex flex-col min-h-[28rem]">
+    <div className="border border-border rounded-lg overflow-hidden bg-[#0d1117] flex flex-col h-[42rem]">
       <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
           <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
@@ -156,9 +160,9 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
         </span>
       </div>
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left: stdout (.out) */}
-        <div className="flex flex-col flex-1 min-w-0 border-r border-border">
+        <div className="flex flex-col flex-1 min-w-0 border-r border-border overflow-hidden">
           <div className="shrink-0 px-2 py-1 bg-muted/30 border-b border-border flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">.out (stdout)</span>
             {!autoscrollOut && connectionState === 'streaming' && (
@@ -168,7 +172,7 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
                 className="h-5 px-1.5 text-xs gap-0.5"
                 onClick={() => {
                   setAutoscrollOut(true)
-                  scrollToBottom(outRef, true)
+                  scrollToBottom(outRef.current)
                 }}
               >
                 <ArrowDown className="h-3 w-3" />
@@ -201,7 +205,7 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
         </div>
 
         {/* Right: stderr (.err) */}
-        <div className="flex flex-col flex-1 min-w-0">
+        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <div className="shrink-0 px-2 py-1 bg-muted/30 border-b border-border flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">.err (stderr)</span>
             {!autoscrollErr && connectionState === 'streaming' && (
@@ -211,7 +215,7 @@ export default function LogViewer({ url, maxLines = 5000 }: LogViewerProps) {
                 className="h-5 px-1.5 text-xs gap-0.5"
                 onClick={() => {
                   setAutoscrollErr(true)
-                  scrollToBottom(errRef, true)
+                  scrollToBottom(errRef.current)
                 }}
               >
                 <ArrowDown className="h-3 w-3" />

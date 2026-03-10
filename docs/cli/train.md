@@ -33,7 +33,7 @@ python -m cli.train --project data/projects/MyProject
   {"name": "max-frames-per-class", "type": "number", "min": 1, "description": "Cap frames per class to this number (random sample, deterministic with seed)", "group": "Data Preparation"},
   {"name": "no-clean", "type": "flag", "description": "Do not remove existing dataset directory", "group": "Data Preparation"},
   {"name": "sources", "type": "text", "description": "Data sources (comma-separated): manual_data,imports. Overrides --video-id.", "group": "Data Preparation"},
-  {"name": "manual-split-strategy", "type": "choice", "choices": ["proportional", "val_only", "train_only", "all_splits"], "default": "train_only", "description": "How to distribute manual data across splits", "group": "Data Preparation"},
+  {"name": "manual-split-strategy", "type": "choice", "choices": ["proportional", "val_only", "train_only", "train_and_val", "all_splits"], "default": "proportional", "description": "How to distribute manual data across splits (proportional = unified split for all data)", "group": "Data Preparation"},
   {"name": "manual-datasets", "type": "text", "description": "Only include these manual subdatasets (comma-separated). Use (root) for root-level images.", "group": "Data Preparation"},
   {"name": "exclude-manual-datasets", "type": "text", "description": "Exclude these manual subdatasets (comma-separated). Mutually exclusive with --manual-datasets.", "group": "Data Preparation"},
   {"name": "output-dir", "type": "path", "description": "Output directory for training run (default: {project}/runs/rfdetr_run)", "group": "Training"},
@@ -105,9 +105,10 @@ Fraction of data for validation.
 
 #### `--test-split FRACTION`
 
-Fraction of data for testing.
+Fraction of data reserved for the **test** set. The test set is not used during training; it is for a final, unbiased evaluation after training.
 
 - **Default**: `0.15` (15%)
+- **Small datasets**: Use `0` to skip a test set and put all data into train and validation only (e.g. `--train-split 0.85 --val-split 0.15 --test-split 0`). This maximizes data used for training while still keeping a validation set for early stopping.
 
 #### `--video-id ID`
 
@@ -145,14 +146,15 @@ Data sources to include (comma-separated). Valid values: `manual_data`, `imports
 
 How to distribute manual data across train/val/test splits.
 
-- **Choices**: `proportional`, `val_only`, `train_only`, `all_splits`
-- **Default**: `train_only`
+- **Choices**: `proportional`, `val_only`, `train_only`, `train_and_val`, `all_splits`
+- **Default**: `proportional`
 
 | Strategy | Behavior |
 | --- | --- |
-| `train_only` | All manual data goes to train split |
+| `proportional` | **Unified split** — all data (manual, video, imports) is pooled together and split by the train/val/test ratios. This is the default. |
+| `train_only` | All manual data goes to train split (other data split normally) |
 | `val_only` | All manual data goes to validation split |
-| `proportional` | Distribute across all splits proportionally |
+| `train_and_val` | Distribute manual data between train and validation only (none in test) |
 | `all_splits` | Include manual data in every split |
 
 #### `--manual-datasets NAMES`
@@ -590,6 +592,7 @@ To include root-level images (those directly in `manual_data/`, not in a subdire
 
 ## Related
 
+- **[Label CLI](label.md)** - SAM3 auto-labeling from the command line
 - **[Inference CLI](inference.md)** - Run trained models
 - **[Submit Training Script](../scripts/submit-train.md)** - SLURM training
 - **[Training Workflow Guide](../guides/training.md)** - Complete workflow

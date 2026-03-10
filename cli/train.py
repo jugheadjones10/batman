@@ -103,6 +103,7 @@ def save_training_config(args: argparse.Namespace, output_dir: Path, dataset_dir
             "manual_split_strategy": args.manual_split_strategy,
             "manual_datasets": args.manual_datasets,
             "exclude_manual_datasets": args.exclude_manual_datasets,
+            "exclude_videos": args.exclude_videos,
             "resume": str(args.resume) if args.resume else None,
         },
         "environment": {
@@ -157,6 +158,11 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
     if exclude_ds:
         print(f"  Manual datasets (exclude): {exclude_ds}")
 
+    exclude_vids = None
+    if args.exclude_videos:
+        exclude_vids = [s.strip() for s in args.exclude_videos.split(",") if s.strip()]
+        print(f"  Excluded videos: {exclude_vids}")
+
     # Parse video_id argument
     video_id = parse_video_id(args.video_id)
 
@@ -164,6 +170,7 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
     _, annotations_data, class_names, project_config = load_project_data(
         args.project, video_id, sources=sources_list,
         manual_datasets=manual_ds, exclude_manual_datasets=exclude_ds,
+        exclude_videos=exclude_vids,
     )
 
     print(f"✓ Loaded project: {project_config.get('name', 'Unknown')}")
@@ -183,6 +190,7 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
         frames_meta, _, _, _ = load_project_data(
             args.project, video_id, sources=sources_list,
             manual_datasets=manual_ds, exclude_manual_datasets=exclude_ds,
+            exclude_videos=exclude_vids,
         )
         frames_by_class: dict[str, set[str]] = defaultdict(set)
         for ann in annotations_data.values():
@@ -227,6 +235,7 @@ def cmd_prepare(args: argparse.Namespace) -> DatasetStats:
         manual_data_split_strategy=args.manual_split_strategy,
         manual_datasets=manual_ds,
         exclude_manual_datasets=exclude_ds,
+        exclude_videos=exclude_vids,
     )
 
     print_dataset_stats(stats)
@@ -471,9 +480,9 @@ Examples:
     data_group.add_argument(
         "--manual-split-strategy",
         type=str,
-        choices=["proportional", "val_only", "train_only", "all_splits"],
-        default="train_only",
-        help="How to distribute manual data across splits (default: train_only)",
+        choices=["proportional", "val_only", "train_only", "train_and_val", "all_splits"],
+        default="proportional",
+        help="How to distribute manual data across splits (default: proportional = unified split for all data)",
     )
     data_group.add_argument(
         "--manual-datasets",
@@ -488,6 +497,13 @@ Examples:
         default=None,
         help="Exclude these manual data subdatasets (comma-separated). "
              "Mutually exclusive with --manual-datasets. Example: --exclude-manual-datasets negative_examples",
+    )
+    data_group.add_argument(
+        "--exclude-videos",
+        type=str,
+        default=None,
+        help="Exclude these video IDs from training (comma-separated). "
+             "Example: --exclude-videos video_1,video_3",
     )
 
     # Training

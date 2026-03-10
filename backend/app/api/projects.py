@@ -65,6 +65,7 @@ async def list_projects():
                 path=str(project_dir),
                 description=config.get("description"),
                 classes=config.get("classes", []),
+                class_descriptions=config.get("class_descriptions", {}),
                 config=ProjectConfig(**config.get("config", {})),
                 video_count=config.get("video_count", 0),
                 frame_count=config.get("frame_count", 0),
@@ -81,8 +82,8 @@ async def list_projects():
 @router.post("", response_model=ProjectInfo)
 async def create_project(data: ProjectCreate):
     """Create a new project."""
-    # Sanitize project name for filesystem
-    safe_name = "".join(c for c in data.name if c.isalnum() or c in "._- ").strip()
+    # Sanitize project name for filesystem (must match URL-decoded path param for lookups)
+    safe_name = "".join(c for c in data.name if c.isalnum() or c in "._- +").strip()
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid project name")
 
@@ -105,6 +106,7 @@ async def create_project(data: ProjectCreate):
         "name": data.name,
         "description": data.description,
         "classes": data.classes,
+        "class_descriptions": {},
         "config": ProjectConfig().model_dump(),
         "video_count": 0,
         "frame_count": 0,
@@ -123,6 +125,7 @@ async def create_project(data: ProjectCreate):
         path=str(project_path),
         description=data.description,
         classes=data.classes,
+        class_descriptions={},
         config=ProjectConfig(),
         created_at=now,
         updated_at=now,
@@ -146,6 +149,7 @@ async def get_project(project_name: str):
         path=str(project_path),
         description=config.get("description"),
         classes=config.get("classes", []),
+        class_descriptions=config.get("class_descriptions", {}),
         config=ProjectConfig(**config.get("config", {})),
         video_count=config.get("video_count", 0),
         frame_count=config.get("frame_count", 0),
@@ -182,7 +186,30 @@ async def update_project_classes(project_name: str, classes: list[str]):
         raise HTTPException(status_code=404, detail="Project not found")
 
     config = load_project_config(project_path)
+    old_classes = set(config.get("classes", []))
+    class_sources = config.get("class_sources", {})
+    for cls in classes:
+        if cls not in old_classes and cls not in class_sources:
+            class_sources[cls] = "manual"
     config["classes"] = classes
+    config["class_sources"] = class_sources
+    config["updated_at"] = datetime.utcnow().isoformat()
+
+    save_project_config(project_path, config)
+
+    return await get_project(project_name)
+
+
+@router.put("/{project_name}/class-descriptions", response_model=ProjectInfo)
+async def update_class_descriptions(project_name: str, descriptions: dict[str, str]):
+    """Update SAM3 class descriptions (prompts per class)."""
+    project_path = get_project_path(project_name)
+
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    config = load_project_config(project_path)
+    config["class_descriptions"] = descriptions
     config["updated_at"] = datetime.utcnow().isoformat()
 
     save_project_config(project_path, config)
@@ -309,18 +336,18 @@ async def get_classes_with_details(project_name: str):
                         source = meta.get("source", "video")
                         frames_by_source[frame_id] = source
     
-    # Count annotations per class, broken down by source
+    # Count annotations per class, broken down by source (include class_ids that appear in annotations but not in config)
     annotations_path = project_path / "labels" / "current" / "annotations.json"
-    class_stats = {i: {"total": 0, "sources": {}} for i in range(len(classes))}
-    
+    class_stats: dict[int, dict] = {}
+
     if annotations_path.exists():
         with open(annotations_path) as f:
             annotations = json.load(f)
         for ann in annotations.values():
             class_id = ann.get("class_label_id", 0)
             if class_id not in class_stats:
-                continue
-            
+                class_stats[class_id] = {"total": 0, "sources": {}}
+
             frame_id = ann.get("frame_id", 0)
             frame_id_str = str(frame_id)
             ann_source = ann.get("source", "manual")
@@ -334,21 +361,24 @@ async def get_classes_with_details(project_name: str):
                 source = "roboflow" if frame_id >= -1000000 else "local_coco"
             else:
                 source = ann_source
-            
+
             class_stats[class_id]["total"] += 1
             class_stats[class_id]["sources"][source] = class_stats[class_id]["sources"].get(source, 0) + 1
-    
+
+    # Include every class index: from config and any that have annotations (placeholder "class_N" if missing from config)
+    all_indices = sorted(set(range(len(classes))) | set(class_stats.keys()))
     result = []
-    for i, cls in enumerate(classes):
+    for i in all_indices:
+        name = classes[i] if i < len(classes) else f"class_{i}"
         stats = class_stats.get(i, {"total": 0, "sources": {}})
         result.append({
             "id": i,
-            "name": cls,
-            "source": class_sources.get(cls, "manual"),
+            "name": name,
+            "source": class_sources.get(name, "manual"),
             "annotation_count": stats["total"],
             "annotation_sources": stats["sources"],
         })
-    
+
     return result
 
 

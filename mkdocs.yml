@@ -27,6 +27,7 @@ nav:
   - CLI Tools:
       - Overview: cli/index.md
       - Training: cli/train.md
+      - Label (SAM3): cli/label.md
       - Inference: cli/inference.md
       - Benchmark Latency: cli/benchmark-latency.md
       - Compare Latency: cli/compare-latency.md
@@ -49,6 +50,7 @@ nav:
       - Experiment Framework: guides/experiments.md
       - Benchmarking Guide: guides/benchmarking.md
       - SLURM Usage: guides/slurm.md
+      - Troubleshooting: troubleshooting.md
   - API Reference: api/index.md
 
 markdown_extensions:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -47,8 +48,12 @@ class ClassManager:
         This only changes the class name in the project configuration.
         Annotations are not modified since they reference classes by index.
 
+        If old_name is a placeholder "class_N" (e.g. from annotations that
+        reference an index not yet in the project's class list), the class
+        list is extended so index N exists, then it is renamed to new_name.
+
         Args:
-            old_name: Current class name
+            old_name: Current class name (or placeholder "class_N")
             new_name: New class name
 
         Returns:
@@ -57,8 +62,19 @@ class ClassManager:
         Raises:
             ValueError: If old_name doesn't exist or new_name already exists
         """
+        # Materialize placeholder: annotations may reference class_label_id 0
+        # while project has no classes; API shows "class_0". Renaming it should
+        # add/update the project class list.
         if old_name not in self.project.classes:
-            raise ValueError(f"Class '{old_name}' not found")
+            m = re.match(r"^class_(\d+)$", old_name)
+            if m:
+                idx = int(m.group(1))
+                while len(self.project.classes) <= idx:
+                    placeholder = f"class_{len(self.project.classes)}"
+                    self.project.classes.append(placeholder)
+                    self.project.class_sources[placeholder] = "manual"
+            else:
+                raise ValueError(f"Class '{old_name}' not found")
 
         if new_name in self.project.classes and new_name != old_name:
             raise ValueError(f"Class '{new_name}' already exists")

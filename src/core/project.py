@@ -71,6 +71,7 @@ class Project:
     description: str = ""
     classes: list[str] = field(default_factory=list)
     class_sources: dict[str, str] = field(default_factory=dict)
+    class_descriptions: dict[str, str] = field(default_factory=dict)  # SAM3 prompts per class
     config: ProjectConfig = field(default_factory=ProjectConfig)
     video_count: int = 0
     frame_count: int = 0
@@ -193,6 +194,7 @@ class Project:
             description=data.get("description", ""),
             classes=data.get("classes", []),
             class_sources=data.get("class_sources", {}),
+            class_descriptions=data.get("class_descriptions", {}),
             config=config,
             video_count=data.get("video_count", 0),
             frame_count=data.get("frame_count", 0),
@@ -259,6 +261,7 @@ class Project:
             "description": self.description,
             "classes": self.classes,
             "class_sources": self.class_sources,
+            "class_descriptions": self.class_descriptions,
             "config": {
                 "sample_mode": self.config.sample_mode,
                 "sample_interval": self.config.sample_interval,

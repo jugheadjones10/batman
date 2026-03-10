@@ -21,6 +21,9 @@ class AutoLabelRequest(BaseModel):
 
     video_ids: Optional[list[int | str]] = None  # None = all videos (int or source_key str)
     frame_ids: Optional[list[int | str]] = None  # None = all frames for selected videos
+    source_keys: Optional[list[str]] = None  # Filter by source (e.g. manual_data, manual_data__dataset, video_1)
+    class_descriptions: Optional[dict[str, str]] = None  # SAM3 prompts per class name; fallback to class name
+    confidence: float = 0.25
     use_exemplars: bool = True
     tracking_mode: Literal["visible_only", "occlusion_tolerant"] = "visible_only"
     skip_labeled_frames: bool = True  # Skip frames that already have annotations
@@ -237,7 +240,7 @@ async def _run_auto_labeling(
         labeled_frame_ids = set()
         if request.skip_labeled_frames and not request.overwrite:
             for ann in existing_annotations.values():
-                labeled_frame_ids.add(ann.get("frame_id"))
+                labeled_frame_ids.add(str(ann.get("frame_id")))
             logger.info(f"Found {len(labeled_frame_ids)} frames with existing annotations (will skip)")
 
         _labeling_jobs[job_id].message = "Loading frames..."
@@ -251,6 +254,8 @@ async def _run_auto_labeling(
                     continue
 
                 video_id = int(video_dir.name) if video_dir.name.lstrip("-").isdigit() else video_dir.name
+                if request.source_keys is not None and video_id not in request.source_keys:
+                    continue
                 if request.video_ids and video_id not in request.video_ids:
                     continue
 
@@ -261,9 +266,10 @@ async def _run_auto_labeling(
 
                     for frame_id, frame_data in frames_meta.items():
                         fid = int(frame_id) if isinstance(frame_id, str) and frame_id.isdigit() else frame_id
-                        if request.frame_ids and fid not in request.frame_ids:
+                        fid_str = str(fid)
+                        if request.frame_ids and fid_str not in {str(x) for x in (request.frame_ids or [])}:
                             continue
-                        if request.skip_labeled_frames and fid in labeled_frame_ids:
+                        if request.skip_labeled_frames and fid_str in labeled_frame_ids:
                             continue
 
                         frames_to_process.append({
@@ -329,12 +335,17 @@ async def _run_auto_labeling(
                 continue
 
             # Run detection
+            class_prompts = [
+                (request.class_descriptions or {}).get(cls, cls) for cls in classes
+            ]
             try:
                 detections = await sam_labeler.label_frame(
                     image_path,
-                    classes,
+                    class_prompts,
                     exemplars=exemplars if request.use_exemplars else None,
                 )
+            except RuntimeError:
+                raise  # SAM worker crashed etc.; let job fail with clear message
             except Exception as e:
                 logger.warning(f"Failed to label frame {frame['id']}: {e}")
                 continue

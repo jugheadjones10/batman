@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from loguru import logger
+from pydantic import BaseModel
 
 from backend.app.api.projects import get_project_path, load_project_config, save_project_config
 from backend.app.models.annotation import (
@@ -236,6 +237,72 @@ async def update_annotation(project_name: str, annotation_id: int, data: Annotat
         created_at=datetime.fromisoformat(ann_data.get("created_at", now.isoformat())),
         updated_at=now,
     )
+
+
+@router.delete("/frames/{frame_id}/annotations")
+async def clear_frame_annotations(project_name: str, frame_id: str):
+    """Delete all annotations on a frame, resetting it to an unannotated state."""
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    annotations_meta = _load_annotations_meta(project_path)
+
+    to_delete = [
+        ann_id for ann_id, ann_data in annotations_meta.items()
+        if str(ann_data.get("frame_id")) == str(frame_id)
+    ]
+
+    if not to_delete:
+        return {"message": "No annotations found on this frame", "deleted": 0}
+
+    for ann_id in to_delete:
+        del annotations_meta[ann_id]
+
+    _save_annotations_meta(project_path, annotations_meta)
+
+    config = load_project_config(project_path)
+    config["annotation_count"] = len(annotations_meta)
+    config["updated_at"] = datetime.utcnow().isoformat()
+    save_project_config(project_path, config)
+
+    return {"message": f"Cleared {len(to_delete)} annotations from frame", "deleted": len(to_delete)}
+
+
+class ClearFramesRequest(BaseModel):
+    frame_ids: list[str]
+
+
+@router.post("/annotations/clear-frames")
+async def clear_multiple_frames(project_name: str, data: ClearFramesRequest):
+    """Delete all annotations from multiple frames at once."""
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    annotations_meta = _load_annotations_meta(project_path)
+    target_ids = set(data.frame_ids)
+
+    to_delete = [
+        ann_id for ann_id, ann_data in annotations_meta.items()
+        if str(ann_data.get("frame_id")) in target_ids
+    ]
+
+    for ann_id in to_delete:
+        del annotations_meta[ann_id]
+
+    _save_annotations_meta(project_path, annotations_meta)
+
+    config = load_project_config(project_path)
+    config["annotation_count"] = len(annotations_meta)
+    config["updated_at"] = datetime.utcnow().isoformat()
+    save_project_config(project_path, config)
+
+    return {
+        "message": f"Cleared {len(to_delete)} annotations from {len(data.frame_ids)} frames",
+        "deleted": len(to_delete),
+        "frames_cleared": len(data.frame_ids),
+    }
 
 
 @router.delete("/annotations/{annotation_id}")

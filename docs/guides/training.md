@@ -42,8 +42,11 @@ python -m cli.importer roboflow \
 
 1. Start development server: `./scripts/run_dev.sh`
 2. Open http://localhost:5173
-3. Create project and upload videos
-4. Use SAM3 auto-labeling and manual correction
+3. Create project and upload videos or add manual data
+4. **Annotate**:
+   - **Manual data**: Go to Annotate, select a dataset, draw boxes or use **Auto-label with SAM3** to generate labels from class descriptions.
+   - **Video**: From the project page, click **Annotate** on a video to open the video annotation page. Extract frames (interval or seconds), then draw boxes or use **Auto-label with SAM3** on selected frames (all visible, current frame, or unlabeled only).
+5. Optionally refine labels manually, then train
 
 ## Step 2: Organize Classes
 
@@ -72,6 +75,41 @@ python -m cli.classes rename \
 ```
 
 ## Step 3: Configure Training
+
+### Train / validation / test splits
+
+Data is split into three parts:
+
+| Split | Role | When it's used |
+|-------|------|-----------------|
+| **Train** | Learn from it | Every epoch; gradients and weight updates come from this set. |
+| **Validation** | Monitor generalization | After each epoch (or periodically). Used for **early stopping** and picking the best checkpoint. Not used to update weights. |
+| **Test** | Unbiased final estimate | Only after training is finished. Used to report “how well does this model generalize?” without that data influencing any training decision. |
+
+**Why both validation and test?**  
+Validation is “used” indirectly: you stop training when val loss stops improving and you choose the best checkpoint by val metric. So validation performance is slightly **optimistically biased**. The **test** set is never used for any decision; it gives an unbiased estimate for reporting (e.g. in papers or for comparing runs).
+
+**When you have very little data**  
+Splitting 70% train / 15% val / 15% test means 30% of your data never trains the model. For small projects that can feel wasteful.
+
+**Remedy: no test set**  
+You can set the test fraction to **0** so all data goes into train and validation only. Then:
+
+- You use **all** data either for training or for validation (e.g. 85% train, 15% val).
+- You still get early stopping and best-checkpoint selection from the validation set.
+- You won’t have a separate unbiased test metric; validation metrics are your main signal. That’s a common and acceptable trade-off when data is limited.
+
+**CLI:** use `--test-split 0` (and e.g. `--train-split 0.85 --val-split 0.15` so the fractions sum to 1.0):
+
+```bash
+python -m cli.train \
+  --project data/projects/MyProject \
+  --train-split 0.85 \
+  --val-split 0.15 \
+  --test-split 0
+```
+
+**Web UI:** In Training → Advanced options, set **Test split** to `0` and adjust **Train split** / **Val split** (e.g. 0.85 / 0.15) so they sum to 1.0.
 
 ### Choose Model Size
 
@@ -353,6 +391,38 @@ python -m cli.train \
 ```
 
 See the [Training CLI docs](../cli/train.md#manual-data-subdatasets) for the full directory layout and naming conventions.
+
+## Annotation workflow (UI and CLI)
+
+### Web UI: manual data
+
+- Place images in `manual_data/` (or subfolders) and sync.
+- Open **Annotate**, choose a dataset, then draw bounding boxes or click **Auto-label with SAM3**.
+- In the SAM3 modal you can edit **class descriptions** (used as prompts), set confidence, and choose to skip already-labeled images. Descriptions are saved to the project.
+
+### Web UI: video frames
+
+- Upload a video, then open **Annotate** on that video.
+- Extract frames (e.g. every N frames), then use the filmstrip to switch between **Interval** (every Nth frame) and **Annotated** (only frames that have labels).
+- Draw boxes or use **Auto-label with SAM3** with scope: all visible frames, current frame only, or unlabeled frames only.
+
+### CLI: SAM3 auto-label
+
+From the command line you can run SAM3 on video frames or manual-data sources:
+
+```bash
+# All frames in a video
+python -m cli.label --project data/projects/MyProject --video video_1
+
+# All manual_data images
+python -m cli.label --project data/projects/MyProject --source manual_data
+
+# Custom class descriptions
+python -m cli.label --project data/projects/MyProject --video video_1 \
+  --descriptions '{"hook":"yellow metal crane hook"}'
+```
+
+See the **[Label CLI](../cli/label.md)** for full options (`--frames`, `--skip-labeled`, etc.).
 
 ## Step 8: Export and Deploy
 

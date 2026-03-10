@@ -8,6 +8,7 @@ from loguru import logger
 
 from backend.app.api import annotations, gpu, imports, inference, labeling, manual_data, projects, training, videos
 from backend.app.config import settings
+from src.core.trainer import get_device, get_device_info
 
 app = FastAPI(
     title=settings.app_name,
@@ -18,7 +19,13 @@ app = FastAPI(
 # CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5180",
+        "http://127.0.0.1:5180",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,6 +62,17 @@ async def get_config():
         "default_tracking_mode": settings.default_tracking_mode,
         "available_models": ["nano", "small", "base", "medium", "large"],
     }
+
+
+@app.get("/api/device-info")
+async def get_device_info_endpoint():
+    """Get detected GPU/device info for local training and inference."""
+    device = get_device(settings.device)
+    info = get_device_info(device)
+    result = {"device": info["device"], "name": info["name"]}
+    if "memory_gb" in info:
+        result["memory_gb"] = round(info["memory_gb"], 2)
+    return result
 
 
 @app.on_event("startup")

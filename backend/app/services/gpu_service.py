@@ -539,6 +539,7 @@ class GPUService:
         manual_split_strategy: str = "train_only",
         manual_datasets: list[str] | None = None,
         exclude_manual_datasets: list[str] | None = None,
+        exclude_videos: list[str] | None = None,
         infer_after: bool = False,
         infer_test_only: bool = False,
     ) -> tuple[str, str]:
@@ -588,6 +589,8 @@ class GPUService:
             cli_args.append(f"--manual-datasets {','.join(manual_datasets)}")
         if exclude_manual_datasets:
             cli_args.append(f"--exclude-manual-datasets {','.join(exclude_manual_datasets)}")
+        if exclude_videos:
+            cli_args.append(f"--exclude-videos {','.join(exclude_videos)}")
 
         cli_cmd = " \\\n    ".join(cli_args)
 

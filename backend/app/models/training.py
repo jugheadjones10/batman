@@ -31,12 +31,13 @@ class GPUConfig(BaseModel):
 class DataConfig(BaseModel):
     """Dataset preparation options (mirrors cli.train data flags)."""
 
-    sources: Optional[list[Literal["manual_data", "imports"]]] = None
+    sources: Optional[list[Literal["manual_data", "imports", "videos"]]] = None
     manual_split_strategy: Literal[
-        "proportional", "val_only", "train_only", "all_splits"
-    ] = "train_only"
+        "proportional", "val_only", "train_only", "train_and_val", "all_splits"
+    ] = "proportional"
     manual_datasets: Optional[list[str]] = None
     exclude_manual_datasets: Optional[list[str]] = None
+    exclude_videos: Optional[list[str]] = None
     filter_classes: Optional[list[str]] = None
     max_frames_per_class: Optional[int] = None
     train_split: float = 0.70
@@ -55,6 +56,16 @@ class TrainingSubmitRequest(BaseModel):
     infer_test_only: bool = False
 
 
+class LocalTrainingSubmitRequest(BaseModel):
+    """Request to run training locally (e.g. on Windows GPU)."""
+
+    label: Optional[str] = None
+    training: TrainingConfig = Field(default_factory=TrainingConfig)
+    data: DataConfig = Field(default_factory=DataConfig)
+    infer_after: bool = False
+    infer_test_only: bool = False
+
+
 class TrainingRunInfo(BaseModel):
     """Training run information read from meta.json."""
 
@@ -65,6 +76,8 @@ class TrainingRunInfo(BaseModel):
     gpu_type: Optional[str] = None
     slurm_job_id: Optional[str] = None
     progress: float = 0.0
+    current_epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
     metrics: Optional[dict] = None
     checkpoint_path: Optional[str] = None
     latency_ms: Optional[float] = None
@@ -118,7 +131,7 @@ class InferenceConfig(BaseModel):
     confidence_threshold: float = Field(0.0, ge=0, le=1)
     iou_threshold: float = Field(0.45, ge=0, le=1)
     max_detections: int = Field(100, ge=1, le=1000)
-    enable_tracking: bool = True
+    enable_tracking: bool = False
     tracking_mode: Literal["visible_only", "occlusion_tolerant"] = "visible_only"
     detection_interval: int = Field(1, ge=1, le=30)
 
@@ -140,10 +153,10 @@ class DatasetExportConfig(BaseModel):
     format: Literal["yolo", "coco", "both"] = "both"
     include_unapproved: bool = False
     split_by_video: bool = True
-    data_sources: Optional[list[Literal["manual_data", "imports"]]] = None
+    data_sources: Optional[list[Literal["manual_data", "imports", "videos"]]] = None
     manual_data_split_strategy: Literal[
-        "proportional", "val_only", "train_only", "all_splits"
-    ] = "train_only"
+        "proportional", "val_only", "train_only", "train_and_val", "all_splits"
+    ] = "proportional"
     manual_datasets: Optional[list[str]] = None
     exclude_manual_datasets: Optional[list[str]] = None
 

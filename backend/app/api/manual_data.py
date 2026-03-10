@@ -1,11 +1,12 @@
 """Manual data folder API - scan and serve images from project_root/manual_data/."""
 
 import json
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
 from PIL import Image
@@ -16,6 +17,27 @@ router = APIRouter(prefix="/projects/{project_name}/manual-data", tags=["manual-
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 SOURCE_KEY = "manual_data"
+
+
+def _sanitize_dataset_name(name: str) -> str:
+    """Sanitize subdirectory name for filesystem (alnum, ._- space, +)."""
+    if not name or not name.strip():
+        return ""
+    s = "".join(c for c in name.strip() if c.isalnum() or c in "._- +").strip()
+    # Collapse multiple spaces
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitize filename: keep alnum, ._- and one extension."""
+    base = Path(name).stem
+    ext = (Path(name).suffix or "").lower()
+    safe_base = "".join(c for c in base if c.isalnum() or c in "._- ").strip() or "image"
+    safe_base = re.sub(r"\s+", "_", safe_base)
+    if ext not in IMAGE_EXTENSIONS:
+        ext = ".jpg"
+    return safe_base + ext
 
 
 def _get_image_dimensions(image_path: Path) -> tuple[int, int]:
@@ -274,6 +296,187 @@ async def list_datasets(project_name: str):
     return {"datasets": datasets}
 
 
+@router.patch("/datasets/{dataset_name}")
+async def rename_dataset(project_name: str, dataset_name: str, body: dict):
+    """Rename a manual-data subdirectory dataset.
+
+    Body: ``{"new_name": "..."}``.
+    Renames the folder on disk, migrates frame IDs, and updates annotations.
+    Cannot rename the root dataset ``(root)``.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if dataset_name == "(root)":
+        raise HTTPException(status_code=400, detail="Cannot rename the root dataset")
+
+    new_name_raw: str = body.get("new_name", "").strip()
+    new_name = _sanitize_dataset_name(new_name_raw)
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Invalid dataset name")
+    if new_name == dataset_name:
+        return {"name": dataset_name, "message": "No change"}
+
+    manual_data_dir = project_path / "manual_data"
+    old_dir = manual_data_dir / dataset_name
+    new_dir = manual_data_dir / new_name
+
+    if not old_dir.exists():
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"A dataset named '{new_name}' already exists")
+
+    # Rename the images directory
+    old_dir.rename(new_dir)
+
+    old_source_key = _source_key_for_dataset(dataset_name)
+    new_source_key = _source_key_for_dataset(new_name)
+    frames_root = project_path / "frames"
+    old_frames_dir = frames_root / old_source_key
+    new_frames_dir = frames_root / new_source_key
+
+    migrations: list[tuple[str, str]] = []
+
+    if old_frames_dir.exists():
+        # Load old frames.json and build new one with updated frame_ids/paths
+        old_meta_path = old_frames_dir / "frames.json"
+        with open(old_meta_path) as f:
+            old_meta: dict = json.load(f)
+
+        new_meta: dict = {}
+        for old_id, data in old_meta.items():
+            # Frame IDs look like: manual_data__oldname_000042
+            if old_id.startswith(f"{old_source_key}_"):
+                suffix = old_id[len(old_source_key):]  # e.g. "_000042"
+                new_id = f"{new_source_key}{suffix}"
+            else:
+                new_id = old_id  # shouldn't happen, keep as-is
+
+            # Update paths pointing into the old directory
+            old_image_path = Path(data.get("image_path", ""))
+            try:
+                rel = old_image_path.relative_to(old_dir)
+                new_image_path = str(new_dir / rel)
+            except ValueError:
+                new_image_path = data.get("image_path", "")
+
+            new_meta[new_id] = {
+                **data,
+                "video_id": new_source_key,
+                "source": new_source_key,
+                "image_path": new_image_path,
+            }
+            if new_id != old_id:
+                migrations.append((old_id, new_id))
+
+        # Write new frames dir
+        new_frames_dir.mkdir(parents=True, exist_ok=True)
+        with open(new_frames_dir / "frames.json", "w") as f:
+            json.dump(new_meta, f, indent=2)
+
+        # Remove old frames dir
+        shutil.rmtree(old_frames_dir)
+
+    # Migrate annotations
+    if migrations:
+        _apply_annotation_migrations(project_path, migrations)
+
+    # Update project config
+    config = load_project_config(project_path)
+    total_frames = 0
+    if frames_root.exists():
+        for meta_file in frames_root.rglob("frames.json"):
+            with open(meta_file) as f:
+                total_frames += len(json.load(f))
+    config["frame_count"] = total_frames
+    config["updated_at"] = datetime.utcnow().isoformat()
+    save_project_config(project_path, config)
+
+    return {
+        "old_name": dataset_name,
+        "new_name": new_name,
+        "frames_migrated": len(migrations),
+    }
+
+
+@router.post("/upload")
+async def upload_manual_data_images(
+    project_name: str,
+    dataset: str | None = None,
+    files: list[UploadFile] = File(...),
+):
+    """Upload image files into manual_data/ or manual_data/{dataset}/, then sync.
+
+    Optional query param ``dataset`` is the subdirectory name (e.g. "crane_closeups").
+    If omitted, images are stored in the root manual_data/ folder.
+    Accepts multiple files via multipart/form-data (field name: files).
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    manual_data_dir = project_path / "manual_data"
+    manual_data_dir.mkdir(parents=True, exist_ok=True)
+
+    if dataset is not None and dataset.strip():
+        safe_dataset = _sanitize_dataset_name(dataset)
+        if not safe_dataset:
+            raise HTTPException(status_code=400, detail="Invalid dataset name")
+        target_dir = manual_data_dir / safe_dataset
+    else:
+        safe_dataset = ""
+        target_dir = manual_data_dir
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    seen_stem_index: dict[str, int] = {}  # stem -> last used index (0 = original name)
+    saved: list[str] = []
+
+    for upload in files:
+        if not upload.filename:
+            continue
+        ext = Path(upload.filename).suffix.lower()
+        if ext not in IMAGE_EXTENSIONS:
+            logger.warning(f"Skipping non-image file: {upload.filename}")
+            continue
+        safe_name = _sanitize_filename(upload.filename)
+        stem, suf = Path(safe_name).stem, Path(safe_name).suffix
+        idx = seen_stem_index.get(stem, -1)
+        idx += 1
+        seen_stem_index[stem] = idx
+        final_name = f"{stem}_{idx}{suf}" if idx else safe_name
+        dest_path = target_dir / final_name
+        while dest_path.exists():
+            idx += 1
+            seen_stem_index[stem] = idx
+            final_name = f"{stem}_{idx}{suf}"
+            dest_path = target_dir / final_name
+        try:
+            content = await upload.read()
+            dest_path.write_bytes(content)
+            saved.append(dest_path.name)
+        except Exception as e:
+            logger.exception(f"Failed to save {upload.filename}")
+            raise HTTPException(status_code=500, detail=f"Failed to save {upload.filename}: {e}")
+
+    if not saved:
+        return {
+            "uploaded": 0,
+            "dataset": dataset or "(root)",
+            "filenames": [],
+            "sync": None,
+        }
+
+    # Run sync so new images appear in frames.json
+    sync_result = await sync_manual_data(project_name)
+    return {
+        "uploaded": len(saved),
+        "dataset": safe_dataset or "(root)",
+        "filenames": saved,
+        "sync": sync_result,
+    }
+
+
 @router.get("/images")
 async def list_manual_data_images(
     project_name: str,
@@ -370,6 +573,86 @@ async def list_manual_data_images(
     if dataset is not None:
         result["dataset"] = dataset
     return result
+
+
+@router.delete("/images/{frame_id}")
+async def delete_manual_data_image(project_name: str, frame_id: str):
+    """Delete a single manual-data image by its frame_id.
+
+    Removes the file from disk, drops it from the relevant frames.json, and
+    removes any annotations that reference this frame.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    frames_root = project_path / "frames"
+
+    # Locate which frames.json contains this frame_id
+    target_meta_path: Path | None = None
+    frame_data: dict | None = None
+
+    if frames_root.exists():
+        for sub in frames_root.iterdir():
+            if not sub.is_dir():
+                continue
+            if sub.name != SOURCE_KEY and not sub.name.startswith(f"{SOURCE_KEY}__"):
+                continue
+            meta_path = sub / "frames.json"
+            if not meta_path.exists():
+                continue
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if frame_id in meta:
+                target_meta_path = meta_path
+                frame_data = meta[frame_id]
+                break
+
+    if target_meta_path is None or frame_data is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Delete the file from disk
+    image_path = Path(frame_data.get("image_path", ""))
+    if image_path.exists():
+        image_path.unlink()
+
+    # Remove from frames.json
+    with open(target_meta_path) as f:
+        meta = json.load(f)
+    del meta[frame_id]
+    with open(target_meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    # Remove annotations referencing this frame
+    annotations_deleted = 0
+    ann_path = project_path / "labels" / "current" / "annotations.json"
+    if ann_path.exists():
+        with open(ann_path) as f:
+            annotations = json.load(f)
+        keys_to_delete = [k for k, v in annotations.items() if str(v.get("frame_id")) == frame_id]
+        for k in keys_to_delete:
+            del annotations[k]
+            annotations_deleted += 1
+        if keys_to_delete:
+            with open(ann_path, "w") as f:
+                json.dump(annotations, f, indent=2)
+
+    # Update project config frame count
+    config = load_project_config(project_path)
+    total_frames = 0
+    if frames_root.exists():
+        for meta_file in frames_root.rglob("frames.json"):
+            with open(meta_file) as f:
+                total_frames += len(json.load(f))
+    config["frame_count"] = total_frames
+    config["updated_at"] = datetime.utcnow().isoformat()
+    save_project_config(project_path, config)
+
+    return {
+        "deleted": True,
+        "frame_id": frame_id,
+        "annotations_deleted": annotations_deleted,
+    }
 
 
 @router.get("/image/{filename:path}")

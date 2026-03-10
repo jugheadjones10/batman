@@ -6,6 +6,7 @@ Batman provides a comprehensive set of command-line tools for training, inferenc
 
 ### 🎓 Training & Inference
 - **[train](train.md)** - Train RF-DETR models on Batman projects or COCO datasets
+- **[label](label.md)** - SAM3 auto-labeling on video frames or manual data
 - **[inference](inference.md)** - Run inference on images and videos with tracking support
 
 ### ⚡ Performance Testing

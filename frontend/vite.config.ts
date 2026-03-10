@@ -15,8 +15,17 @@ export default defineConfig({
     strictPort: false,  // Use next available port if occupied
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        // In WSL2 + Windows: if frontend runs in Windows and backend in WSL, use localhost or set VITE_API_PROXY_TARGET
+        target: process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
+        timeout: 120000, // 2 min so long-running / auto-label etc. don't socket hang up
+        // Forward Range header for video streaming (browsers use it for <video>)
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            const range = req.headers.range
+            if (range) proxyReq.setHeader('Range', range)
+          })
+        },
       },
     },
   },

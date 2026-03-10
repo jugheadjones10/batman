@@ -4,6 +4,7 @@ export interface Project {
   path: string
   description?: string
   classes: string[]
+  class_descriptions?: Record<string, string>
   config: ProjectConfig
   video_count: number
   frame_count: number
@@ -35,6 +36,8 @@ export interface Video {
   has_proxy: boolean
   frame_count: number
   annotation_count: number
+  /** Number of frames that have at least one annotation */
+  annotated_frame_count?: number
   exclude_from_training: boolean
   created_at: string
 }
@@ -107,8 +110,8 @@ export interface Track {
 // Training types (RF-DETR only, GPU cluster execution)
 export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large'
 export type GPUType = 'h200' | 'h100-96' | 'h100-47' | 'a100-80' | 'a100-40' | 'nv'
-export type DataSource = 'manual_data' | 'imports'
-export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'all_splits'
+export type DataSource = 'manual_data' | 'imports' | 'videos'
+export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'train_and_val' | 'all_splits'
 
 export interface TrainingConfig {
   model: RFDETRModelSize
@@ -131,6 +134,7 @@ export interface DataConfig {
   manual_split_strategy: ManualDataSplitStrategy
   manual_datasets?: string[] | null
   exclude_manual_datasets?: string[] | null
+  exclude_videos?: string[] | null
   filter_classes?: string[] | null
   max_frames_per_class?: number | null
   train_split: number
@@ -145,6 +149,21 @@ export interface TrainingSubmitRequest {
   data: DataConfig
   infer_after: boolean
   infer_test_only: boolean
+}
+
+/** Request to run training locally (e.g. on Windows GPU). No GPU cluster config. */
+export interface LocalTrainingSubmitRequest {
+  label?: string | null
+  training: TrainingConfig
+  data: DataConfig
+  infer_after: boolean
+  infer_test_only: boolean
+}
+
+export interface DeviceInfo {
+  device: string
+  name: string
+  memory_gb?: number
 }
 
 export interface DatasetExportConfig {
@@ -165,6 +184,8 @@ export interface TrainingRun {
   gpu_type?: string
   slurm_job_id?: string
   progress: number
+  current_epoch?: number | null
+  total_epochs?: number | null
   metrics?: {
     mAP50?: number
     'mAP50-95'?: number

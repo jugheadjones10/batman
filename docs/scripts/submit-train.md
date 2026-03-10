@@ -22,7 +22,7 @@ Submit RF-DETR training jobs to SLURM clusters with automatic GPU configuration 
   {"name": "model", "type": "choice", "choices": ["nano", "small", "base", "medium", "large"], "default": "base", "description": "Model size", "group": "Training"},
   {"name": "label", "type": "text", "description": "Label appended to run name", "group": "Training"},
   {"name": "sources", "type": "text", "description": "Data sources (comma-separated): manual_data,imports", "group": "Training"},
-  {"name": "manual-split", "type": "choice", "choices": ["proportional", "val_only", "train_only", "all_splits"], "default": "train_only", "description": "Manual data split strategy", "group": "Training"},
+  {"name": "manual-split", "type": "choice", "choices": ["proportional", "val_only", "train_only", "all_splits"], "default": "proportional", "description": "Manual data split strategy (proportional = unified split)", "group": "Training"},
   {"name": "manual-datasets", "type": "text", "description": "Only include these manual subdatasets (comma-separated)", "group": "Training"},
   {"name": "exclude-manual-datasets", "type": "text", "description": "Exclude these manual subdatasets (comma-separated)", "group": "Training"},
   {"name": "max-frames-per-class", "type": "number", "min": 1, "description": "Cap frames per class", "group": "Training"},
@@ -149,7 +149,7 @@ Data sources to include (comma-separated). Valid: `manual_data`, `imports`.
 How to split manual data across train/val/test.
 
 - **Choices**: `proportional`, `val_only`, `train_only`, `all_splits`
-- **Default**: `train_only`
+- **Default**: `proportional` (all data pooled together and split uniformly)
 
 #### `--manual-datasets=NAMES`
 

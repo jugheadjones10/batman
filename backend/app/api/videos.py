@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -47,6 +47,7 @@ async def list_videos(project_name: str):
 
         for vid_id, vid_data in videos_meta.items():
             annotation_count = _count_video_annotations(project_path, vid_id)
+            annotated_frame_count = _count_annotated_frames(project_path, vid_id)
             vid_id_out = vid_id if isinstance(vid_id, str) and not vid_id.isdigit() else int(vid_id)
 
             videos.append(
@@ -61,6 +62,7 @@ async def list_videos(project_name: str):
                     has_proxy=vid_data.get("has_proxy", False),
                     frame_count=vid_data.get("frame_count", 0),
                     annotation_count=annotation_count,
+                    annotated_frame_count=annotated_frame_count,
                     exclude_from_training=vid_data.get("exclude_from_training", False),
                     created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
                 )
@@ -74,15 +76,16 @@ async def upload_video(
     project_name: str,
     file: UploadFile = File(...),
     create_proxy: bool = True,
-    exclude_from_training: bool = False,
+    exclude_from_training: Optional[str] = Query(None, description="Set to 'true' to exclude from training"),
 ):
     """Upload a video to the project."""
+    exclude_from_training_bool = str(exclude_from_training or "").lower() in ("true", "1", "yes")
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Validate file type
-    if not file.filename.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".webm")):
+    if not file.filename.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")):
         raise HTTPException(status_code=400, detail="Unsupported video format")
 
     videos_dir = project_path / "videos"
@@ -111,9 +114,16 @@ async def upload_video(
     # Get video info
     try:
         info = await VideoProcessor.get_video_info(video_path)
+    except FileNotFoundError:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail="ffprobe not found. Install FFmpeg: sudo apt install ffmpeg (Linux) or brew install ffmpeg (macOS).",
+        )
     except Exception as e:
         # Clean up on failure
-        video_path.unlink()
+        video_path.unlink(missing_ok=True)
+        logger.exception(f"Failed to process video {video_path}: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to process video: {e}")
 
     # Create proxy video if requested (video_id is e.g. video_1)
@@ -139,7 +149,7 @@ async def upload_video(
         "total_frames": info["total_frames"],
         "has_proxy": proxy_path is not None and proxy_path.exists(),
         "frame_count": 0,
-        "exclude_from_training": exclude_from_training,
+        "exclude_from_training": exclude_from_training_bool,
         "created_at": now.isoformat(),
     }
 
@@ -152,20 +162,27 @@ async def upload_video(
     config["updated_at"] = now.isoformat()
     save_project_config(project_path, config)
 
-    return VideoUploadResponse(
-        video=VideoInfo(
-            id=video_id,
-            filename=file.filename,
-            width=info["width"],
-            height=info["height"],
-            fps=info["fps"],
-            duration=info["duration"],
-            total_frames=info["total_frames"],
-            has_proxy=proxy_path is not None and proxy_path.exists(),
-            created_at=now,
-        ),
-        message="Video uploaded successfully",
-    )
+    try:
+        return VideoUploadResponse(
+            video=VideoInfo(
+                id=video_id,
+                filename=file.filename,
+                width=info["width"],
+                height=info["height"],
+                fps=info["fps"],
+                duration=info["duration"],
+                total_frames=info["total_frames"],
+                has_proxy=proxy_path is not None and proxy_path.exists(),
+                frame_count=0,
+                annotation_count=0,
+                exclude_from_training=exclude_from_training_bool,
+                created_at=now,
+            ),
+            message="Video uploaded successfully",
+        )
+    except Exception as e:
+        logger.exception(f"Failed to build upload response: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload succeeded but response failed: {e}")
 
 
 @router.get("/{video_id}", response_model=VideoInfo)
@@ -179,6 +196,7 @@ async def get_video(project_name: str, video_id: str):
 
     vid_data = videos_meta[video_id]
     annotation_count = _count_video_annotations(project_path, video_id)
+    annotated_frame_count = _count_annotated_frames(project_path, video_id)
     vid_id_out = video_id if not video_id.isdigit() else int(video_id)
 
     return VideoInfo(
@@ -192,6 +210,7 @@ async def get_video(project_name: str, video_id: str):
         has_proxy=vid_data.get("has_proxy", False),
         frame_count=vid_data.get("frame_count", 0),
         annotation_count=annotation_count,
+        annotated_frame_count=annotated_frame_count,
         exclude_from_training=vid_data.get("exclude_from_training", False),
         created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
     )
@@ -219,6 +238,7 @@ async def update_video(project_name: str, video_id: str, update: VideoUpdateRequ
 
     vid_data = videos_meta[video_id]
     annotation_count = _count_video_annotations(project_path, video_id)
+    annotated_frame_count = _count_annotated_frames(project_path, video_id)
     vid_id_out = video_id if not video_id.isdigit() else int(video_id)
 
     return VideoInfo(
@@ -232,6 +252,7 @@ async def update_video(project_name: str, video_id: str, update: VideoUpdateRequ
         has_proxy=vid_data.get("has_proxy", False),
         frame_count=vid_data.get("frame_count", 0),
         annotation_count=annotation_count,
+        annotated_frame_count=annotated_frame_count,
         exclude_from_training=vid_data.get("exclude_from_training", False),
         created_at=datetime.fromisoformat(vid_data.get("created_at", datetime.utcnow().isoformat())),
     )
@@ -395,6 +416,8 @@ async def list_frames(project_name: str, video_id: str):
     with open(meta_path) as f:
         frames_meta = json.load(f)
 
+    frame_annotation_counts = _get_frame_annotation_counts(project_path, video_id)
+
     return [
         FrameInfo(
             id=frame_id if isinstance(frame_id, str) and not frame_id.isdigit() else int(frame_id),
@@ -404,9 +427,69 @@ async def list_frames(project_name: str, video_id: str):
             image_path=frame_data["image_path"],
             is_approved=frame_data.get("is_approved", False),
             needs_review=frame_data.get("needs_review", True),
+            annotation_count=frame_annotation_counts.get(str(frame_id), 0),
         )
         for frame_id, frame_data in frames_meta.items()
     ]
+
+
+@router.get("/{video_id}/frames/{frame_id}/image")
+async def get_frame_image_by_id(project_name: str, video_id: str, frame_id: str):
+    """Serve a pre-extracted frame JPEG from disk (for annotation UI)."""
+    project_path = get_project_path(project_name)
+    frames_dir = project_path / "frames" / video_id
+    if not frames_dir.exists():
+        raise HTTPException(status_code=404, detail="Frames not found")
+    image_path = frames_dir / f"{frame_id}.jpg"
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Frame image not found")
+    return FileResponse(image_path, media_type="image/jpeg")
+
+
+@router.get("/{video_id}/thumbnail")
+async def get_video_thumbnail(project_name: str, video_id: str):
+    """Return a small preview thumbnail for the video (generated on first request, then cached)."""
+    project_path = get_project_path(project_name)
+    videos_meta = await _load_videos_meta(project_path)
+
+    if video_id not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    vid_data = videos_meta[video_id]
+    thumb_dir = project_path / "videos" / "thumbnails"
+    thumb_path = thumb_dir / f"{video_id}.jpg"
+
+    if thumb_path.exists():
+        return FileResponse(thumb_path, media_type="image/jpeg")
+
+    video_path = Path(vid_data["original_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    total_frames = vid_data.get("total_frames", 0)
+    target_frame = max(0, int(total_frames * 0.1)) if total_frames > 0 else 0
+
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        ret, frame = cap.read()
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = cap.read()
+        if not ret:
+            raise HTTPException(status_code=500, detail="Could not read frame from video")
+
+        h, w = frame.shape[:2]
+        thumb_w = 320
+        thumb_h = int(h * (thumb_w / w))
+        thumb = cv2.resize(frame, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(thumb_path), thumb, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    finally:
+        cap.release()
+
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @router.delete("/{video_id}")
@@ -428,6 +511,9 @@ async def delete_video(project_name: str, video_id: str):
         proxy_path = Path(vid_data["proxy_path"])
         if proxy_path.exists():
             proxy_path.unlink()
+
+    thumb_path = project_path / "videos" / "thumbnails" / f"{video_id}.jpg"
+    thumb_path.unlink(missing_ok=True)
 
     frames_dir = project_path / "frames" / video_id
     if frames_dir.exists():
@@ -484,3 +570,33 @@ def _count_video_annotations(project_path: Path, video_id: str | int) -> int:
             total += 1
     return total
 
+
+def _count_annotated_frames(project_path: Path, video_id: str | int) -> int:
+    """Return how many frames for this video have at least one annotation."""
+    frames_dir = project_path / "frames" / str(video_id)
+    if not frames_dir.exists():
+        return 0
+    frames_meta_path = frames_dir / "frames.json"
+    if not frames_meta_path.exists():
+        return 0
+    with open(frames_meta_path) as f:
+        frames_meta = json.load(f)
+    frame_annotation_counts = _get_frame_annotation_counts(project_path, video_id)
+    return sum(1 for fid in frames_meta if frame_annotation_counts.get(str(fid), 0) > 0)
+
+
+def _get_frame_annotation_counts(project_path: Path, video_id: str | int) -> dict[str, int]:
+    """Return per-frame annotation counts for a video."""
+    annotations_path = project_path / "labels" / "current" / "annotations.json"
+    if not annotations_path.exists():
+        return {}
+    with open(annotations_path) as f:
+        annotations = json.load(f)
+    counts: dict[str, int] = {}
+    for ann in annotations.values():
+        fid = ann.get("frame_id")
+        if fid is None:
+            continue
+        key = str(fid)
+        counts[key] = counts.get(key, 0) + 1
+    return counts

@@ -1,0 +1,32 @@
+---
+description: RF-DETR backbone resolution constraints per model variant
+globs: src/core/trainer.py
+alwaysApply: false
+---
+
+# RF-DETR Resolution Requirements
+
+The RF-DETR backbone requires input resolution to be divisible by `patch_size * num_windows` (called `block_size`). This varies by model:
+
+| Model       | patch_size | num_windows | block_size |
+|-------------|-----------|-------------|------------|
+| base        | 14        | 4           | **56**     |
+| large       | 14        | 4           | **56**     |
+| small       | 16        | 2           | **32**     |
+| nano        | 16        | 2           | **32**     |
+| medium      | 16        | 2           | **32**     |
+
+When computing `resolution` from a user-supplied `image_size`, always round down to the nearest multiple of the model's `block_size`, not a hardcoded value.
+
+```python
+# ✅ Correct — model-aware rounding
+block_size = 56 if model_size in ("base", "large") else 32
+resolution = (image_size // block_size) * block_size
+
+# ❌ Wrong — hardcoded divisor only works for base/large
+resolution = (image_size // 56) * 56
+```
+
+## Inference: use the correct model class
+
+When loading a checkpoint for inference, always match the RF-DETR class to the variant that produced the checkpoint. Loading a "small" checkpoint into `RFDETRBase` will crash with a `state_dict` shape mismatch. Use `_load_rfdetr_model()` (in `trainer.py`) or `InferenceRunner._load_rfdetr_model()` instead of importing `RFDETRBase` directly.

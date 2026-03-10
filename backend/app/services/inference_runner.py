@@ -11,6 +11,7 @@ from loguru import logger
 from backend.app.config import settings
 from backend.app.services.tracker import Tracker, TrackingConfig
 from src.core.inference import Detection, draw_detections
+from src.core.trainer import get_device, get_device_info
 
 
 class InferenceRunner:
@@ -22,25 +23,52 @@ class InferenceRunner:
         self.model_type: Optional[str] = None
         self.class_names: list[str] = []
         self.current_run_name: Optional[str] = None
+        self._device: Optional[str] = None
+
+    @staticmethod
+    def _load_rfdetr_model(checkpoint_path: Path, model_size: str = "base"):
+        """Instantiate the correct RF-DETR variant for the given model size."""
+        if model_size == "large":
+            from rfdetr import RFDETRLarge as Model
+        elif model_size == "medium":
+            from rfdetr import RFDETRMedium as Model
+        elif model_size == "small":
+            from rfdetr import RFDETRSmall as Model
+        elif model_size == "nano":
+            from rfdetr import RFDETRNano as Model
+        else:
+            from rfdetr import RFDETRBase as Model
+        return Model(pretrain_weights=str(checkpoint_path))
 
     async def load_model(
         self,
         checkpoint_path: Path,
         class_names: list[str],
         model_type: str = "yolo",
+        device: str = "auto",
+        model_size: str = "base",
     ):
-        """Load a trained model."""
+        """Load a trained model onto the given device (auto, cuda, mps, cpu)."""
         self.model_path = checkpoint_path
         self.model_type = model_type
         self.class_names = class_names
+        resolved = get_device(device)
+        self._device = resolved
+        info = get_device_info(resolved)
+        logger.info(f"Loading model on {info.get('name', resolved)}")
 
         if model_type == "yolo":
             from ultralytics import YOLO
             self.model = YOLO(str(checkpoint_path))
         elif model_type == "rfdetr":
-            from rfdetr import RFDETRBase
-            self.model = RFDETRBase()
-            self.model.load(str(checkpoint_path))
+            self.model = self._load_rfdetr_model(checkpoint_path, model_size)
+            if hasattr(self.model, "to") and resolved != "cpu":
+                try:
+                    import torch
+                    dev = torch.device(resolved)
+                    self.model.to(dev)
+                except Exception as e:
+                    logger.warning(f"Could not move RF-DETR to {resolved}: {e}")
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
@@ -67,8 +95,11 @@ class InferenceRunner:
             )
             detections = self._parse_yolo_results(results[0])
         else:
+            # Load image to get shape for RF-DETR parser
+            img = cv2.imread(str(image_path))
+            shape = img.shape[:2] if img is not None else None
             results = self.model.predict(str(image_path), threshold=confidence_threshold)
-            detections = self._parse_rfdetr_results(results)
+            detections = self._parse_rfdetr_results(results, img_shape=shape)
 
         inference_time = (time.perf_counter() - start_time) * 1000
 
@@ -82,7 +113,7 @@ class InferenceRunner:
         video_path: Path,
         confidence_threshold: float = 0.0,
         iou_threshold: float = 0.45,
-        enable_tracking: bool = True,
+        enable_tracking: bool = False,
         tracking_config: Optional[TrackingConfig] = None,
         start_frame: int = 0,
         end_frame: Optional[int] = None,
@@ -127,7 +158,7 @@ class InferenceRunner:
                     detections = self._parse_yolo_results(results[0])
                 else:
                     results = self.model.predict(frame, threshold=confidence_threshold)
-                    detections = self._parse_rfdetr_results(results)
+                    detections = self._parse_rfdetr_results(results, img_shape=frame.shape[:2])
 
                 # Apply tracking
                 if tracker:
@@ -153,7 +184,7 @@ class InferenceRunner:
         output_path: Optional[Path] = None,
         confidence_threshold: float = 0.0,
         iou_threshold: float = 0.45,
-        enable_tracking: bool = True,
+        enable_tracking: bool = False,
         tracking_config: Optional[TrackingConfig] = None,
         detection_interval: int = 1,  # Run detection every N frames (1 = every frame)
     ) -> dict:
@@ -215,7 +246,7 @@ class InferenceRunner:
                         detections = self._parse_yolo_results(results[0])
                     else:
                         results = self.model.predict(frame, threshold=confidence_threshold)
-                        detections = self._parse_rfdetr_results(results)
+                        detections = self._parse_rfdetr_results(results, img_shape=frame.shape[:2])
                     
                     last_detections = detections
                 else:
@@ -273,6 +304,38 @@ class InferenceRunner:
             if writer:
                 writer.release()
 
+        # Re-encode to H.264 so browsers can play the video
+        if output_path and output_path.exists():
+            # #region agent log
+            import json as _json; open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux","message":"re-encoding to h264","data":{"output_path":str(output_path)},"timestamp":int(time.time()*1000)})+'\n')
+            # #endregion
+            tmp_path = output_path.with_suffix(".tmp.mp4")
+            try:
+                import subprocess as _sp
+                result_ffmpeg = _sp.run(
+                    ["ffmpeg", "-y", "-i", str(output_path), "-c:v", "libx264",
+                     "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
+                     "-movflags", "+faststart", "-an", str(tmp_path)],
+                    capture_output=True, timeout=300,
+                )
+                if result_ffmpeg.returncode == 0 and tmp_path.exists():
+                    tmp_path.replace(output_path)
+                    # #region agent log
+                    open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux_done","message":"h264 remux succeeded","data":{"size":output_path.stat().st_size},"timestamp":int(time.time()*1000)})+'\n')
+                    # #endregion
+                else:
+                    # #region agent log
+                    open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux_fail","message":"ffmpeg failed","data":{"rc":result_ffmpeg.returncode,"stderr":result_ffmpeg.stderr.decode()[-500:]},"timestamp":int(time.time()*1000)})+'\n')
+                    # #endregion
+                    logger.warning(f"ffmpeg re-encode failed (rc={result_ffmpeg.returncode}), keeping mp4v file")
+            except FileNotFoundError:
+                logger.warning("ffmpeg not found; video will remain in mp4v codec (may not play in browsers)")
+            except Exception as e:
+                logger.warning(f"ffmpeg re-encode error: {e}")
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+
         # Compute statistics
         avg_time = sum(frame_times) / len(frame_times) if frame_times else 0
         avg_fps = 1000 / avg_time if avg_time > 0 else 0
@@ -318,11 +381,52 @@ class InferenceRunner:
 
         return detections
 
-    def _parse_rfdetr_results(self, results) -> list[dict]:
-        """Parse RF-DETR results to common format."""
-        # RF-DETR result parsing would go here
-        # This is a placeholder implementation
-        return []
+    def _parse_rfdetr_results(self, results, img_shape=None) -> list[dict]:
+        """Parse RF-DETR model output to common format (normalized center box, class_name, etc.).
+        img_shape: (height, width) of the image; required to normalize pixel coords from the model.
+        """
+        out = []
+        if results is None:
+            return out
+        if not hasattr(results, "xyxy") or not hasattr(results, "class_id") or not hasattr(results, "confidence"):
+            return out
+        n = len(results.xyxy)
+        if n == 0:
+            return out
+        # RF-DETR returns pixel coords; normalize to [0,1] for drawing (expects center + size)
+        if img_shape is not None:
+            img_h, img_w = int(img_shape[0]), int(img_shape[1])
+            if img_w <= 0 or img_h <= 0:
+                return out
+        else:
+            img_w = img_h = 1
+        for i in range(n):
+            xyxy = results.xyxy[i]
+            if hasattr(xyxy, "tolist"):
+                xyxy = xyxy.tolist()
+            x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
+            w_px = x2 - x1
+            h_px = y2 - y1
+            if w_px <= 0 or h_px <= 0:
+                continue
+            cx_norm = (x1 + x2) / 2 / img_w
+            cy_norm = (y1 + y2) / 2 / img_h
+            w_norm = w_px / img_w
+            h_norm = h_px / img_h
+            class_id = int(results.class_id[i])
+            conf = float(results.confidence[i])
+            class_name = (
+                self.class_names[class_id]
+                if class_id < len(self.class_names)
+                else f"class_{class_id}"
+            )
+            out.append({
+                "box": {"x": cx_norm, "y": cy_norm, "width": w_norm, "height": h_norm},
+                "class_id": class_id,
+                "class_name": class_name,
+                "confidence": conf,
+            })
+        return out
 
 
 

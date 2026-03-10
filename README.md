@@ -210,6 +210,9 @@ BATMAN_PROJECTS_DIR=./data/projects
 # SAM2
 BATMAN_SAM_MODEL_PATH=./models/sam2_hiera_large.pt
 BATMAN_SAM_CONFIG=sam2_hiera_l
+# SAM3: use cpu to avoid "double free" on WSL2; use 1 to run in API process (faster, but crash kills server)
+BATMAN_SAM_DEVICE=auto
+BATMAN_SAM_IN_PROCESS=0
 
 # Tracking defaults
 BATMAN_DEFAULT_TRACKING_MODE=visible_only

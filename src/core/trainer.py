@@ -163,11 +163,11 @@ def manual_dataset_name(dir_name: str) -> str | None:
 
 
 def _categorize_frame_dir(dir_name: str, video_dir_names: set[str]) -> str:
-    """Categorize a frames/ subdirectory as 'manual_data', 'video', or 'imports'."""
+    """Categorize a frames/ subdirectory as 'manual_data', 'videos', or 'imports'."""
     if is_manual_data_dir(dir_name):
         return "manual_data"
     if dir_name in video_dir_names:
-        return "video"
+        return "videos"
     return "imports"
 
 
@@ -203,6 +203,7 @@ def load_project_data(
     sources: list[str] | None = None,
     manual_datasets: list[str] | None = None,
     exclude_manual_datasets: list[str] | None = None,
+    exclude_videos: list[str] | None = None,
 ) -> tuple[dict, dict, list[str], dict]:
     """
     Load project data from Batman project directory.
@@ -215,12 +216,13 @@ def load_project_data(
             - int: Load from specific video ID
         sources: Data source types to include. When set, overrides video_id
             filtering and uses source-based filtering instead.
-            Valid values: "manual_data", "imports". Video frames are always
-            excluded when sources is set.
+            Valid values: "manual_data", "imports", "videos".
         manual_datasets: If set, only include these manual subdatasets.
             Use "(root)" for root-level images, or subdirectory names.
         exclude_manual_datasets: If set, exclude these manual subdatasets.
             Mutually exclusive with manual_datasets.
+        exclude_videos: If set, exclude these specific video IDs from training
+            (in addition to videos with exclude_from_training=true).
 
     Returns:
         Tuple of (frames_meta, annotations_data, class_names, project_config)
@@ -253,33 +255,33 @@ def load_project_data(
 
     video_dirs_to_load = []
 
+    excluded_video_set = set(exclude_videos or [])
+    excluded_video_set.update(
+        vid_id
+        for vid_id, meta in all_videos_meta.items()
+        if meta.get("exclude_from_training", False)
+    )
+
     if sources is not None:
         allowed_sources = set(sources)
         for sub_dir in frames_base_dir.iterdir():
             if not sub_dir.is_dir() or not (sub_dir / "frames.json").exists():
                 continue
             source_type = _categorize_frame_dir(sub_dir.name, video_dir_names)
-            if source_type == "video":
-                continue
             if source_type not in allowed_sources:
                 continue
-            # Apply manual dataset filtering
+            if source_type == "videos" and sub_dir.name in excluded_video_set:
+                continue
             if source_type == "manual_data" and not _should_include_manual_dir(
                 sub_dir.name, manual_datasets, exclude_manual_datasets
             ):
                 continue
             video_dirs_to_load.append(sub_dir)
     elif video_id is None or video_id == "all":
-        excluded_video_ids = {
-            vid_id
-            for vid_id, meta in all_videos_meta.items()
-            if meta.get("exclude_from_training", False)
-        }
         for sub_dir in frames_base_dir.iterdir():
             if sub_dir.is_dir() and (sub_dir / "frames.json").exists():
-                if sub_dir.name in excluded_video_ids:
+                if sub_dir.name in excluded_video_set:
                     continue
-                # Apply manual dataset filtering for manual dirs
                 if is_manual_data_dir(sub_dir.name) and not _should_include_manual_dir(
                     sub_dir.name, manual_datasets, exclude_manual_datasets
                 ):
@@ -519,9 +521,10 @@ def prepare_coco_dataset(
     frame_sample_fractions: dict[str, float] | None = None,
     seed: int = 42,
     sources: list[str] | None = None,
-    manual_data_split_strategy: str = "proportional",
+    manual_data_split_strategy: str = "proportional",  # "proportional" = unified split for all data
     manual_datasets: list[str] | None = None,
     exclude_manual_datasets: list[str] | None = None,
+    exclude_videos: list[str] | None = None,
 ) -> DatasetStats:
     """
     Prepare COCO format dataset from Batman project.
@@ -531,7 +534,7 @@ def prepare_coco_dataset(
         output_dir: Output directory for COCO dataset
         train_split: Fraction for training
         val_split: Fraction for validation
-        test_split: Fraction for testing
+        test_split: Fraction for testing (use 0 to skip test set and put all data in train/val only)
         video_id: Video ID(s) to process: 'all', 'imports' (default), or specific ID.
             Ignored when sources is set.
         clean: Whether to remove existing output directory
@@ -539,14 +542,15 @@ def prepare_coco_dataset(
         frame_sample_fractions: If specified, sample frames per class.
             Dict mapping class name to fraction (0.0-1.0), e.g. {"person": 0.25, "crane hook": 1.0}
         seed: Random seed for reproducible splits
-        sources: Data source types to include ("manual_data", "imports").
-            When set, overrides video_id. Video frames are always excluded.
+        sources: Data source types to include ("manual_data", "imports", "videos").
+            When set, overrides video_id.
         manual_data_split_strategy: How to distribute manual data across splits.
-            "proportional" (default), "val_only", "train_only", "all_splits".
+            "proportional" (default), "val_only", "train_only", "train_and_val", "all_splits".
         manual_datasets: If set, only include these manual subdatasets.
             Use "(root)" for root-level images, or subdirectory names.
         exclude_manual_datasets: If set, exclude these manual subdatasets.
             Mutually exclusive with manual_datasets.
+        exclude_videos: If set, exclude these specific video IDs from training.
 
     Returns:
         DatasetStats with counts and class names
@@ -563,6 +567,7 @@ def prepare_coco_dataset(
         sources=sources,
         manual_datasets=manual_datasets,
         exclude_manual_datasets=exclude_manual_datasets,
+        exclude_videos=exclude_videos,
     )
 
     if filter_classes:
@@ -598,38 +603,55 @@ def prepare_coco_dataset(
     else:
         all_frame_ids = list(frames_meta.keys())
 
-    # Separate manual data frames from other frames for split strategy
-    manual_frame_ids = [fid for fid in all_frame_ids if str(fid).startswith("manual_data_")]
-    other_frame_ids = [fid for fid in all_frame_ids if not str(fid).startswith("manual_data_")]
+    if manual_data_split_strategy == "proportional":
+        # Unified split: pool all data together regardless of source
+        random.shuffle(all_frame_ids)
+        n_total = len(all_frame_ids)
+        n_train = int(n_total * train_split)
+        n_val = int(n_total * val_split)
 
-    # Shuffle and split non-manual frames
-    random.shuffle(other_frame_ids)
-    n_other = len(other_frame_ids)
-    n_train = int(n_other * train_split)
-    n_val = int(n_other * val_split)
+        train_frame_ids = set(all_frame_ids[:n_train])
+        val_frame_ids = set(all_frame_ids[n_train : n_train + n_val])
+        if test_split > 0:
+            test_frame_ids = set(all_frame_ids[n_train + n_val :])
+        else:
+            test_frame_ids = set()
+            train_frame_ids.update(all_frame_ids[n_train + n_val :])
+    else:
+        # Legacy strategies: separate manual data for special placement
+        manual_frame_ids = [fid for fid in all_frame_ids if str(fid).startswith("manual_data_")]
+        other_frame_ids = [fid for fid in all_frame_ids if not str(fid).startswith("manual_data_")]
 
-    train_frame_ids = set(other_frame_ids[:n_train])
-    val_frame_ids = set(other_frame_ids[n_train : n_train + n_val])
-    test_frame_ids = set(other_frame_ids[n_train + n_val :])
+        random.shuffle(other_frame_ids)
+        n_other = len(other_frame_ids)
+        n_train = int(n_other * train_split)
+        n_val = int(n_other * val_split)
 
-    # Apply manual data split strategy
-    if manual_frame_ids:
-        random.shuffle(manual_frame_ids)
-        if manual_data_split_strategy == "proportional":
-            n_m = len(manual_frame_ids)
-            n_m_train = int(n_m * train_split)
-            n_m_val = int(n_m * val_split)
-            train_frame_ids.update(manual_frame_ids[:n_m_train])
-            val_frame_ids.update(manual_frame_ids[n_m_train : n_m_train + n_m_val])
-            test_frame_ids.update(manual_frame_ids[n_m_train + n_m_val :])
-        elif manual_data_split_strategy == "val_only":
-            val_frame_ids.update(manual_frame_ids)
-        elif manual_data_split_strategy == "train_only":
-            train_frame_ids.update(manual_frame_ids)
-        elif manual_data_split_strategy == "all_splits":
-            train_frame_ids.update(manual_frame_ids)
-            val_frame_ids.update(manual_frame_ids)
-            test_frame_ids.update(manual_frame_ids)
+        train_frame_ids = set(other_frame_ids[:n_train])
+        val_frame_ids = set(other_frame_ids[n_train : n_train + n_val])
+        if test_split > 0:
+            test_frame_ids = set(other_frame_ids[n_train + n_val :])
+        else:
+            test_frame_ids = set()
+            train_frame_ids.update(other_frame_ids[n_train + n_val :])
+
+        if manual_frame_ids:
+            random.shuffle(manual_frame_ids)
+            if manual_data_split_strategy == "train_and_val":
+                n_m = len(manual_frame_ids)
+                n_m_train = int(n_m * train_split)
+                n_m_val = int(n_m * val_split)
+                train_frame_ids.update(manual_frame_ids[:n_m_train])
+                val_frame_ids.update(manual_frame_ids[n_m_train : n_m_train + n_m_val])
+                train_frame_ids.update(manual_frame_ids[n_m_train + n_m_val :])
+            elif manual_data_split_strategy == "val_only":
+                val_frame_ids.update(manual_frame_ids)
+            elif manual_data_split_strategy == "train_only":
+                train_frame_ids.update(manual_frame_ids)
+            elif manual_data_split_strategy == "all_splits":
+                train_frame_ids.update(manual_frame_ids)
+                val_frame_ids.update(manual_frame_ids)
+                test_frame_ids.update(manual_frame_ids)
 
     # Ensure val split isn't empty (small datasets can truncate to 0 via int())
     total_frames = len(train_frame_ids) + len(val_frame_ids) + len(test_frame_ids)
@@ -746,8 +768,11 @@ class RFDETRTrainer:
 
         device = get_device(config.device)
 
-        # Resolution must be divisible by 56 for RF-DETR
-        resolution = (config.image_size // 56) * 56
+        # Resolution must be divisible by patch_size * num_windows for the backbone.
+        # base/large use patch_size=14, num_windows=4 → block_size=56
+        # small/nano/medium use patch_size=16, num_windows=2 → block_size=32
+        block_size = 56 if self.model_size in ("base", "large") else 32
+        resolution = (config.image_size // block_size) * block_size
         if resolution < 280:
             resolution = 280
 
@@ -862,11 +887,27 @@ class RFDETRTrainer:
         return export_path
 
 
+def _load_rfdetr_model(checkpoint_path: Path, model_size: str = "base"):
+    """Instantiate the correct RF-DETR variant for the given model size."""
+    if model_size == "large":
+        from rfdetr import RFDETRLarge as Model
+    elif model_size == "medium":
+        from rfdetr import RFDETRMedium as Model
+    elif model_size == "small":
+        from rfdetr import RFDETRSmall as Model
+    elif model_size == "nano":
+        from rfdetr import RFDETRNano as Model
+    else:
+        from rfdetr import RFDETRBase as Model
+    return Model(pretrain_weights=str(checkpoint_path))
+
+
 def measure_latency(
     checkpoint_path: Path,
     image_size: int = 640,
     warmup_runs: int = 5,
     test_runs: int = 20,
+    model_size: str = "base",
 ) -> float:
     """
     Measure inference latency on a dummy image.
@@ -876,15 +917,14 @@ def measure_latency(
         image_size: Image size for inference
         warmup_runs: Number of warmup runs
         test_runs: Number of test runs
+        model_size: Model variant (nano, small, base, medium, large)
 
     Returns:
         Average latency in milliseconds
     """
     import time
 
-    from rfdetr import RFDETRBase
-
-    model = RFDETRBase(pretrain_weights=str(checkpoint_path))
+    model = _load_rfdetr_model(checkpoint_path, model_size)
     dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
 
     # Warmup

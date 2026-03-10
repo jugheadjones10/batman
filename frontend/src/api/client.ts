@@ -1,5 +1,9 @@
 const API_BASE = '/api'
 
+// In dev, video can load from backend directly to avoid proxy streaming issues (set in .env: VITE_API_ORIGIN=http://127.0.0.1:8000)
+const getVideoBase = () =>
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_ORIGIN) || ''
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -24,6 +28,11 @@ export const api = {
   // Health check
   health: () => request<{ status: string }>('/health'),
 
+  // Device info (for local GPU training/inference)
+  device: {
+    getInfo: () => request<import('@/types').DeviceInfo>('/device-info'),
+  },
+
   // Projects
   projects: {
     list: () => request<import('@/types').Project[]>('/projects'),
@@ -43,6 +52,11 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(config),
       }),
+    updateClassDescriptions: (name: string, descriptions: Record<string, string>) =>
+      request<import('@/types').Project>(`/projects/${name}/class-descriptions`, {
+        method: 'PUT',
+        body: JSON.stringify(descriptions),
+      }),
     delete: (name: string) =>
       request<{ message: string }>(`/projects/${name}`, { method: 'DELETE' }),
     iterations: (name: string) =>
@@ -59,10 +73,19 @@ export const api = {
       request<import('@/types').Video[]>(`/projects/${projectName}/videos`),
     get: (projectName: string, videoId: number | string) =>
       request<import('@/types').Video>(`/projects/${projectName}/videos/${videoId}`),
-    upload: async (projectName: string, file: File) => {
+    upload: async (
+      projectName: string,
+      file: File,
+      options?: { exclude_from_training?: boolean; create_proxy?: boolean }
+    ) => {
       const formData = new FormData()
       formData.append('file', file)
-      const response = await fetch(`${API_BASE}/projects/${projectName}/videos`, {
+      const params = new URLSearchParams()
+      if (options?.exclude_from_training !== undefined)
+        params.set('exclude_from_training', String(options.exclude_from_training))
+      if (options?.create_proxy !== undefined) params.set('create_proxy', String(options.create_proxy))
+      const url = `${API_BASE}/projects/${projectName}/videos${params.toString() ? `?${params}` : ''}`
+      const response = await fetch(url, {
         method: 'POST',
         body: formData,
       })
@@ -99,6 +122,10 @@ export const api = {
       `${API_BASE}/projects/${projectName}/videos/${videoId}/stream?proxy=${proxy}`,
     frameUrl: (projectName: string, videoId: number | string, frameNumber: number) =>
       `${API_BASE}/projects/${projectName}/videos/${videoId}/frame/${frameNumber}`,
+    frameImageUrl: (projectName: string, videoId: number | string, frameId: string) =>
+      `${API_BASE}/projects/${projectName}/videos/${videoId}/frames/${encodeURIComponent(frameId)}/image`,
+    thumbnailUrl: (projectName: string, videoId: number | string) =>
+      `${API_BASE}/projects/${projectName}/videos/${videoId}/thumbnail`,
   },
 
   // Annotations
@@ -134,6 +161,16 @@ export const api = {
       request<{ message: string }>(`/projects/${projectName}/annotations/${annotationId}`, {
         method: 'DELETE',
       }),
+    clearFrame: (projectName: string, frameId: number | string) =>
+      request<{ message: string; deleted: number }>(
+        `/projects/${projectName}/frames/${frameId}/annotations`,
+        { method: 'DELETE' }
+      ),
+    clearFrames: (projectName: string, frameIds: (number | string)[]) =>
+      request<{ message: string; deleted: number; frames_cleared: number }>(
+        `/projects/${projectName}/annotations/clear-frames`,
+        { method: 'POST', body: JSON.stringify({ frame_ids: frameIds.map(String) }) }
+      ),
   },
 
   // Tracks
@@ -168,6 +205,11 @@ export const api = {
   labeling: {
     autoLabel: (projectName: string, data?: {
       video_ids?: (number | string)[]
+      frame_ids?: (number | string)[]
+      source_keys?: string[]
+      class_descriptions?: Record<string, string>
+      confidence?: number
+      skip_labeled_frames?: boolean
       use_exemplars?: boolean
       tracking_mode?: string
     }) =>
@@ -218,7 +260,7 @@ export const api = {
       request<import('@/types').GPUStatus>('/gpu/status'),
   },
 
-  // Training (RF-DETR, GPU cluster)
+  // Training (RF-DETR, GPU cluster + local)
   training: {
     exportDataset: (projectName: string, config?: import('@/types').DatasetExportConfig) =>
       request<{
@@ -238,6 +280,11 @@ export const api = {
         `/projects/${projectName}/training/submit`,
         { method: 'POST', body: JSON.stringify(data) }
       ),
+    submitLocal: (projectName: string, data: import('@/types').LocalTrainingSubmitRequest) =>
+      request<{ run_name: string; pid: number; message: string }>(
+        `/projects/${projectName}/training/submit-local`,
+        { method: 'POST', body: JSON.stringify(data) }
+      ),
     cancel: (projectName: string, runName: string) =>
       request<{ status: string }>(`/projects/${projectName}/training/runs/${runName}/cancel`, {
         method: 'POST',
@@ -246,6 +293,8 @@ export const api = {
       request<import('@/types').TrainingRun[]>(`/projects/${projectName}/training/runs`),
     streamLogsUrl: (projectName: string, runName: string) =>
       `${API_BASE}/projects/${projectName}/training/runs/${runName}/logs`,
+    streamLocalLogsUrl: (projectName: string, runName: string) =>
+      `${API_BASE}/projects/${projectName}/training/runs/${runName}/local-logs`,
     startTensorBoard: (projectName: string, runName: string) =>
       request<{ status: string; port: number; url: string }>(
         `/projects/${projectName}/training/runs/${runName}/tensorboard/start`,
@@ -260,14 +309,24 @@ export const api = {
       request<{ running: boolean; port?: number; url?: string }>(
         `/projects/${projectName}/training/runs/${runName}/tensorboard/status`
       ),
+    renameRun: (projectName: string, runName: string, newName: string) =>
+      request<{ name: string }>(
+        `/projects/${projectName}/training/runs/${encodeURIComponent(runName)}/rename`,
+        { method: 'PATCH', body: JSON.stringify({ new_name: newName }) }
+      ),
+    deleteRun: (projectName: string, runName: string) =>
+      request<{ message: string }>(
+        `/projects/${projectName}/training/runs/${encodeURIComponent(runName)}`,
+        { method: 'DELETE' }
+      ),
   },
 
   // Inference
   inference: {
-    loadModel: (projectName: string, runId: number) =>
+    loadModel: (projectName: string, runId: number, device?: string) =>
       request<{ message: string }>(`/projects/${projectName}/inference/load-model`, {
         method: 'POST',
-        body: JSON.stringify({ run_id: runId }),
+        body: JSON.stringify({ run_id: runId, device: device ?? undefined }),
       }),
     runOnImage: (projectName: string, frameId: number, config?: {
       confidence_threshold?: number
@@ -307,6 +366,8 @@ export const api = {
       request<import('@/types').InferenceResultSummary & { frames: import('@/types').InferenceResult[] }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`
       ),
+    videoUrl: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
+      `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video`,
     deleteResult: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       request<{ message: string }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,
@@ -442,6 +503,27 @@ export const api = {
         `/projects/${projectName}/manual-data/sync`,
         { method: 'POST' }
       ),
+    upload: async (projectName: string, files: File[], dataset?: string) => {
+      const formData = new FormData()
+      files.forEach((f) => formData.append('files', f))
+      const url = dataset?.trim()
+        ? `/projects/${projectName}/manual-data/upload?dataset=${encodeURIComponent(dataset.trim())}`
+        : `/projects/${projectName}/manual-data/upload`
+      const response = await fetch(`${API_BASE}${url}`, {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'Upload failed' }))
+        throw new Error(error.detail || 'Upload failed')
+      }
+      return response.json() as Promise<{
+        uploaded: number
+        dataset: string
+        filenames: string[]
+        sync: { images_found: number; images_added: number; images_removed: number; total: number } | null
+      }>
+    },
     listDatasets: (projectName: string) =>
       request<{ datasets: import('@/types').ManualDataset[] }>(
         `/projects/${projectName}/manual-data/datasets`
@@ -458,6 +540,16 @@ export const api = {
     },
     imageUrl: (projectName: string, filename: string) =>
       `${API_BASE}/projects/${projectName}/manual-data/image/${encodeURIComponent(filename)}`,
+    deleteImage: (projectName: string, frameId: string) =>
+      request<{ deleted: boolean; frame_id: string; annotations_deleted: number }>(
+        `/projects/${projectName}/manual-data/images/${encodeURIComponent(frameId)}`,
+        { method: 'DELETE' }
+      ),
+    renameDataset: (projectName: string, datasetName: string, newName: string) =>
+      request<{ old_name: string; new_name: string; frames_migrated: number }>(
+        `/projects/${projectName}/manual-data/datasets/${encodeURIComponent(datasetName)}`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_name: newName }) }
+      ),
   },
 
   // Class management
