@@ -49,6 +49,7 @@ nav:
       - Inference Workflow: guides/inference.md
       - Experiment Framework: guides/experiments.md
       - Benchmarking Guide: guides/benchmarking.md
+      - Z-Axis Height Estimation: guides/z-axis-height-estimation.md
       - SLURM Usage: guides/slurm.md
       - Troubleshooting: troubleshooting.md
   - API Reference: api/index.md
