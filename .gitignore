@@ -97,3 +97,6 @@ site/
 
 # MkDocs cache
 .cache/
+
+# Z-Axis images
+z-axis_images/

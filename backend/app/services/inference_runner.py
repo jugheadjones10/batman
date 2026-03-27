@@ -59,12 +59,14 @@ class InferenceRunner:
 
         if model_type == "yolo":
             from ultralytics import YOLO
+
             self.model = YOLO(str(checkpoint_path))
         elif model_type == "rfdetr":
             self.model = self._load_rfdetr_model(checkpoint_path, model_size)
             if hasattr(self.model, "to") and resolved != "cpu":
                 try:
                     import torch
+
                     dev = torch.device(resolved)
                     self.model.to(dev)
                 except Exception as e:
@@ -172,7 +174,9 @@ class InferenceRunner:
                     "timestamp": frame_num / fps,
                     "detections": detections,
                     "inference_time_ms": inference_time,
-                    "avg_fps": 1000 / (sum(frame_times[-30:]) / len(frame_times[-30:])) if frame_times else 0,
+                    "avg_fps": 1000 / (sum(frame_times[-30:]) / len(frame_times[-30:]))
+                    if frame_times
+                    else 0,
                 }
 
         finally:
@@ -215,25 +219,27 @@ class InferenceRunner:
         frame_times = []
 
         if detection_interval > 1:
-            logger.info(f"Starting inference on {total_frames} frames (detecting every {detection_interval} frames)...")
+            logger.info(
+                f"Starting inference on {total_frames} frames (detecting every {detection_interval} frames)..."
+            )
         else:
             logger.info(f"Starting inference on {total_frames} frames...")
-        
+
         try:
             frame_num = 0
             last_log_time = time.time()
             last_detections = []  # Cache last detections for interpolation
-            
+
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 start_time = time.perf_counter()
-                
+
                 # Only run detection on keyframes (every N frames)
-                is_keyframe = (frame_num % detection_interval == 0)
-                
+                is_keyframe = frame_num % detection_interval == 0
+
                 if is_keyframe:
                     # Run detection
                     if self.model_type == "yolo":
@@ -247,7 +253,7 @@ class InferenceRunner:
                     else:
                         results = self.model.predict(frame, threshold=confidence_threshold)
                         detections = self._parse_rfdetr_results(results, img_shape=frame.shape[:2])
-                    
+
                     last_detections = detections
                 else:
                     # Use cached detections (tracking will update positions)
@@ -260,12 +266,14 @@ class InferenceRunner:
                 inference_time = (time.perf_counter() - start_time) * 1000
                 frame_times.append(inference_time)
 
-                all_results.append({
-                    "frame_number": frame_num,
-                    "timestamp": frame_num / fps,
-                    "detections": detections,
-                    "is_keyframe": is_keyframe,
-                })
+                all_results.append(
+                    {
+                        "frame_number": frame_num,
+                        "timestamp": frame_num / fps,
+                        "detections": detections,
+                        "is_keyframe": is_keyframe,
+                    }
+                )
 
                 # Draw annotations if saving
                 if writer:
@@ -282,6 +290,7 @@ class InferenceRunner:
                             class_name=d.get("class_name", f"class_{d.get('class_id', 0)}"),
                             confidence=d.get("confidence", 1.0),
                             track_id=d.get("track_id"),
+                            z_mm=d.get("z_mm"),
                         )
                         for d in detections
                     ]
@@ -289,14 +298,16 @@ class InferenceRunner:
                     writer.write(annotated)
 
                 frame_num += 1
-                
+
                 # Log progress every 2 seconds
                 current_time = time.time()
                 if current_time - last_log_time >= 2.0:
                     progress = (frame_num / total_frames) * 100
                     avg_ms = sum(frame_times[-30:]) / len(frame_times[-30:]) if frame_times else 0
                     est_remaining = ((total_frames - frame_num) * avg_ms) / 1000
-                    logger.info(f"Inference progress: {frame_num}/{total_frames} ({progress:.1f}%) - {avg_ms:.1f}ms/frame - ETA: {est_remaining:.0f}s")
+                    logger.info(
+                        f"Inference progress: {frame_num}/{total_frames} ({progress:.1f}%) - {avg_ms:.1f}ms/frame - ETA: {est_remaining:.0f}s"
+                    )
                     last_log_time = current_time
 
         finally:
@@ -307,29 +318,91 @@ class InferenceRunner:
         # Re-encode to H.264 so browsers can play the video
         if output_path and output_path.exists():
             # #region agent log
-            import json as _json; open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux","message":"re-encoding to h264","data":{"output_path":str(output_path)},"timestamp":int(time.time()*1000)})+'\n')
+            import json as _json
+
+            open("/home/batman/batman/.cursor/debug-b2be69.log", "a").write(
+                _json.dumps(
+                    {
+                        "sessionId": "b2be69",
+                        "hypothesisId": "H1",
+                        "location": "inference_runner.py:remux",
+                        "message": "re-encoding to h264",
+                        "data": {"output_path": str(output_path)},
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
             # #endregion
             tmp_path = output_path.with_suffix(".tmp.mp4")
             try:
                 import subprocess as _sp
+
                 result_ffmpeg = _sp.run(
-                    ["ffmpeg", "-y", "-i", str(output_path), "-c:v", "libx264",
-                     "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
-                     "-movflags", "+faststart", "-an", str(tmp_path)],
-                    capture_output=True, timeout=300,
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(output_path),
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "fast",
+                        "-crf",
+                        "23",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        "-an",
+                        str(tmp_path),
+                    ],
+                    capture_output=True,
+                    timeout=300,
                 )
                 if result_ffmpeg.returncode == 0 and tmp_path.exists():
                     tmp_path.replace(output_path)
                     # #region agent log
-                    open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux_done","message":"h264 remux succeeded","data":{"size":output_path.stat().st_size},"timestamp":int(time.time()*1000)})+'\n')
+                    open("/home/batman/batman/.cursor/debug-b2be69.log", "a").write(
+                        _json.dumps(
+                            {
+                                "sessionId": "b2be69",
+                                "hypothesisId": "H1",
+                                "location": "inference_runner.py:remux_done",
+                                "message": "h264 remux succeeded",
+                                "data": {"size": output_path.stat().st_size},
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
                     # #endregion
                 else:
                     # #region agent log
-                    open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(_json.dumps({"sessionId":"b2be69","hypothesisId":"H1","location":"inference_runner.py:remux_fail","message":"ffmpeg failed","data":{"rc":result_ffmpeg.returncode,"stderr":result_ffmpeg.stderr.decode()[-500:]},"timestamp":int(time.time()*1000)})+'\n')
+                    open("/home/batman/batman/.cursor/debug-b2be69.log", "a").write(
+                        _json.dumps(
+                            {
+                                "sessionId": "b2be69",
+                                "hypothesisId": "H1",
+                                "location": "inference_runner.py:remux_fail",
+                                "message": "ffmpeg failed",
+                                "data": {
+                                    "rc": result_ffmpeg.returncode,
+                                    "stderr": result_ffmpeg.stderr.decode()[-500:],
+                                },
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
                     # #endregion
-                    logger.warning(f"ffmpeg re-encode failed (rc={result_ffmpeg.returncode}), keeping mp4v file")
+                    logger.warning(
+                        f"ffmpeg re-encode failed (rc={result_ffmpeg.returncode}), keeping mp4v file"
+                    )
             except FileNotFoundError:
-                logger.warning("ffmpeg not found; video will remain in mp4v codec (may not play in browsers)")
+                logger.warning(
+                    "ffmpeg not found; video will remain in mp4v codec (may not play in browsers)"
+                )
             except Exception as e:
                 logger.warning(f"ffmpeg re-encode error: {e}")
             finally:
@@ -339,7 +412,7 @@ class InferenceRunner:
         # Compute statistics
         avg_time = sum(frame_times) / len(frame_times) if frame_times else 0
         avg_fps = 1000 / avg_time if avg_time > 0 else 0
-        
+
         logger.info(f"Inference complete: {len(all_results)} frames processed at {avg_fps:.1f} FPS")
 
         return {
@@ -372,12 +445,16 @@ class InferenceRunner:
             w = (x2 - x1) / img_w
             h = (y2 - y1) / img_h
 
-            detections.append({
-                "box": {"x": cx, "y": cy, "width": w, "height": h},
-                "confidence": conf,
-                "class_id": cls_id,
-                "class_name": self.class_names[cls_id] if cls_id < len(self.class_names) else f"class_{cls_id}",
-            })
+            detections.append(
+                {
+                    "box": {"x": cx, "y": cy, "width": w, "height": h},
+                    "confidence": conf,
+                    "class_id": cls_id,
+                    "class_name": self.class_names[cls_id]
+                    if cls_id < len(self.class_names)
+                    else f"class_{cls_id}",
+                }
+            )
 
         return detections
 
@@ -388,7 +465,11 @@ class InferenceRunner:
         out = []
         if results is None:
             return out
-        if not hasattr(results, "xyxy") or not hasattr(results, "class_id") or not hasattr(results, "confidence"):
+        if (
+            not hasattr(results, "xyxy")
+            or not hasattr(results, "class_id")
+            or not hasattr(results, "confidence")
+        ):
             return out
         n = len(results.xyxy)
         if n == 0:
@@ -420,16 +501,16 @@ class InferenceRunner:
                 if class_id < len(self.class_names)
                 else f"class_{class_id}"
             )
-            out.append({
-                "box": {"x": cx_norm, "y": cy_norm, "width": w_norm, "height": h_norm},
-                "class_id": class_id,
-                "class_name": class_name,
-                "confidence": conf,
-            })
+            out.append(
+                {
+                    "box": {"x": cx_norm, "y": cy_norm, "width": w_norm, "height": h_norm},
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "confidence": conf,
+                }
+            )
         return out
-
 
 
 # Global instance
 inference_runner = InferenceRunner()
-

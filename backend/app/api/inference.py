@@ -21,6 +21,7 @@ from backend.app.models.training import InferenceConfig, InferenceGPUSubmitReque
 from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
+from backend.app.services import z_estimator
 from src.core.project import Project
 from src.core.trainer import find_best_checkpoint
 
@@ -104,7 +105,9 @@ async def load_model(project_name: str, request: LoadModelRequest):
         raise HTTPException(status_code=404, detail="Checkpoint file not found")
 
     device = request.device if request.device else settings.device
-    await inference_runner.load_model(checkpoint_path, classes, model_type, device=device, model_size=model_size)
+    await inference_runner.load_model(
+        checkpoint_path, classes, model_type, device=device, model_size=model_size
+    )
     inference_runner.current_run_name = run_name
 
     return {"message": "Model loaded successfully", "run_name": run_name}
@@ -222,7 +225,9 @@ async def run_on_video(
         "stats": {
             "total_frames": result["total_frames"],
             "keyframes": sum(1 for r in result.get("results", []) if r.get("is_keyframe", True)),
-            "total_detections": sum(len(r.get("detections", [])) for r in result.get("results", [])),
+            "total_detections": sum(
+                len(r.get("detections", [])) for r in result.get("results", [])
+            ),
             "avg_inference_time_ms": result.get("avg_inference_time_ms", 0),
         },
         "frames": result.get("results", []),
@@ -263,7 +268,9 @@ async def list_inference_results(project_name: str):
 
         # Check for detected video in the timestamped dir
         if inf_id != "legacy":
-            has_video = (project.inference_dir / run_name / vid_id / inf_id / "detected.mp4").exists()
+            has_video = (
+                project.inference_dir / run_name / vid_id / inf_id / "detected.mp4"
+            ).exists()
         else:
             has_video = (project.inference_dir / run_name / vid_id / "detected.mp4").exists()
 
@@ -293,9 +300,7 @@ async def list_inference_results(project_name: str):
 
 
 @router.get("/results/{run_name}/{video_id}/{inference_id}")
-async def get_inference_result(
-    project_name: str, run_name: str, video_id: str, inference_id: str
-):
+async def get_inference_result(project_name: str, run_name: str, video_id: str, inference_id: str):
     """Load a specific persisted inference result by its inference_id (SGT timestamp)."""
     project_path = get_project_path(project_name)
     if not project_path.exists():
@@ -333,7 +338,9 @@ async def get_inference_result_video(
     if inference_id == "legacy":
         video_path = project_path / "inference" / run_name / video_id / "detected.mp4"
     else:
-        video_path = project_path / "inference" / run_name / video_id / inference_id / "detected.mp4"
+        video_path = (
+            project_path / "inference" / run_name / video_id / inference_id / "detected.mp4"
+        )
 
     video_path = video_path.resolve()
     if not video_path.exists():
@@ -343,7 +350,26 @@ async def get_inference_result_video(
     range_header = request.headers.get("range")
 
     # #region agent log
-    import time as _time; open('/home/batman/batman/.cursor/debug-b2be69.log','a').write(json.dumps({"sessionId":"b2be69","hypothesisId":"H3","location":"inference.py:video_endpoint","message":"video endpoint hit","data":{"video_path":str(video_path),"file_size":file_size,"range":range_header,"exists":video_path.exists()},"timestamp":int(_time.time()*1000)})+'\n')
+    import time as _time
+
+    open("/home/batman/batman/.cursor/debug-b2be69.log", "a").write(
+        json.dumps(
+            {
+                "sessionId": "b2be69",
+                "hypothesisId": "H3",
+                "location": "inference.py:video_endpoint",
+                "message": "video endpoint hit",
+                "data": {
+                    "video_path": str(video_path),
+                    "file_size": file_size,
+                    "range": range_header,
+                    "exists": video_path.exists(),
+                },
+                "timestamp": int(_time.time() * 1000),
+            }
+        )
+        + "\n"
+    )
     # #endregion
 
     if range_header:
@@ -496,12 +522,16 @@ async def extract_inference_frames(
 
                 # Look up detection data
                 frame_data = frames_by_number.get(frame_num)
-                export_frames.append({
-                    "frame_number": frame_num,
-                    "timestamp": frame_data["timestamp"] if frame_data else frame_num / cap.get(cv2.CAP_PROP_FPS),
-                    "image_filename": filename,
-                    "detections": frame_data.get("detections", []) if frame_data else [],
-                })
+                export_frames.append(
+                    {
+                        "frame_number": frame_num,
+                        "timestamp": frame_data["timestamp"]
+                        if frame_data
+                        else frame_num / cap.get(cv2.CAP_PROP_FPS),
+                        "image_filename": filename,
+                        "detections": frame_data.get("detections", []) if frame_data else [],
+                    }
+                )
 
             # Write detections JSON
             detections_json = {
@@ -698,6 +728,232 @@ async def cancel_inference_gpu(project_name: str, job_name: str):
     tracked.status = "cancelled"
     tracked.completed_at = datetime.utcnow().isoformat()
     return {"status": "cancelled", "message": f"Inference job '{job_name}' cancelled"}
+
+
+# ── Z-axis height estimation ─────────────────────────────────────────────
+
+
+class ZCalibrationLabel(BaseModel):
+    frame_number: int
+    z_mm: float
+    detection_index: int = 0
+
+
+class ZCalibrationRequest(BaseModel):
+    labels: list[ZCalibrationLabel]
+    class_name: str = "crane hook"
+
+
+def _resolve_result_dir(
+    project_path: Path, run_name: str, video_id: str, inference_id: str
+) -> Path:
+    if inference_id == "legacy":
+        return project_path / "inference" / run_name / video_id
+    return project_path / "inference" / run_name / video_id / inference_id
+
+
+def _get_video_resolution(project_path: Path, video_id: str) -> dict:
+    videos_meta_path = project_path / "videos" / "videos.json"
+    if not videos_meta_path.exists():
+        raise HTTPException(status_code=404, detail="No videos found")
+    with open(videos_meta_path) as f:
+        videos_meta = json.load(f)
+    vid_meta = videos_meta.get(str(video_id))
+    if vid_meta is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = Path(vid_meta["original_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    cap = cv2.VideoCapture(str(video_path))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return {"width": w, "height": h}
+
+
+@router.get("/results/{run_name}/{video_id}/{inference_id}/z-calibration")
+async def get_z_calibration(project_name: str, run_name: str, video_id: str, inference_id: str):
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    cal = z_estimator.load_z_calibration(result_dir)
+    return {"z_calibration": cal}
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/z-calibration")
+async def save_z_calibration(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    request: ZCalibrationRequest,
+):
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    result_path = result_dir / "result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    video_resolution = _get_video_resolution(project_path, video_id)
+
+    calibration_data = {
+        "labels": [l.model_dump() for l in request.labels],
+        "class_name": request.class_name,
+        "size_metric": "h_px",
+        "video_resolution": video_resolution,
+    }
+
+    z_estimator.save_z_calibration(result_dir, calibration_data)
+    return {"message": "Z calibration saved", "labels_count": len(request.labels)}
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/z-estimate")
+async def apply_z_estimation(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+):
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+
+    try:
+        model = z_estimator.apply_z_to_result(result_dir)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"message": "Z estimation applied", "model": model}
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/z-export-video")
+async def export_z_video(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+):
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    result_path = result_dir / "result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    with open(result_path) as f:
+        data = json.load(f)
+
+    frames = data.get("frames", [])
+    has_z = any(d.get("z_mm") is not None for frame in frames for d in frame.get("detections", []))
+    if not has_z:
+        raise HTTPException(status_code=400, detail="No Z values found — run z-estimate first")
+
+    videos_meta_path = project_path / "videos" / "videos.json"
+    if not videos_meta_path.exists():
+        raise HTTPException(status_code=404, detail="No videos found")
+    with open(videos_meta_path) as f:
+        videos_meta = json.load(f)
+    if str(video_id) not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_path = Path(videos_meta[str(video_id)]["original_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    from src.core.inference import Detection as DetObj, draw_detections
+    import subprocess as _sp
+    import time as _time
+
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    output_path = result_dir / "detected.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (vid_w, vid_h))
+
+    frame_map = {f["frame_number"]: f for f in frames}
+
+    try:
+        for frame_num in range(total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_data = frame_map.get(frame_num)
+            if frame_data:
+                det_objects = [
+                    DetObj(
+                        bbox=(
+                            (d["box"]["x"] - d["box"]["width"] / 2) * vid_w,
+                            (d["box"]["y"] - d["box"]["height"] / 2) * vid_h,
+                            (d["box"]["x"] + d["box"]["width"] / 2) * vid_w,
+                            (d["box"]["y"] + d["box"]["height"] / 2) * vid_h,
+                        ),
+                        class_id=d.get("class_id", 0),
+                        class_name=d.get("class_name", ""),
+                        confidence=d.get("confidence", 1.0),
+                        track_id=d.get("track_id"),
+                        z_mm=d.get("z_mm"),
+                    )
+                    for d in frame_data.get("detections", [])
+                ]
+                frame = draw_detections(frame, det_objects)
+
+            writer.write(frame)
+    finally:
+        cap.release()
+        writer.release()
+
+    if output_path.exists():
+        tmp_path = output_path.with_suffix(".tmp.mp4")
+        try:
+            result_ffmpeg = _sp.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(output_path),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-an",
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                timeout=300,
+            )
+            if result_ffmpeg.returncode == 0 and tmp_path.exists():
+                tmp_path.replace(output_path)
+            else:
+                logger.warning(f"ffmpeg re-encode failed (rc={result_ffmpeg.returncode})")
+        except FileNotFoundError:
+            logger.warning("ffmpeg not found; video remains in mp4v codec")
+        except Exception as e:
+            logger.warning(f"ffmpeg re-encode error: {e}")
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    return {"message": "Video re-exported with Z overlays", "output_path": str(output_path)}
 
 
 @router.websocket("/stream/{video_id}")

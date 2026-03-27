@@ -30,6 +30,7 @@ class Detection:
     class_name: str
     confidence: float
     track_id: int | None = None
+    z_mm: float | None = None
 
 
 @dataclass
@@ -487,8 +488,8 @@ class RFDETRInference:
 
 COLOR_PALETTE = [
     (255, 107, 107),  # Red
-    (78, 205, 196),   # Teal
-    (69, 183, 209),   # Blue
+    (78, 205, 196),  # Teal
+    (69, 183, 209),  # Blue
     (150, 206, 180),  # Green
     (255, 234, 167),  # Yellow
     (221, 160, 221),  # Purple
@@ -538,21 +539,26 @@ def draw_detections(
 
         cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-        # Box label: class name + confidence (+ track id when tracking)
+        # Box label: class name + confidence (+ track id when tracking) (+ Z when available)
         if det.track_id is not None:
             label = f"{det.class_name} #{det.track_id} {det.confidence:.2f}"
         else:
             label = f"{det.class_name} {det.confidence:.2f}"
+        if det.z_mm is not None:
+            label += f" Z:{det.z_mm:.0f}mm"
 
         (label_w, label_h), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
         )
-        cv2.rectangle(
-            result, (x1, y1 - label_h - baseline - 5), (x1 + label_w, y1), color, -1
-        )
+        cv2.rectangle(result, (x1, y1 - label_h - baseline - 5), (x1 + label_w, y1), color, -1)
         cv2.putText(
-            result, label, (x1, y1 - baseline - 2),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness,
+            result,
+            label,
+            (x1, y1 - baseline - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            thickness,
         )
 
         # Collect legend entry
@@ -560,6 +566,8 @@ def draw_detections(
             legend_text = f"{det.class_name} #{det.track_id}: ({cx}, {cy})"
         else:
             legend_text = f"{det.class_name}: ({cx}, {cy})"
+        if det.z_mm is not None:
+            legend_text = legend_text[:-1] + f", z:{det.z_mm:.0f})"
         legend_entries.append((color, legend_text))
 
     # Draw coordinate legend at bottom-right
@@ -582,7 +590,8 @@ def draw_detections(
             overlay,
             (panel_x, panel_y),
             (panel_x + panel_w, panel_y + panel_h),
-            (0, 0, 0), -1,
+            (0, 0, 0),
+            -1,
         )
         cv2.addWeighted(overlay, 0.6, result, 0.4, 0, result)
 
@@ -592,13 +601,15 @@ def draw_detections(
             sx = panel_x + legend_padding
             sy = row_y
 
-            cv2.rectangle(
-                result, (sx, sy), (sx + swatch_size, sy + swatch_size), color, -1
-            )
+            cv2.rectangle(result, (sx, sy), (sx + swatch_size, sy + swatch_size), color, -1)
             cv2.putText(
-                result, text,
+                result,
+                text,
                 (sx + swatch_size + 6, sy + swatch_size),
-                cv2.FONT_HERSHEY_SIMPLEX, legend_font_scale, color, legend_thickness,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                legend_font_scale,
+                color,
+                legend_thickness,
             )
 
     return result
@@ -639,6 +650,7 @@ def save_results_json(
                     "class_name": det.class_name,
                     "confidence": det.confidence,
                     "track_id": det.track_id,
+                    **({"z_mm": det.z_mm} if det.z_mm is not None else {}),
                 }
                 for det in frame.detections
             ],

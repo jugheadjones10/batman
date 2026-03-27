@@ -262,6 +262,7 @@ export interface Detection {
   class_id: number
   class_name: string
   track_id?: number
+  z_mm?: number
 }
 
 export interface InferenceResult {
@@ -296,5 +297,26 @@ export interface InferenceResultMatrix {
   runs: string[]
   videos: string[]
   results: Record<string, Record<string, InferenceResultSummary[] | null>>
+}
+
+export interface ZCalibrationLabel {
+  frame_number: number
+  z_mm: number
+  detection_index: number
+}
+
+export interface ZCalibrationModel {
+  type: string
+  k?: number
+  a?: number
+  b?: number
+}
+
+export interface ZCalibration {
+  labels: ZCalibrationLabel[]
+  model: ZCalibrationModel | null
+  class_name: string
+  size_metric: string
+  video_resolution?: { width: number; height: number }
 }
 

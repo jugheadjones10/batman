@@ -406,6 +406,31 @@ export const api = {
       ),
     gpuLogsUrl: (projectName: string, jobName: string) =>
       `${API_BASE}/projects/${projectName}/inference/gpu-jobs/${jobName}/logs`,
+    getZCalibration: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
+      request<{ z_calibration: import('@/types').ZCalibration | null }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-calibration`
+      ),
+    saveZCalibration: (
+      projectName: string, runName: string, videoId: string, inferenceId: string,
+      labels: import('@/types').ZCalibrationLabel[], className: string = 'crane hook',
+    ) =>
+      request<{ message: string; labels_count: number }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-calibration`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ labels, class_name: className }),
+        }
+      ),
+    applyZEstimation: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
+      request<{ message: string; model: import('@/types').ZCalibrationModel }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-estimate`,
+        { method: 'POST' }
+      ),
+    exportZVideo: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
+      request<{ message: string; output_path: string }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-export-video`,
+        { method: 'POST' }
+      ),
   },
 
   // Import

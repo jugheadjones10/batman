@@ -1,0 +1,29 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@theme {
+  --color-brand-red: #ef4444;
+  --color-brand-cyan: #06b6d4;
+  --color-brand-purple: #a855f7;
+  --color-bg-dark: #0f172a;
+}
+
+body {
+  @apply bg-slate-900 text-slate-100 font-sans antialiased;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom scrollbar for webkit */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-slate-900;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-700 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-600;
+}

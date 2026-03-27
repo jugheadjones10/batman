@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -21,6 +21,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/components/ui/Toaster'
 import GpuConnectionPanel from '@/components/GpuConnectionPanel'
 import LogViewer from '@/components/LogViewer'
+import HeightTimeline from '@/components/HeightTimeline'
+import ZCalibrationPanel from '@/components/ZCalibrationPanel'
 import type { InferenceConfig, InferenceGPUSubmitRequest, RFDETRModelSize, GPUType } from '@/types'
 
 export default function InferencePage() {
@@ -69,6 +71,10 @@ export default function InferencePage() {
     no_video: false,
   })
   const [gpuJobName, setGpuJobName] = useState<string | null>(null)
+
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [videoTime, setVideoTime] = useState(0)
+  const [videoDuration, setVideoDuration] = useState(0)
 
   const { data: videos } = useQuery({
     queryKey: ['videos', projectName],
@@ -419,7 +425,17 @@ export default function InferencePage() {
                 {detailResult.has_video && selectedCell && (
                   <div>
                     <h4 className="text-sm font-medium mb-2">Detected Video</h4>
+                    {detailResult.frames && detailResult.frames.length > 0 && (
+                      <div className="mb-2">
+                        <HeightTimeline
+                          frames={detailResult.frames}
+                          currentTime={videoTime}
+                          duration={videoDuration}
+                        />
+                      </div>
+                    )}
                     <video
+                      ref={videoRef}
                       key={`${selectedCell.run}-${selectedCell.video}-${selectedCell.inferenceId}`}
                       src={api.inference.videoUrl(
                         projectName!,
@@ -431,6 +447,12 @@ export default function InferencePage() {
                       className="w-full rounded-lg border border-border bg-black max-h-[400px]"
                       preload="auto"
                       playsInline
+                      onTimeUpdate={() => {
+                        if (videoRef.current) setVideoTime(videoRef.current.currentTime)
+                      }}
+                      onLoadedMetadata={() => {
+                        if (videoRef.current) setVideoDuration(videoRef.current.duration)
+                      }}
                     />
                     <p className="text-xs text-muted-foreground mt-2">
                       If the video does not load above,{' '}
@@ -535,6 +557,19 @@ export default function InferencePage() {
                         Open Frame Viewer
                       </Button>
                     </Link>
+                  </div>
+                )}
+
+                {/* Z-Axis Calibration */}
+                {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
+                  <div className="p-4 bg-muted/20 rounded-lg border border-border">
+                    <ZCalibrationPanel
+                      projectName={projectName!}
+                      runName={selectedCell.run}
+                      videoId={selectedCell.video}
+                      inferenceId={selectedCell.inferenceId}
+                      frames={detailResult.frames}
+                    />
                   </div>
                 )}
               </div>
