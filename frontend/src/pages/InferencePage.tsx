@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Play,
@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   Server,
   Monitor,
+  ImageIcon,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -191,7 +192,7 @@ export default function InferencePage() {
       api.inference.deleteResult(projectName!, run, video, inferenceId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['inference-results', projectName] })
-      setSelectedCell(null)
+      selectCell(null)
       toast({ title: 'Result deleted', type: 'success' })
     },
   })
@@ -203,6 +204,10 @@ export default function InferencePage() {
     },
     [videos]
   )
+
+  const selectCell = useCallback((cell: typeof selectedCell) => {
+    setSelectedCell(cell)
+  }, [])
 
   const hasResults = matrix && matrix.runs.length > 0 && matrix.videos.length > 0
 
@@ -266,7 +271,7 @@ export default function InferencePage() {
                             {latest ? (
                               <button
                                 onClick={() =>
-                                  setSelectedCell({
+                                  selectCell({
                                     run,
                                     video: vid,
                                     inferenceId: latest.inference_id,
@@ -349,7 +354,7 @@ export default function InferencePage() {
                 <Trash2 className="h-3.5 w-3.5" />
                 Delete
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setSelectedCell(null)}>
+              <Button variant="ghost" size="sm" onClick={() => selectCell(null)}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -380,7 +385,7 @@ export default function InferencePage() {
                           <button
                             key={r.inference_id}
                             onClick={() =>
-                              setSelectedCell({
+                              selectCell({
                                 ...selectedCell,
                                 inferenceId: r.inference_id,
                               })
@@ -509,6 +514,27 @@ export default function InferencePage() {
                         )
                       })}
                     </div>
+                  </div>
+                )}
+
+                {/* Extract frames link */}
+                {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
+                  <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
+                    <ImageIcon className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium">Extract Frames</p>
+                      <p className="text-xs text-muted-foreground">
+                        Browse frames with detection overlays and download selected frames as images with bounding box data.
+                      </p>
+                    </div>
+                    <Link
+                      to={`/projects/${projectName}/inference/${encodeURIComponent(selectedCell.run)}/${encodeURIComponent(selectedCell.video)}/${encodeURIComponent(selectedCell.inferenceId)}/frames`}
+                    >
+                      <Button variant="outline" size="sm" className="gap-1.5 whitespace-nowrap">
+                        <ImageIcon className="h-3.5 w-3.5" />
+                        Open Frame Viewer
+                      </Button>
+                    </Link>
                   </div>
                 )}
               </div>

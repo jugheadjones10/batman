@@ -1,12 +1,15 @@
 """Inference API routes."""
 
 import asyncio
+import io
 import json
 import shutil
+import zipfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+import cv2
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
@@ -405,6 +408,122 @@ async def delete_inference_result(
         raise HTTPException(status_code=404, detail="Inference result not found")
 
     return {"message": "Inference result deleted"}
+
+
+class ExtractFramesRequest(BaseModel):
+    frame_numbers: list[int]
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/extract-frames")
+async def extract_inference_frames(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    request: ExtractFramesRequest,
+):
+    """Extract selected frames as JPEG images with their detection data, returned as a ZIP."""
+    if not request.frame_numbers:
+        raise HTTPException(status_code=400, detail="No frame numbers specified")
+
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Load inference result
+    project = Project.load(project_path)
+    result = project.get_inference_result(run_name, video_id, inference_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    # Build lookup from frame_number -> frame data
+    frames_by_number: dict[int, dict] = {}
+    for frame in result.get("frames", []):
+        frames_by_number[frame["frame_number"]] = frame
+
+    # Resolve source video path
+    videos_meta_path = project_path / "videos" / "videos.json"
+    if not videos_meta_path.exists():
+        raise HTTPException(status_code=404, detail="No videos found")
+
+    with open(videos_meta_path) as f:
+        videos_meta = json.load(f)
+
+    if str(video_id) not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_path = Path(videos_meta[str(video_id)]["original_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    # Open video and get resolution
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise HTTPException(status_code=500, detail="Could not open video file")
+
+    vid_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Sort frame numbers for sequential seeking efficiency
+    sorted_frames = sorted(set(request.frame_numbers))
+
+    # Build ZIP in memory
+    zip_buffer = io.BytesIO()
+    export_frames = []
+
+    try:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for frame_num in sorted_frames:
+                if frame_num < 0 or frame_num >= total_frames:
+                    logger.warning(f"Skipping out-of-range frame {frame_num}")
+                    continue
+
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning(f"Could not read frame {frame_num}")
+                    continue
+
+                # Encode as JPEG
+                success, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                if not success:
+                    logger.warning(f"Could not encode frame {frame_num}")
+                    continue
+
+                filename = f"frame_{frame_num:06d}.jpg"
+                zf.writestr(filename, jpeg_buf.tobytes())
+
+                # Look up detection data
+                frame_data = frames_by_number.get(frame_num)
+                export_frames.append({
+                    "frame_number": frame_num,
+                    "timestamp": frame_data["timestamp"] if frame_data else frame_num / cap.get(cv2.CAP_PROP_FPS),
+                    "image_filename": filename,
+                    "detections": frame_data.get("detections", []) if frame_data else [],
+                })
+
+            # Write detections JSON
+            detections_json = {
+                "project": project_name,
+                "run_name": run_name,
+                "video_id": video_id,
+                "inference_id": inference_id,
+                "video_resolution": {"width": vid_width, "height": vid_height},
+                "frames": export_frames,
+            }
+            zf.writestr("detections.json", json.dumps(detections_json, indent=2))
+    finally:
+        cap.release()
+
+    zip_buffer.seek(0)
+    zip_filename = f"{project_name}_{run_name}_{video_id}_{inference_id}_frames.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
 
 
 @router.post("/export-video/{video_id}")

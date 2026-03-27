@@ -373,6 +373,27 @@ export const api = {
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,
         { method: 'DELETE' }
       ),
+    extractFrames: async (
+      projectName: string,
+      runName: string,
+      videoId: string,
+      inferenceId: string,
+      frameNumbers: number[],
+    ): Promise<Blob> => {
+      const response = await fetch(
+        `${API_BASE}/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/extract-frames`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ frame_numbers: frameNumbers }),
+        },
+      )
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'Extract failed' }))
+        throw new Error(error.detail || `Request failed: ${response.status}`)
+      }
+      return response.blob()
+    },
     submitGpu: (projectName: string, data: import('@/types').InferenceGPUSubmitRequest) =>
       request<{ job_id: string; run_name: string }>(
         `/projects/${projectName}/inference/submit-gpu`,

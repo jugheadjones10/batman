@@ -8,6 +8,7 @@ import AnnotatePage from '@/pages/AnnotatePage'
 import VideoAnnotatePage from '@/pages/VideoAnnotatePage'
 import TrainingPage from '@/pages/TrainingPage'
 import InferencePage from '@/pages/InferencePage'
+import InferenceFrameSelectPage from '@/pages/InferenceFrameSelectPage'
 
 function App() {
   return (
@@ -23,6 +24,7 @@ function App() {
           </Route>
           <Route path="projects/:projectName/annotate" element={<AnnotatePage />} />
           <Route path="projects/:projectName/annotate/video/:videoId" element={<VideoAnnotatePage />} />
+          <Route path="projects/:projectName/inference/:runName/:videoId/:inferenceId/frames" element={<InferenceFrameSelectPage />} />
         </Route>
       </Routes>
       <Toaster />
