@@ -505,10 +505,7 @@ def draw_detections(
     font_scale: float = 0.6,
 ) -> np.ndarray:
     """
-    Draw detection boxes and labels on an image with a coordinate legend.
-
-    Bounding boxes show class name and confidence. A color-coded legend in the
-    bottom-right corner lists the center coordinates for each detection.
+    Draw detection bounding boxes with class-name-only labels on an image.
 
     Args:
         image: BGR image (numpy array)
@@ -522,31 +519,14 @@ def draw_detections(
     import cv2
 
     result = image.copy()
-    img_h, img_w = result.shape[:2]
-    legend_font_scale = 0.45
-    legend_thickness = 1
-    swatch_size = 10
-    legend_padding = 8
-    legend_row_gap = 4
-
-    legend_entries: list[tuple[tuple[int, int, int], str]] = []
 
     for det in detections:
         x1, y1, x2, y2 = [int(c) for c in det.bbox]
-        cx = int((x1 + x2) / 2)
-        cy = int((y1 + y2) / 2)
         color = COLOR_PALETTE[det.class_id % len(COLOR_PALETTE)]
 
         cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-        # Box label: class name + confidence (+ track id when tracking) (+ Z when available)
-        if det.track_id is not None:
-            label = f"{det.class_name} #{det.track_id} {det.confidence:.2f}"
-        else:
-            label = f"{det.class_name} {det.confidence:.2f}"
-        if det.z_mm is not None:
-            label += f" Z:{det.z_mm:.0f}mm"
-
+        label = det.class_name
         (label_w, label_h), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
         )
@@ -560,57 +540,6 @@ def draw_detections(
             (255, 255, 255),
             thickness,
         )
-
-        # Collect legend entry
-        if det.track_id is not None:
-            legend_text = f"{det.class_name} #{det.track_id}: ({cx}, {cy})"
-        else:
-            legend_text = f"{det.class_name}: ({cx}, {cy})"
-        if det.z_mm is not None:
-            legend_text = legend_text[:-1] + f", z:{det.z_mm:.0f})"
-        legend_entries.append((color, legend_text))
-
-    # Draw coordinate legend at bottom-right
-    if legend_entries:
-        row_sizes = [
-            cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, legend_font_scale, legend_thickness)
-            for _, text in legend_entries
-        ]
-        row_height = max(h for (_, h), _ in row_sizes) + legend_row_gap
-        max_text_w = max(w for (w, _), _ in row_sizes)
-        panel_w = legend_padding * 2 + swatch_size + 6 + max_text_w
-        panel_h = legend_padding * 2 + row_height * len(legend_entries) - legend_row_gap
-
-        panel_x = img_w - panel_w - 10
-        panel_y = img_h - panel_h - 10
-
-        # Semi-transparent dark background
-        overlay = result.copy()
-        cv2.rectangle(
-            overlay,
-            (panel_x, panel_y),
-            (panel_x + panel_w, panel_y + panel_h),
-            (0, 0, 0),
-            -1,
-        )
-        cv2.addWeighted(overlay, 0.6, result, 0.4, 0, result)
-
-        # Draw each legend row
-        for i, (color, text) in enumerate(legend_entries):
-            row_y = panel_y + legend_padding + i * row_height
-            sx = panel_x + legend_padding
-            sy = row_y
-
-            cv2.rectangle(result, (sx, sy), (sx + swatch_size, sy + swatch_size), color, -1)
-            cv2.putText(
-                result,
-                text,
-                (sx + swatch_size + 6, sy + swatch_size),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                legend_font_scale,
-                color,
-                legend_thickness,
-            )
 
     return result
 

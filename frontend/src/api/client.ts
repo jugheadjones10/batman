@@ -368,6 +368,8 @@ export const api = {
       ),
     videoUrl: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video`,
+    zVideoUrl: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
+      `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video?variant=z`,
     deleteResult: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       request<{ message: string }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,

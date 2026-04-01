@@ -151,8 +151,32 @@ The Web UI provides a visual interface for running and browsing inference result
 The Inference page shows a **runs × videos matrix**:
 
 - Each cell shows whether inference has been run and key stats
-- Click a cell to view detailed results (stats, config, detection timeline)
+- Click a cell to view detailed results
 - Delete results you no longer need
+
+The detail panel uses a two-column layout on wide screens:
+
+**Left column (video + graphs):**
+
+1. **Detected video** -- plays the MP4 with bounding boxes and class labels overlaid. Confidence, coordinates, and Z-height values are *not* burned into the video; they appear in the live readout sidebar instead.
+2. **Z / X / Y Position vs. Time graphs** -- three stacked charts plotting position data for a selected class over time, with a playhead that follows video playback. A **Graph Class** dropdown (visible when multiple classes exist) controls which class the graphs display. Z requires calibration; X and Y show pixel coordinates.
+
+**Right column (live readout):**
+
+3. **Graph Class selector** -- dropdown to choose which detected class the position graphs plot (defaults to "crane hook").
+4. **Live detection readout** -- one card per detected class (e.g. "crane hook", "load"). Each card shows four values that update in real time as the video plays:
+    - **Confidence** (percentage)
+    - **X** (pixels) -- bounding box center x
+    - **Y** (pixels) -- bounding box center y
+    - **Z** (mm) -- estimated height from Z calibration (shown as `--` when not calibrated)
+    When a class is not detected in the current frame its values display as `--`. The readout column scrolls independently if many classes are present.
+
+**Below both columns (full width):**
+
+5. **Stats** -- total frames, keyframes, total detections, average inference time
+6. **Config** -- confidence threshold, IoU, frame interval, tracking mode
+7. **Detection timeline** -- bar chart of detection counts per frame
+8. **Actions** -- links to the Frame Viewer and Z-Axis Calibration tool
 
 ### Extracting Frames for Z-Axis Calibration
 
@@ -214,6 +238,30 @@ bbox_center_y_px = detection["box"]["y"] * video_resolution["height"]
 bbox_width_px = detection["box"]["width"] * video_resolution["width"]
 bbox_height_px = detection["box"]["height"] * video_resolution["height"]
 ```
+
+### Z-Axis Calibration
+
+The visual Z-axis calibration tool lets you build a depth model directly from inference frames, without manually typing frame numbers.
+
+1. Click a cell in the results matrix to open the detail panel
+2. Click **Open Calibration** in the Z-Axis Height Estimation section
+3. The calibration viewer opens in a full-screen layout:
+    - **Center**: the current frame with detection bounding box overlays
+    - **Bottom filmstrip**: scrollable frame indicators with navigation controls (calibration points shown with a ruler icon)
+    - **Right sidebar**: calibration points list with distance inputs, model status, and actions
+4. Navigate frames with arrow keys or click the filmstrip
+5. Add calibration points:
+    - Press **Space** or click **Add Frame** to add the current frame as a calibration point
+    - Enter the known distance from camera (mm) for each point in the sidebar
+    - Click a calibration point in the sidebar to navigate to that frame
+    - Remove points with the trash icon
+6. Click **Calibrate & Estimate** to fit the depth model and apply Z values to all detections
+7. Optionally click **Re-export Video with Z** to re-encode the video with Z-height overlays
+
+!!! tip "Calibration Tips"
+    - 1 calibration point uses a `Z = k/s` model. 2+ points use linear regression for better accuracy.
+    - Choose frames where the hook is at known heights spanning the full operating range.
+    - Frames must have at least one detection to be used as calibration points.
 
 ## Managing Test Videos
 

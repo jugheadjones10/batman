@@ -268,13 +268,13 @@ async def list_inference_results(project_name: str):
 
         # Check for detected video in the timestamped dir
         if inf_id != "legacy":
-            has_video = (
-                project.inference_dir / run_name / vid_id / inf_id / "detected.mp4"
-            ).exists()
+            result_base = project.inference_dir / run_name / vid_id / inf_id
         else:
-            has_video = (project.inference_dir / run_name / vid_id / "detected.mp4").exists()
+            result_base = project.inference_dir / run_name / vid_id
+        has_video = (result_base / "detected.mp4").exists()
+        has_z_video = (result_base / "detected_z.mp4").exists()
 
-        entry = {**summary, "has_video": has_video}
+        entry = {**summary, "has_video": has_video, "has_z_video": has_z_video}
         results_map.setdefault(run_name, {}).setdefault(vid_id, []).append(entry)
 
     # Sort each cell newest-first
@@ -312,13 +312,11 @@ async def get_inference_result(project_name: str, run_name: str, video_id: str, 
         raise HTTPException(status_code=404, detail="Inference result not found")
 
     if inference_id != "legacy":
-        result["has_video"] = (
-            project.inference_dir / run_name / video_id / inference_id / "detected.mp4"
-        ).exists()
+        result_base = project.inference_dir / run_name / video_id / inference_id
     else:
-        result["has_video"] = (
-            project.inference_dir / run_name / video_id / "detected.mp4"
-        ).exists()
+        result_base = project.inference_dir / run_name / video_id
+    result["has_video"] = (result_base / "detected.mp4").exists()
+    result["has_z_video"] = (result_base / "detected_z.mp4").exists()
     return result
 
 
@@ -329,17 +327,22 @@ async def get_inference_result_video(
     run_name: str,
     video_id: str,
     inference_id: str,
+    variant: str | None = None,
 ):
-    """Stream the detected video (with overlay) for an inference result. Supports Range for seeking."""
+    """Stream the detected video (with overlay) for an inference result. Supports Range for seeking.
+    
+    Use ?variant=z to stream the Z-overlay video (detected_z.mp4) instead of the default.
+    """
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
+    filename = "detected_z.mp4" if variant == "z" else "detected.mp4"
     if inference_id == "legacy":
-        video_path = project_path / "inference" / run_name / video_id / "detected.mp4"
+        video_path = project_path / "inference" / run_name / video_id / filename
     else:
         video_path = (
-            project_path / "inference" / run_name / video_id / inference_id / "detected.mp4"
+            project_path / "inference" / run_name / video_id / inference_id / filename
         )
 
     video_path = video_path.resolve()
@@ -879,7 +882,7 @@ async def export_z_video(
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    output_path = result_dir / "detected.mp4"
+    output_path = result_dir / "detected_z.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (vid_w, vid_h))
 

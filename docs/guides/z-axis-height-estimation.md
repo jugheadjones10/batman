@@ -1036,8 +1036,10 @@ Print this and hand it to the shipping yard operator. All measurements are one-t
 
 ### Must-Have for Approach C (Two-Point Reference — simplest, ~10 min)
 
-!!! tip "Use the Inference Frame Extraction feature"
-    After running inference on a calibration video, use the **Extract Frames** panel on the Inference page to select specific frames and download them as a ZIP with JPEG images and bounding box data in `detections.json`. This gives you the bbox centroid and size values needed below without manual measurement. See the [Inference Workflow Guide](inference.md#extracting-frames-for-z-axis-calibration) for details.
+!!! tip "Use the Visual Calibration Tool"
+    After running inference on a calibration video, use the **Z-Axis Calibration** tool on the Inference page. Click **Open Calibration** to browse frames visually, select calibration points, and enter known distances — all in a full-screen viewer with bounding box overlays. See the [Inference Workflow Guide](inference.md#z-axis-calibration) for details.
+
+    You can also use the **Extract Frames** tool to download selected frames as a ZIP with JPEG images and bounding box data. See [Extracting Frames](inference.md#extracting-frames-for-z-axis-calibration).
 
 - [ ] **Hook at maximum operating height**: _______ meters (measure with laser rangefinder or PLC readout)
 - [ ] **Capture frame at max height**: Save as JPEG, run detector, record bbox centroid y: _______ pixels and bbox height: _______ pixels

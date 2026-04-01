@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -14,6 +14,7 @@ import {
   Server,
   Monitor,
   ImageIcon,
+  Ruler,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -21,8 +22,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/components/ui/Toaster'
 import GpuConnectionPanel from '@/components/GpuConnectionPanel'
 import LogViewer from '@/components/LogViewer'
-import HeightTimeline from '@/components/HeightTimeline'
-import ZCalibrationPanel from '@/components/ZCalibrationPanel'
+import PositionTimeline from '@/components/HeightTimeline'
+import LiveDetectionReadout from '@/components/LiveDetectionReadout'
 import type { InferenceConfig, InferenceGPUSubmitRequest, RFDETRModelSize, GPUType } from '@/types'
 
 export default function InferencePage() {
@@ -72,9 +73,24 @@ export default function InferencePage() {
   })
   const [gpuJobName, setGpuJobName] = useState<string | null>(null)
 
+  const [graphClass, setGraphClass] = useState<string>('crane hook')
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const [videoTime, setVideoTime] = useState(0)
   const [videoDuration, setVideoDuration] = useState(0)
+  const rafRef = useRef<number>(0)
+
+  useEffect(() => {
+    const tick = () => {
+      const v = videoRef.current
+      if (v && !v.paused && !v.ended) {
+        setVideoTime(v.currentTime)
+      }
+      rafRef.current = requestAnimationFrame(tick)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [])
 
   const { data: videos } = useQuery({
     queryKey: ['videos', projectName],
@@ -111,6 +127,21 @@ export default function InferencePage() {
       ),
     enabled: !!projectName && !!selectedCell,
   })
+
+  const availableClasses = useMemo(() => {
+    if (!detailResult?.frames) return []
+    const names = new Set<string>()
+    for (const f of detailResult.frames) {
+      for (const d of f.detections) names.add(d.class_name)
+    }
+    return Array.from(names).sort()
+  }, [detailResult?.frames])
+
+  useEffect(() => {
+    if (availableClasses.length > 0 && !availableClasses.includes(graphClass)) {
+      setGraphClass(availableClasses[0])
+    }
+  }, [availableClasses, graphClass])
 
   const completedRuns = runs?.filter((r) => r.status === 'completed') || []
 
@@ -218,7 +249,7 @@ export default function InferencePage() {
   const hasResults = matrix && matrix.runs.length > 0 && matrix.videos.length > 0
 
   return (
-    <div className="container max-w-7xl py-8 px-6 lg:px-8">
+    <div className="container max-w-[1800px] py-8 px-6 lg:px-8">
       <div className="flex items-center justify-end gap-3 mb-6">
         <div className="w-64">
           <GpuConnectionPanel />
@@ -421,59 +452,121 @@ export default function InferencePage() {
               </div>
             ) : detailResult ? (
               <div className="space-y-4">
-                {/* Video with detection overlay */}
-                {detailResult.has_video && selectedCell && (
-                  <div>
-                    <h4 className="text-sm font-medium mb-2">Detected Video</h4>
-                    {detailResult.frames && detailResult.frames.length > 0 && (
-                      <div className="mb-2">
-                        <HeightTimeline
-                          frames={detailResult.frames}
-                          currentTime={videoTime}
-                          duration={videoDuration}
-                        />
+                {/* Two-column layout: left = video + graphs, right = readout */}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                  {/* Left column: Video + Position Graphs */}
+                  <div className="space-y-4 min-w-0">
+                    {detailResult.has_video && selectedCell && (() => {
+                      const vid = videos?.find((v) => String(v.id) === selectedCell.video)
+                      return (
+                        <div>
+                          <h4 className="text-sm font-medium mb-2">Detected Video</h4>
+                          <video
+                            ref={videoRef}
+                            key={`${selectedCell.run}-${selectedCell.video}-${selectedCell.inferenceId}`}
+                            src={api.inference.videoUrl(
+                              projectName!,
+                              selectedCell.run,
+                              selectedCell.video,
+                              selectedCell.inferenceId
+                            )}
+                            controls
+                            className="w-full rounded-lg bg-black"
+                            preload="auto"
+                            playsInline
+                            onLoadedMetadata={() => {
+                              if (videoRef.current) setVideoDuration(videoRef.current.duration)
+                            }}
+                          />
+                          {detailResult.frames && detailResult.frames.length > 0 && (
+                            <div className="mt-2 space-y-2">
+                              <PositionTimeline
+                                frames={detailResult.frames}
+                                currentTime={videoTime}
+                                duration={videoDuration}
+                                metric="z"
+                                targetClass={graphClass}
+                              />
+                              <PositionTimeline
+                                frames={detailResult.frames}
+                                currentTime={videoTime}
+                                duration={videoDuration}
+                                metric="x"
+                                targetClass={graphClass}
+                                videoWidth={vid?.width || 1920}
+                                videoHeight={vid?.height || 1080}
+                              />
+                              <PositionTimeline
+                                frames={detailResult.frames}
+                                currentTime={videoTime}
+                                duration={videoDuration}
+                                metric="y"
+                                targetClass={graphClass}
+                                videoWidth={vid?.width || 1920}
+                                videoHeight={vid?.height || 1080}
+                              />
+                            </div>
+                          )}
+                          <p className="text-xs text-muted-foreground mt-2">
+                            If the video does not load above,{' '}
+                            <a
+                              href={api.inference.videoUrl(
+                                projectName!,
+                                selectedCell.run,
+                                selectedCell.video,
+                                selectedCell.inferenceId
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary hover:underline"
+                            >
+                              open it in a new tab
+                            </a>
+                            .
+                          </p>
+                        </div>
+                      )
+                    })()}
+                  </div>
+
+                  {/* Right column: Graph class selector + Live Readout */}
+                  <div className="space-y-4">
+                    {availableClasses.length > 1 && (
+                      <div>
+                        <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide block mb-1.5">
+                          Graph Class
+                        </label>
+                        <select
+                          value={graphClass}
+                          onChange={(e) => setGraphClass(e.target.value)}
+                          className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                        >
+                          {availableClasses.map((cls) => (
+                            <option key={cls} value={cls}>{cls}</option>
+                          ))}
+                        </select>
                       </div>
                     )}
-                    <video
-                      ref={videoRef}
-                      key={`${selectedCell.run}-${selectedCell.video}-${selectedCell.inferenceId}`}
-                      src={api.inference.videoUrl(
-                        projectName!,
-                        selectedCell.run,
-                        selectedCell.video,
-                        selectedCell.inferenceId
-                      )}
-                      controls
-                      className="w-full rounded-lg border border-border bg-black max-h-[400px]"
-                      preload="auto"
-                      playsInline
-                      onTimeUpdate={() => {
-                        if (videoRef.current) setVideoTime(videoRef.current.currentTime)
-                      }}
-                      onLoadedMetadata={() => {
-                        if (videoRef.current) setVideoDuration(videoRef.current.duration)
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground mt-2">
-                      If the video does not load above,{' '}
-                      <a
-                        href={api.inference.videoUrl(
-                          projectName!,
-                          selectedCell.run,
-                          selectedCell.video,
-                          selectedCell.inferenceId
-                        )}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:underline"
-                      >
-                        open it in a new tab
-                      </a>
-                      .
-                    </p>
+
+                    {detailResult.frames && detailResult.frames.length > 0 && (() => {
+                      const vid = videos?.find((v) => String(v.id) === selectedCell?.video)
+                      const vw = vid?.width || 1920
+                      const vh = vid?.height || 1080
+                      return (
+                        <div className="xl:max-h-[calc(100vh-200px)] xl:overflow-y-auto">
+                          <LiveDetectionReadout
+                            frames={detailResult.frames}
+                            currentTime={videoTime}
+                            videoWidth={vw}
+                            videoHeight={vh}
+                          />
+                        </div>
+                      )
+                    })()}
                   </div>
-                )}
-                {/* Stats row */}
+                </div>
+
+                {/* Full-width bottom section */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-3 bg-muted/50 rounded-lg">
                     <div className="text-xs text-muted-foreground">Total Frames</div>
@@ -497,7 +590,6 @@ export default function InferencePage() {
                   </div>
                 </div>
 
-                {/* Config */}
                 <div className="flex flex-wrap gap-2 text-xs">
                   <span className="px-2 py-1 bg-muted rounded">
                     conf: {detailResult.config.confidence_threshold}
@@ -515,7 +607,6 @@ export default function InferencePage() {
                   </span>
                 </div>
 
-                {/* Detection timeline */}
                 {detailResult.frames && detailResult.frames.length > 0 && (
                   <div>
                     <h4 className="text-sm font-medium mb-2">Detection Timeline</h4>
@@ -539,7 +630,6 @@ export default function InferencePage() {
                   </div>
                 )}
 
-                {/* Extract frames link */}
                 {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
                   <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
                     <ImageIcon className="h-5 w-5 text-muted-foreground flex-shrink-0" />
@@ -560,16 +650,23 @@ export default function InferencePage() {
                   </div>
                 )}
 
-                {/* Z-Axis Calibration */}
                 {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
-                  <div className="p-4 bg-muted/20 rounded-lg border border-border">
-                    <ZCalibrationPanel
-                      projectName={projectName!}
-                      runName={selectedCell.run}
-                      videoId={selectedCell.video}
-                      inferenceId={selectedCell.inferenceId}
-                      frames={detailResult.frames}
-                    />
+                  <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
+                    <Ruler className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium">Z-Axis Height Estimation</p>
+                      <p className="text-xs text-muted-foreground">
+                        Browse frames, select calibration points at known distances, and fit a depth model.
+                      </p>
+                    </div>
+                    <Link
+                      to={`/projects/${projectName}/inference/${encodeURIComponent(selectedCell.run)}/${encodeURIComponent(selectedCell.video)}/${encodeURIComponent(selectedCell.inferenceId)}/z-calibration`}
+                    >
+                      <Button variant="outline" size="sm" className="gap-1.5 whitespace-nowrap">
+                        <Ruler className="h-3.5 w-3.5" />
+                        Open Calibration
+                      </Button>
+                    </Link>
                   </div>
                 )}
               </div>

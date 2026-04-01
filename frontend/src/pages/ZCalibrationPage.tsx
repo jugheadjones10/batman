@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   SkipBack,
   SkipForward,
@@ -8,14 +8,17 @@ import {
   ChevronRight,
   ArrowLeft,
   Loader2,
-  Download,
+  Plus,
+  Trash2,
+  Ruler,
   Check,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
 import { useToast } from '@/components/ui/Toaster'
 import { cn } from '@/lib/utils'
-import type { Detection, InferenceResult } from '@/types'
+import type { Detection, InferenceResult, ZCalibrationLabel } from '@/types'
 
 const DETECTION_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 const FRAME_INTERVALS = [1, 2, 5, 10, 15, 30, 60] as const
@@ -28,7 +31,13 @@ function pickDefaultInterval(totalFrames: number): number {
   return 60
 }
 
-export default function InferenceFrameSelectPage() {
+interface CalibrationPoint {
+  frameIndex: number
+  frame_number: number
+  z_mm: string
+}
+
+export default function ZCalibrationPage() {
   const { projectName, runName, videoId, inferenceId } = useParams<{
     projectName: string
     runName: string
@@ -36,12 +45,11 @@ export default function InferenceFrameSelectPage() {
     inferenceId: string
   }>()
   const { toast } = useToast()
+  const queryClient = useQueryClient()
 
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0)
-  const [selectedFrameIndices, setSelectedFrameIndices] = useState<Set<number>>(new Set())
-  const lastClickedIndexRef = useRef<number | null>(null)
+  const [calibrationPoints, setCalibrationPoints] = useState<CalibrationPoint[]>([])
   const thumbnailStripRef = useRef<HTMLDivElement>(null)
-  const [extracting, setExtracting] = useState(false)
   const [frameInterval, setFrameInterval] = useState<number | null>(null)
 
   const { data: video } = useQuery({
@@ -56,12 +64,17 @@ export default function InferenceFrameSelectPage() {
     enabled: !!projectName && !!runName && !!videoId && !!inferenceId,
   })
 
+  const { data: existingCal } = useQuery({
+    queryKey: ['z-calibration', projectName, runName, videoId, inferenceId],
+    queryFn: () => api.inference.getZCalibration(projectName!, runName!, videoId!, inferenceId!),
+    enabled: !!projectName && !!runName && !!videoId && !!inferenceId,
+  })
+
   const allFrames: InferenceResult[] = useMemo(
     () => detailResult?.frames ?? [],
     [detailResult],
   )
 
-  // Set default interval once we know the frame count
   useEffect(() => {
     if (frameInterval === null && allFrames.length > 0) {
       setFrameInterval(pickDefaultInterval(allFrames.length))
@@ -75,14 +88,26 @@ export default function InferenceFrameSelectPage() {
     [allFrames, effectiveInterval],
   )
 
-  // Reset navigation when interval changes
   useEffect(() => {
     setCurrentFrameIndex(0)
-    setSelectedFrameIndices(new Set())
-    lastClickedIndexRef.current = null
+    setCalibrationPoints([])
   }, [effectiveInterval])
 
+  // Load existing calibration points when data arrives
+  useEffect(() => {
+    if (!existingCal?.z_calibration?.labels?.length || allFrames.length === 0 || calibrationPoints.length > 0) return
+    const points: CalibrationPoint[] = []
+    for (const label of existingCal.z_calibration.labels) {
+      const idx = filteredFrames.findIndex((f) => f.frame_number === label.frame_number)
+      if (idx !== -1) {
+        points.push({ frameIndex: idx, frame_number: label.frame_number, z_mm: String(label.z_mm) })
+      }
+    }
+    if (points.length > 0) setCalibrationPoints(points)
+  }, [existingCal, allFrames.length, filteredFrames, calibrationPoints.length])
+
   const currentFrame = filteredFrames[currentFrameIndex]
+  const hasExistingZ = existingCal?.z_calibration?.model != null
 
   const classNames = useMemo(() => {
     const names = new Set<string>()
@@ -100,6 +125,11 @@ export default function InferenceFrameSelectPage() {
     return map
   }, [classNames])
 
+  const selectedFrameNumbers = useMemo(
+    () => new Set(calibrationPoints.map((p) => p.frame_number)),
+    [calibrationPoints],
+  )
+
   const goToFrame = useCallback(
     (index: number) => {
       if (filteredFrames.length > 0 && index >= 0 && index < filteredFrames.length) {
@@ -112,77 +142,71 @@ export default function InferenceFrameSelectPage() {
   const goToFrameRef = useRef(goToFrame)
   goToFrameRef.current = goToFrame
 
-  const handleFilmstripClick = useCallback(
-    (index: number, e: React.MouseEvent) => {
-      const isMetaKey = e.metaKey || e.ctrlKey
-      const isShift = e.shiftKey
+  const addCurrentFrame = useCallback(() => {
+    if (!currentFrame) return
+    if (selectedFrameNumbers.has(currentFrame.frame_number)) {
+      toast({ title: 'Already added', description: `Frame ${currentFrame.frame_number} is already a calibration point`, type: 'error' })
+      return
+    }
+    if (currentFrame.detections.length === 0) {
+      toast({ title: 'No detections', description: 'This frame has no detections to calibrate against', type: 'error' })
+      return
+    }
+    setCalibrationPoints((prev) => [
+      ...prev,
+      { frameIndex: currentFrameIndex, frame_number: currentFrame.frame_number, z_mm: '' },
+    ])
+  }, [currentFrame, currentFrameIndex, selectedFrameNumbers, toast])
 
-      if (isShift && lastClickedIndexRef.current !== null) {
-        const start = Math.min(lastClickedIndexRef.current, index)
-        const end = Math.max(lastClickedIndexRef.current, index)
-        setSelectedFrameIndices((prev) => {
-          const next = new Set(prev)
-          for (let i = start; i <= end; i++) next.add(i)
-          return next
-        })
-      } else if (isMetaKey) {
-        setSelectedFrameIndices((prev) => {
-          const next = new Set(prev)
-          if (next.has(index)) next.delete(index)
-          else next.add(index)
-          return next
-        })
-      }
+  const removePoint = useCallback((frameNumber: number) => {
+    setCalibrationPoints((prev) => prev.filter((p) => p.frame_number !== frameNumber))
+  }, [])
 
-      lastClickedIndexRef.current = index
-      goToFrame(index)
+  const updateDistance = useCallback((frameNumber: number, value: string) => {
+    setCalibrationPoints((prev) =>
+      prev.map((p) => (p.frame_number === frameNumber ? { ...p, z_mm: value } : p)),
+    )
+  }, [])
+
+  const navigateToPoint = useCallback(
+    (frameIndex: number) => {
+      goToFrame(frameIndex)
     },
     [goToFrame],
   )
 
-  const toggleCurrentFrame = useCallback(() => {
-    setSelectedFrameIndices((prev) => {
-      const next = new Set(prev)
-      if (next.has(currentFrameIndex)) next.delete(currentFrameIndex)
-      else next.add(currentFrameIndex)
-      return next
-    })
-  }, [currentFrameIndex])
-
-  const handleDownload = useCallback(async () => {
-    if (!projectName || !runName || !videoId || !inferenceId || selectedFrameIndices.size === 0) return
-    setExtracting(true)
-    try {
-      const frameNumbers = Array.from(selectedFrameIndices).map((i) => filteredFrames[i].frame_number)
-      const blob = await api.inference.extractFrames(projectName, runName, videoId, inferenceId, frameNumbers)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${projectName}_${runName}_${inferenceId}_frames.zip`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-      toast({
-        title: 'Frames downloaded',
-        description: `${selectedFrameIndices.size} frames exported as ZIP`,
-        type: 'success',
+  const validLabels = useMemo((): ZCalibrationLabel[] => {
+    return calibrationPoints
+      .filter((p) => {
+        const z = parseFloat(p.z_mm)
+        return !isNaN(z) && z > 0
       })
-    } catch (error: any) {
-      toast({ title: 'Download failed', description: error.message, type: 'error' })
-    } finally {
-      setExtracting(false)
-    }
-  }, [projectName, runName, videoId, inferenceId, selectedFrameIndices, filteredFrames, toast])
+      .map((p) => ({
+        frame_number: p.frame_number,
+        z_mm: parseFloat(p.z_mm),
+        detection_index: 0,
+      }))
+  }, [calibrationPoints])
+
+  const calibrateMutation = useMutation({
+    mutationFn: async () => {
+      await api.inference.saveZCalibration(projectName!, runName!, videoId!, inferenceId!, validLabels)
+      return api.inference.applyZEstimation(projectName!, runName!, videoId!, inferenceId!)
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['z-calibration', projectName, runName, videoId, inferenceId] })
+      queryClient.invalidateQueries({ queryKey: ['inference-result-detail', projectName, runName, videoId, inferenceId] })
+      toast({ title: 'Z estimation applied', description: `Model: ${result.model.type}`, type: 'success' })
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Z calibration failed', description: error.message, type: 'error' })
+    },
+  })
+
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
-      if (e.key === 'Escape' && selectedFrameIndices.size > 0) {
-        e.preventDefault()
-        setSelectedFrameIndices(new Set())
-        return
-      }
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
         goToFrameRef.current(currentFrameIndex - 1)
@@ -193,12 +217,12 @@ export default function InferenceFrameSelectPage() {
       }
       if (e.key === ' ') {
         e.preventDefault()
-        toggleCurrentFrame()
+        addCurrentFrame()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentFrameIndex, selectedFrameIndices.size, toggleCurrentFrame])
+  }, [currentFrameIndex, addCurrentFrame])
 
   useEffect(() => {
     const strip = thumbnailStripRef.current
@@ -233,7 +257,8 @@ export default function InferenceFrameSelectPage() {
     ? api.videos.frameUrl(projectName, videoId, currentFrame.frame_number)
     : ''
 
-  const selectedCount = selectedFrameIndices.size
+  const isCurrentFrameAdded = currentFrame ? selectedFrameNumbers.has(currentFrame.frame_number) : false
+  const hasIncompletePoints = calibrationPoints.some((p) => !p.z_mm || parseFloat(p.z_mm) <= 0 || isNaN(parseFloat(p.z_mm)))
 
   return (
     <div className="h-[calc(100vh-4rem)] flex overflow-hidden">
@@ -247,6 +272,10 @@ export default function InferenceFrameSelectPage() {
               Back
             </Button>
           </Link>
+          <div className="flex items-center gap-1.5">
+            <Ruler className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">Z-Axis Calibration</span>
+          </div>
           <span className="text-sm text-muted-foreground truncate">
             {runName} / {video?.filename ?? videoId}
           </span>
@@ -258,9 +287,7 @@ export default function InferenceFrameSelectPage() {
               className="rounded border bg-background px-2 py-0.5 text-xs h-7"
             >
               {FRAME_INTERVALS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
+                <option key={n} value={n}>{n}</option>
               ))}
             </select>
             <span className="text-[11px] text-muted-foreground">frames</span>
@@ -269,30 +296,27 @@ export default function InferenceFrameSelectPage() {
             </span>
           </div>
           <div className="flex-1" />
+          {hasExistingZ && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+              Calibrated
+            </span>
+          )}
           <span className="text-xs text-muted-foreground">
-            {selectedCount} selected
+            {calibrationPoints.length} point{calibrationPoints.length !== 1 ? 's' : ''}
           </span>
           <Button
-            variant={selectedFrameIndices.has(currentFrameIndex) ? 'default' : 'outline'}
+            variant={isCurrentFrameAdded ? 'default' : 'outline'}
             size="sm"
             className="gap-1.5 h-8"
-            onClick={toggleCurrentFrame}
+            onClick={addCurrentFrame}
+            disabled={isCurrentFrameAdded || !currentFrame?.detections.length}
           >
-            <Check className="h-3.5 w-3.5" />
-            {selectedFrameIndices.has(currentFrameIndex) ? 'Selected' : 'Select Frame'}
-          </Button>
-          <Button
-            size="sm"
-            className="gap-1.5 h-8"
-            disabled={selectedCount === 0 || extracting}
-            onClick={handleDownload}
-          >
-            {extracting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {isCurrentFrameAdded ? (
+              <Check className="h-3.5 w-3.5" />
             ) : (
-              <Download className="h-3.5 w-3.5" />
+              <Plus className="h-3.5 w-3.5" />
             )}
-            Download ZIP
+            {isCurrentFrameAdded ? 'Added' : 'Add Frame'}
           </Button>
         </div>
 
@@ -307,7 +331,6 @@ export default function InferenceFrameSelectPage() {
                 className="max-w-full max-h-[calc(100vh-14rem)] object-contain rounded"
                 draggable={false}
               />
-              {/* Detection bounding box overlays */}
               {currentFrame.detections.map((det: Detection, i: number) => {
                 const left = (det.box.x - det.box.width / 2) * 100
                 const top = (det.box.y - det.box.height / 2) * 100
@@ -337,11 +360,10 @@ export default function InferenceFrameSelectPage() {
                   </div>
                 )
               })}
-              {/* Selection badge */}
-              {selectedFrameIndices.has(currentFrameIndex) && (
+              {isCurrentFrameAdded && (
                 <div className="absolute top-2 right-2 bg-primary text-primary-foreground px-2 py-1 rounded text-xs font-medium flex items-center gap-1">
-                  <Check className="h-3 w-3" />
-                  Selected
+                  <Ruler className="h-3 w-3" />
+                  Calibration Point
                 </div>
               )}
             </div>
@@ -373,82 +395,37 @@ export default function InferenceFrameSelectPage() {
             )}
             <div className="flex-1" />
             <span className="text-[10px] text-muted-foreground hidden sm:block">
-              &larr; &rarr; navigate &middot; Space toggle select &middot; Cmd-click multi-select &middot; Shift-click range
+              &larr; &rarr; navigate &middot; Space add frame
             </span>
           </div>
-          {/* Multi-select floating bar */}
-          {selectedFrameIndices.size > 0 && (
-            <div className="absolute left-4 right-4 bottom-full mb-1 z-10 flex items-center gap-2 px-2 py-1.5 rounded-md bg-neutral-900/90 border border-blue-500/40 backdrop-blur-md shadow-lg">
-              <span className="text-xs font-medium text-blue-400">
-                {selectedFrameIndices.size} frame{selectedFrameIndices.size !== 1 ? 's' : ''} selected
-              </span>
-              <div className="flex-1" />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 text-[11px] px-2 text-muted-foreground hover:text-foreground"
-                onClick={() => {
-                  const allIndices = new Set<number>()
-                  filteredFrames.forEach((_, i) => allIndices.add(i))
-                  setSelectedFrameIndices(allIndices)
-                }}
-              >
-                Select all
-              </Button>
-              <Button
-                size="sm"
-                className="h-6 text-[11px] px-2 gap-1"
-                disabled={extracting}
-                onClick={handleDownload}
-              >
-                {extracting ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Download className="h-3 w-3" />
-                )}
-                Download {selectedFrameIndices.size} frames
-              </Button>
-              <button
-                onClick={() => setSelectedFrameIndices(new Set())}
-                className="text-[11px] text-muted-foreground hover:text-foreground ml-1"
-                title="Deselect all (Esc)"
-              >
-                ✕
-              </button>
-            </div>
-          )}
           <div
             ref={thumbnailStripRef}
             className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin"
             style={{ maxHeight: 44 }}
           >
             {filteredFrames.map((frame, i) => {
-              const isMultiSelected = selectedFrameIndices.has(i)
+              const isCalPoint = selectedFrameNumbers.has(frame.frame_number)
               const isCurrent = i === currentFrameIndex
               const hasDetections = frame.detections.length > 0
               return (
                 <button
                   key={frame.frame_number}
                   data-index={i}
-                  onClick={(e) => handleFilmstripClick(i, e)}
+                  onClick={() => goToFrame(i)}
                   className={cn(
                     'relative flex-shrink-0 w-10 h-10 rounded border-2 transition-colors flex flex-col items-center justify-center',
-                    isMultiSelected
-                      ? 'border-blue-500 bg-blue-500/20'
+                    isCalPoint
+                      ? 'border-amber-500 bg-amber-500/20'
                       : isCurrent
-                      ? 'border-amber-400 bg-amber-400/10'
+                      ? 'border-primary bg-primary/10'
                       : hasDetections
                       ? 'border-green-500/50 bg-green-500/5 hover:border-green-500/80'
                       : 'border-border bg-muted/30 hover:border-primary/50',
                   )}
                   title={`Frame ${frame.frame_number} · ${frame.timestamp.toFixed(1)}s · ${frame.detections.length} detection${frame.detections.length !== 1 ? 's' : ''}`}
                 >
-                  {isMultiSelected ? (
-                    <div className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center">
-                      <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="2,6 5,9 10,3" />
-                      </svg>
-                    </div>
+                  {isCalPoint ? (
+                    <Ruler className="h-3.5 w-3.5 text-amber-500" />
                   ) : (
                     <>
                       <span className="text-[9px] font-mono text-muted-foreground leading-none">
@@ -471,77 +448,119 @@ export default function InferenceFrameSelectPage() {
         </div>
       </div>
 
-      {/* Right sidebar - detection details */}
-      <div className="w-64 flex-shrink-0 bg-secondary border-l border-border flex flex-col overflow-hidden">
-        <div className="flex-shrink-0 p-3 border-b border-border">
-          <label className="text-[10px] font-medium text-muted-foreground mb-1 block uppercase tracking-wide">
-            Classes ({classNames.length})
-          </label>
-          {classNames.length > 0 ? (
-            <div className="space-y-0.5 max-h-32 overflow-y-auto">
-              {classNames.map((cls) => (
-                <div key={cls} className="flex items-center gap-2 px-2 py-1 text-xs">
-                  <span
-                    className="w-2.5 h-2.5 rounded-sm flex-shrink-0"
-                    style={{ backgroundColor: classColorMap[cls] }}
-                  />
-                  <span className="truncate">{cls}</span>
-                </div>
-              ))}
+      {/* Right sidebar - calibration */}
+      <div className="w-72 flex-shrink-0 bg-secondary border-l border-border flex flex-col overflow-hidden">
+        {/* Existing calibration status */}
+        {hasExistingZ && existingCal?.z_calibration && (
+          <div className="flex-shrink-0 p-3 border-b border-border">
+            <label className="text-[10px] font-medium text-muted-foreground mb-1.5 block uppercase tracking-wide">
+              Current Model
+            </label>
+            <div className="text-xs space-y-1 p-2 bg-muted/50 rounded">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Formula</span>
+                <span className="font-mono">
+                  {existingCal.z_calibration.model?.type === 'k_over_s'
+                    ? `Z = ${existingCal.z_calibration.model.k?.toFixed(0)} / s`
+                    : `Z = ${existingCal.z_calibration.model?.a?.toFixed(0)} / s + ${existingCal.z_calibration.model?.b?.toFixed(0)}`}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Points</span>
+                <span>{existingCal.z_calibration.labels.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Class</span>
+                <span>{existingCal.z_calibration.class_name}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Calibration points list */}
+        <div className="flex-1 overflow-y-auto p-3 min-h-0">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+              Calibration Points ({calibrationPoints.length})
+            </label>
+          </div>
+
+          {calibrationPoints.length === 0 ? (
+            <div className="text-xs text-muted-foreground py-6 text-center space-y-2">
+              <Ruler className="h-8 w-8 mx-auto text-muted-foreground/40" />
+              <p>No calibration points yet.</p>
+              <p>Browse to a frame with detections and press <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">Space</kbd> or click <strong>Add Frame</strong> to add it.</p>
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">No detections</p>
-          )}
-        </div>
-        <div className="flex-1 overflow-y-auto p-3 min-h-0">
-          <label className="text-[10px] font-medium text-muted-foreground mb-1 block uppercase tracking-wide">
-            Detections ({currentFrame?.detections.length ?? 0})
-          </label>
-          {!currentFrame?.detections.length ? (
-            <p className="text-xs text-muted-foreground py-4 text-center">No detections in this frame</p>
-          ) : (
-            <div className="space-y-0.5">
-              {currentFrame.detections.map((det: Detection, i: number) => (
+            <div className="space-y-2">
+              {calibrationPoints.map((point) => (
                 <div
-                  key={i}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-muted/30"
+                  key={point.frame_number}
+                  className={cn(
+                    'p-2 rounded border text-xs transition-colors cursor-pointer',
+                    currentFrame?.frame_number === point.frame_number
+                      ? 'border-amber-500/60 bg-amber-500/10'
+                      : 'border-border bg-muted/30 hover:border-border/80',
+                  )}
+                  onClick={() => navigateToPoint(point.frameIndex)}
                 >
-                  <span
-                    className="w-2.5 h-2.5 rounded-sm flex-shrink-0"
-                    style={{ backgroundColor: classColorMap[det.class_name] }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <span className="truncate block">{det.class_name}</span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {(det.confidence * 100).toFixed(1)}%
-                      {det.track_id != null && ` · track ${det.track_id}`}
-                    </span>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-medium">Frame {point.frame_number}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        removePoint(point.frame_number)
+                      }}
+                      className="text-muted-foreground hover:text-destructive transition-colors p-0.5"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-foreground whitespace-nowrap">Distance:</span>
+                    <Input
+                      type="number"
+                      placeholder="mm"
+                      value={point.z_mm}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => updateDistance(point.frame_number, e.target.value)}
+                      className="h-6 text-xs flex-1 min-w-0"
+                    />
+                    <span className="text-muted-foreground">mm</span>
                   </div>
                 </div>
               ))}
             </div>
           )}
         </div>
+
+        {/* Info text */}
+        <div className="flex-shrink-0 px-3 py-2 border-t border-border">
+          <p className="text-[10px] text-muted-foreground leading-relaxed">
+            {calibrationPoints.length === 0
+              ? 'Select frames at known distances from the camera to build a depth model.'
+              : calibrationPoints.length === 1 && validLabels.length === 1
+              ? '1 point → Z = k/s model. Add more points for linear regression.'
+              : `${validLabels.length} valid point${validLabels.length !== 1 ? 's' : ''} → linear regression model.`}
+          </p>
+        </div>
+
+        {/* Actions */}
         <div className="flex-shrink-0 p-3 border-t border-border space-y-2">
-          <div className="text-[10px] text-muted-foreground uppercase tracking-wide font-medium">
-            Frame Info
-          </div>
-          {currentFrame && (
-            <div className="text-xs space-y-1">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Frame</span>
-                <span className="font-mono">{currentFrame.frame_number}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Time</span>
-                <span className="font-mono">{currentFrame.timestamp.toFixed(2)}s</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Detections</span>
-                <span>{currentFrame.detections.length}</span>
-              </div>
-            </div>
-          )}
+          <Button
+            size="sm"
+            className="w-full gap-1.5"
+            disabled={validLabels.length === 0 || hasIncompletePoints || calibrateMutation.isPending}
+            onClick={() => calibrateMutation.mutate()}
+          >
+            {calibrateMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Ruler className="h-3.5 w-3.5" />
+            )}
+            {calibrateMutation.isPending ? 'Calibrating...' : 'Calibrate & Estimate'}
+          </Button>
+
         </div>
       </div>
     </div>

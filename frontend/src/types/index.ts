@@ -291,6 +291,7 @@ export interface InferenceResultSummary {
     avg_inference_time_ms: number
   }
   has_video: boolean
+  has_z_video?: boolean
 }
 
 export interface InferenceResultMatrix {
