@@ -415,12 +415,23 @@ export const api = {
     saveZCalibration: (
       projectName: string, runName: string, videoId: string, inferenceId: string,
       labels: import('@/types').ZCalibrationLabel[], className: string = 'crane hook',
+      opts?: {
+        sizeMetric?: string
+        referenceRealWidthMm?: number | null
+        targets?: import('@/types').ZCalibrationTarget[] | null
+      },
     ) =>
       request<{ message: string; labels_count: number }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-calibration`,
         {
           method: 'POST',
-          body: JSON.stringify({ labels, class_name: className }),
+          body: JSON.stringify({
+            labels,
+            class_name: className,
+            size_metric: opts?.sizeMetric ?? 'h_px',
+            reference_real_width_mm: opts?.referenceRealWidthMm ?? null,
+            targets: opts?.targets ?? null,
+          }),
         }
       ),
     applyZEstimation: (projectName: string, runName: string, videoId: string, inferenceId: string) =>

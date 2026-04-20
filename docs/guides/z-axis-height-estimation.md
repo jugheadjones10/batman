@@ -1,5 +1,124 @@
 # Z-Axis Crane Hook Height Estimation
 
+## How Z Estimation Works
+
+Z-height estimation converts the **bounding box size** of a detection into a real-world distance (in mm). The core insight is that an object farther from the camera appears smaller in the image — so bounding box height in pixels is inversely proportional to distance.
+
+### The Size Signal
+
+For each detection, the estimator computes:
+
+```
+s = bbox.height × video_height_px
+```
+
+`s` is the bounding box height in pixels (the normalized `height` field from the API, multiplied by the frame height).
+
+### Calibration Labels
+
+You select one or more frames from the inference result where the hook is at a **known distance** (in mm). Each label records:
+
+- The frame's `s` value (computed from its bounding box)
+- The user-supplied `z_mm` ground-truth distance
+
+The number of calibration labels determines which model is fit.
+
+---
+
+### 1 Calibration Point — `Z = k / s`
+
+With a single label, the estimator computes:
+
+```
+k = z_cal × s_cal
+```
+
+and the model becomes:
+
+```
+Z = k / s
+```
+
+This is a **pure inverse** relationship — the only free parameter `k` is chosen so the model passes exactly through the one known point. It assumes the distance scales perfectly with `1/s` (i.e., the pinhole relationship holds and the object size is constant).
+
+### 2+ Calibration Points — `Z = a/s + b`
+
+With two or more labels, the estimator fits a **least-squares line** of `Z` on `x = 1/s`:
+
+```
+Z = a · (1/s) + b
+```
+
+The intercept `b` accounts for systematic offsets (e.g., fixed background distance, lens distortion) that the single-point model can't capture. The coefficients `a` and `b` are computed using the standard closed-form OLS formula over all labeled pairs.
+
+**Degenerate fallback:** If all calibration points have nearly identical `s` values (denominator `< 1e-12`), regression is ill-conditioned and the estimator falls back to the 1-point model using `k = mean(z × s)` across the labels.
+
+---
+
+### Choosing a Model
+
+| Calibration Points | Model | When to Use |
+|---|---|---|
+| **1 point** | `Z = k / s` | Quick calibration; accurate if the hook operates at roughly the same distance as the calibration frame |
+| **2+ points** | `Z = a/s + b` | Better accuracy across a range of distances; the intercept `b` corrects for systematic offsets |
+
+!!! tip
+    Use **2+ calibration points** spanning the full operating range whenever possible. The added intercept `b` significantly improves accuracy at distances away from the calibration reference.
+
+---
+
+### Reference-Object Calibration (Multi-Target)
+
+When the object you want to measure is different from the object you calibrate with, the system supports **focal-length calibration** using a reference object of known size.
+
+**Use case:** A top-down camera on a crane trolley views both a **spreader** (known width) and **shipping containers** (ISO standard width 2438mm). You calibrate using the spreader at a known distance, then the system estimates distance to both the spreader and containers on every frame.
+
+#### How it works
+
+1. **Calibrate:** Select frames where the **reference object** (e.g., spreader) is at a known distance. The system derives the camera's effective focal length:
+
+    ```
+    f = s_ref_px × D_known / W_ref_real
+    ```
+
+2. **Derive per-target models:** For each target class with known real width `W_target`:
+
+    ```
+    k_target = f × W_target
+    ```
+
+    With 2+ calibration points, the system fits `Z = a/s + b` per target by scaling the reference pairs: `s_scaled = s_ref × (W_ref / W_target)`.
+
+3. **Estimate:** Every frame, every detection of every target class gets `z_mm`:
+
+    ```
+    D_target = k_target / s_target_px
+    ```
+
+#### Why container width is a known constant
+
+ISO shipping containers are **always 2.438m (8ft) wide**, regardless of length:
+
+| Container | Length | Width |
+|-----------|--------|-------|
+| 20ft | 6.06m | **2.44m** |
+| 40ft | 12.19m | **2.44m** |
+| 45ft | 13.72m | **2.44m** |
+
+This means you never need to determine the container type to estimate distance — just use the width dimension (`w_px` size metric).
+
+#### Configuration
+
+In the calibration UI, set:
+
+- **Size metric** — `w_px` (bbox width) for top-down views, `h_px` (bbox height) for side views
+- **Reference object width** (mm) — the known physical width of the calibration object
+- **Targets** — list of `{class_name, real_width_mm}` pairs, including the reference class itself if you want its distance too
+
+When no reference width or targets are configured, the system falls back to the original single-class calibration flow.
+
+---
+
 **Technical Feasibility Report — March 2026**
 
 This document explores how to extract the real-world Z-position (height above ground) of a crane hook from live video, given that we already detect the hook via RF-DETR bounding boxes. It covers the minimum physical data required, the mathematical foundations, three candidate approaches with tradeoffs, accuracy expectations, and a design for an autonomous agent harness that can iterate on the implementation until convergence.

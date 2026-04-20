@@ -19,17 +19,20 @@ def _sam_worker_argv():
 
 
 def _resolve_device_for_worker() -> str:
-    """Resolve sam_device to an explicit value. LD_PRELOAD breaks torch.cuda.is_available()
-    inside the worker, so we detect CUDA in the parent and pass '0' (or 'cpu') explicitly."""
+    """Resolve sam_device to an explicit value.
+
+    Uses nvidia-smi probing instead of torch.cuda.is_available() to avoid
+    initialising CUDA in the server process.  On WSL2 the DXG driver leaks
+    kernel state across fork+exec, causing training subprocesses to hang if
+    the parent ever touched torch.cuda.
+    """
+    from src.core.trainer import _probe_gpu_info
+
     device = settings.sam_device
     if device in ("auto", ""):
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return "0"
-            return "cpu"
-        except Exception:
-            return "cpu"
+        if _probe_gpu_info() is not None:
+            return "0"
+        return "cpu"
     if device in ("cuda", "gpu"):
         return "0"
     return device

@@ -333,6 +333,7 @@ def _build_local_train_argv(
         argv.extend(["--exclude-manual-datasets", ",".join(request.data.exclude_manual_datasets)])
     if request.data.exclude_videos:
         argv.extend(["--exclude-videos", ",".join(request.data.exclude_videos)])
+    argv.extend(["--num-workers", "0"])
     if request.data.filter_classes:
         argv.extend(["--filter-classes", "|".join(request.data.filter_classes)])
     if request.data.max_frames_per_class is not None:
@@ -411,7 +412,7 @@ async def submit_training_local(project_name: str, request: LocalTrainingSubmitR
 
     _local_training_processes[run_name] = process
 
-    async def poll_local_job():
+    def poll_local_job():
         try:
             process.wait()
         except Exception:

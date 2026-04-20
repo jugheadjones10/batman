@@ -116,26 +116,102 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+_gpu_info_cache: dict[str, Any] | None = None
+
+
+def _probe_gpu_info() -> dict[str, Any] | None:
+    """Detect GPU availability, name, and memory **without** initialising CUDA.
+
+    On WSL2 the DXG kernel driver leaks per-process state across fork+exec.
+    If the server process ever calls ``torch.cuda.*``, every training
+    subprocess it later spawns will hang at the second epoch.  We therefore
+    probe the GPU in an isolated child process and cache the result.
+
+    Returns ``{"name": str, "memory_gb": float}`` or ``None``.
+    """
+    global _gpu_info_cache
+    if _gpu_info_cache is not None:
+        return _gpu_info_cache
+
+    import json
+    import subprocess as _sp
+    import sys
+
+    _PROBE_SCRIPT = """
+import json, sys
+r = {"device": "cpu"}
+try:
+    import torch
+    if torch.cuda.is_available():
+        p = torch.cuda.get_device_properties(0)
+        r = {"device": "cuda", "name": p.name, "memory_gb": p.total_memory / 1e9}
+except Exception:
+    pass
+json.dump(r, sys.stdout)
+"""
+
+    try:
+        out = _sp.check_output(
+            [sys.executable, "-c", _PROBE_SCRIPT],
+            timeout=15,
+            text=True,
+            stderr=_sp.DEVNULL,
+        ).strip()
+        result = json.loads(out)
+        if result.get("device") == "cuda":
+            _gpu_info_cache = {"name": result["name"], "memory_gb": result["memory_gb"]}
+            return _gpu_info_cache
+    except Exception:
+        pass
+
+    # nvidia-smi fallback (available on native Linux, not always on WSL2)
+    try:
+        out = _sp.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            timeout=5, text=True,
+        ).strip()
+        if out:
+            name, mem_mb = out.split(",", 1)
+            _gpu_info_cache = {"name": name.strip(), "memory_gb": float(mem_mb.strip()) / 1024}
+            return _gpu_info_cache
+    except Exception:
+        pass
+
+    return None
+
+
 def get_device(requested_device: str | None = None) -> str:
-    """Detect the best available device."""
+    """Detect the best available device.
+
+    Uses an isolated subprocess to check for CUDA so the calling process
+    never initialises the CUDA runtime (critical on WSL2).
+    """
     if requested_device and requested_device != "auto":
         return requested_device
 
-    if torch.cuda.is_available():
+    if _probe_gpu_info() is not None:
         return "cuda"
-    elif torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return "mps"
-    else:
-        return "cpu"
+    return "cpu"
 
 
 def get_device_info(device: str) -> dict[str, Any]:
-    """Get information about the selected device."""
-    info = {"device": device}
+    """Get information about the selected device.
+
+    Uses cached subprocess probe to avoid initialising CUDA in the caller.
+    """
+    info: dict[str, Any] = {"device": device}
 
     if device == "cuda":
-        info["name"] = torch.cuda.get_device_name(0)
-        info["memory_gb"] = torch.cuda.get_device_properties(0).total_memory / 1e9
+        gpu = _probe_gpu_info()
+        if gpu is not None:
+            info["name"] = gpu["name"]
+            info["memory_gb"] = gpu["memory_gb"]
+        else:
+            info["name"] = "CUDA GPU"
+            info["memory_gb"] = 0.0
     elif device == "mps":
         info["name"] = "Apple Silicon MPS"
     else:

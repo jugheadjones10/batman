@@ -1,11 +1,13 @@
 """
 Z-axis height estimation from bounding box sizes.
 
-Supports two calibration models:
+Supports calibration models:
 - 1 label:  Z = k / s   where k = Z_cal * s_cal
 - 2+ labels: Z = a / s + b   (least-squares fit of Z on 1/s)
+- multi_target: focal-length calibration from a reference object, then
+  per-target k derived via k = f * real_width_mm.
 
-Size metric: h_px (bbox height in pixels) — most stable for swinging crane hooks.
+Size metrics: h_px (bbox height) or w_px (bbox width).
 """
 
 from __future__ import annotations
@@ -22,28 +24,74 @@ def _h_px(det: dict, video_height: int) -> float:
     return det["box"]["height"] * video_height
 
 
+def _w_px(det: dict, video_width: int) -> float:
+    """Extract bbox width in pixels from a normalized detection dict."""
+    return det["box"]["width"] * video_width
+
+
+def _get_size(det: dict, video_resolution: dict, size_metric: str) -> float:
+    """Extract the configured size signal from a detection."""
+    if size_metric == "w_px":
+        return _w_px(det, video_resolution["width"])
+    return _h_px(det, video_resolution["height"])
+
+
+def _fit_single_class(pairs: list[tuple[float, float]]) -> dict:
+    """Fit a k_over_s or linear_inv model from (s, z_mm) pairs."""
+    if len(pairs) == 1:
+        s_cal, z_cal = pairs[0]
+        k = z_cal * s_cal
+        return {"type": "k_over_s", "k": k}
+
+    n = len(pairs)
+    xs = [1.0 / s for s, _ in pairs]
+    ys = [z for _, z in pairs]
+
+    sum_x = sum(xs)
+    sum_y = sum(ys)
+    sum_xx = sum(x * x for x in xs)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+
+    denom = n * sum_xx - sum_x * sum_x
+    if abs(denom) < 1e-12:
+        k_mean = sum(z * s for s, z in pairs) / n
+        logger.warning(f"Z calibration: degenerate regression, falling back to k={k_mean:.1f}")
+        return {"type": "k_over_s", "k": k_mean}
+
+    a = (n * sum_xy - sum_x * sum_y) / denom
+    b = (sum_y - a * sum_x) / n
+    return {"type": "linear_inv", "a": a, "b": b}
+
+
 def calibrate(
     labels: list[dict],
     frames: list[dict],
     video_resolution: dict,
     class_name: str = "crane hook",
     size_metric: str = "h_px",
+    targets: list[dict] | None = None,
+    reference_real_width_mm: float | None = None,
 ) -> dict:
     """
     Build a calibration model from user-provided ground-truth labels.
 
     Args:
         labels: List of {"frame_number": int, "z_mm": float, "detection_index": int}
-        frames: Full frame list from result.json (each has "frame_number" and "detections")
+        frames: Full frame list from result.json
         video_resolution: {"width": int, "height": int}
-        class_name: Only estimate Z for this class
-        size_metric: "h_px" (only supported metric for now)
+        class_name: Reference class name (used for label detection lookup)
+        size_metric: "h_px" or "w_px"
+        targets: Optional list of {"class_name": str, "real_width_mm": float}.
+            When provided together with reference_real_width_mm, enables
+            multi-target focal-length calibration.
+        reference_real_width_mm: Real-world size of the reference object (mm).
+            Required when targets is set.
 
     Returns:
-        Calibration dict: {"type": str, "k"?: float, "a"?: float, "b"?: float}
+        Single-class: {"type": "k_over_s"|"linear_inv", ...}
+        Multi-target:  {"type": "multi_target", "focal_length_px": f,
+                        "targets": [{"class_name": str, "model": {...}}, ...]}
     """
-    vid_h = video_resolution["height"]
-
     frame_map: dict[int, dict] = {f["frame_number"]: f for f in frames}
 
     pairs: list[tuple[float, float]] = []
@@ -63,7 +111,7 @@ def calibrate(
             continue
 
         det = dets[det_idx]
-        s = _h_px(det, vid_h)
+        s = _get_size(det, video_resolution, size_metric)
         if s <= 0:
             logger.warning(f"Z calibration: zero/negative size for frame {fn}, skipping")
             continue
@@ -73,36 +121,49 @@ def calibrate(
     if len(pairs) == 0:
         raise ValueError("No valid calibration pairs found")
 
-    if len(pairs) == 1:
-        # 1-point: Z = k / s
-        s_cal, z_cal = pairs[0]
-        k = z_cal * s_cal
-        logger.info(f"Z calibration: 1-point model, k={k:.1f} (Z={z_cal}mm, s={s_cal:.1f}px)")
-        return {"type": "k_over_s", "k": k}
+    # --- Multi-target focal-length mode ---
+    if targets and reference_real_width_mm:
+        target_classes = {t["class_name"] for t in targets}
+        if class_name not in target_classes:
+            targets = [*targets, {"class_name": class_name, "real_width_mm": reference_real_width_mm}]
+            logger.info(f"Z calibration: auto-added reference class '{class_name}' as target")
+
+        if len(pairs) == 1:
+            s_cal, z_cal = pairs[0]
+            f = z_cal * s_cal / reference_real_width_mm
+        else:
+            ref_model = _fit_single_class(pairs)
+            if ref_model["type"] == "k_over_s":
+                f = ref_model["k"] / reference_real_width_mm
+            else:
+                f = ref_model["a"] / reference_real_width_mm
+
+        target_models = []
+        for tgt in targets:
+            cn = tgt["class_name"]
+            w = tgt["real_width_mm"]
+            scale = reference_real_width_mm / w
+            scaled_pairs = [(s * scale, z) for s, z in pairs]
+            tgt_model = _fit_single_class(scaled_pairs)
+            target_models.append({"class_name": cn, "model": tgt_model})
+            logger.info(
+                f"Z calibration: target '{cn}' (w={w}mm) → {tgt_model['type']}"
+            )
+
+        logger.info(f"Z calibration: multi-target, f={f:.1f}px, {len(target_models)} target(s)")
+        return {
+            "type": "multi_target",
+            "focal_length_px": round(f, 2),
+            "targets": target_models,
+        }
+
+    # --- Legacy single-class mode ---
+    model = _fit_single_class(pairs)
+    if model["type"] == "k_over_s":
+        logger.info(f"Z calibration: 1-point model, k={model['k']:.1f}")
     else:
-        # 2+ points: Z = a / s + b  → linear regression of Z on 1/s
-        # y = a * x + b  where x = 1/s, y = Z
-        n = len(pairs)
-        xs = [1.0 / s for s, _ in pairs]
-        ys = [z for _, z in pairs]
-
-        sum_x = sum(xs)
-        sum_y = sum(ys)
-        sum_xx = sum(x * x for x in xs)
-        sum_xy = sum(x * y for x, y in zip(xs, ys))
-
-        denom = n * sum_xx - sum_x * sum_x
-        if abs(denom) < 1e-12:
-            # Degenerate — all same size, fall back to mean k
-            k_mean = sum(z * s for s, z in pairs) / n
-            logger.warning(f"Z calibration: degenerate 2-point, falling back to k={k_mean:.1f}")
-            return {"type": "k_over_s", "k": k_mean}
-
-        a = (n * sum_xy - sum_x * sum_y) / denom
-        b = (sum_y - a * sum_x) / n
-
-        logger.info(f"Z calibration: {n}-point linear model, a={a:.1f}, b={b:.1f}")
-        return {"type": "linear_inv", "a": a, "b": b}
+        logger.info(f"Z calibration: {len(pairs)}-point linear model, a={model['a']:.1f}, b={model['b']:.1f}")
+    return model
 
 
 def estimate(
@@ -110,6 +171,7 @@ def estimate(
     frames: list[dict],
     video_resolution: dict,
     class_name: str = "crane hook",
+    size_metric: str = "h_px",
 ) -> list[dict]:
     """
     Apply a calibration model to estimate Z for all frames.
@@ -117,9 +179,38 @@ def estimate(
     Modifies detection dicts in-place by adding "z_mm" field to matching detections.
     Returns the modified frames list.
     """
-    vid_h = video_resolution["height"]
     model_type = model["type"]
 
+    if model_type == "multi_target":
+        total = 0
+        for tgt in model["targets"]:
+            count = _estimate_single(
+                tgt["model"], frames, video_resolution,
+                tgt["class_name"], size_metric,
+            )
+            total += count
+        logger.info(
+            f"Z estimation: applied to {total} detections across {len(frames)} frames "
+            f"({len(model['targets'])} target classes)"
+        )
+        return frames
+
+    count = _estimate_single(model, frames, video_resolution, class_name, size_metric)
+    logger.info(
+        f"Z estimation: applied to {count} detections across {len(frames)} frames"
+    )
+    return frames
+
+
+def _estimate_single(
+    model: dict,
+    frames: list[dict],
+    video_resolution: dict,
+    class_name: str,
+    size_metric: str,
+) -> int:
+    """Apply a k_over_s or linear_inv model to detections of one class. Returns count."""
+    model_type = model["type"]
     estimated_count = 0
 
     for frame in frames:
@@ -127,7 +218,7 @@ def estimate(
             if det.get("class_name") != class_name:
                 continue
 
-            s = _h_px(det, vid_h)
+            s = _get_size(det, video_resolution, size_metric)
             if s <= 0:
                 continue
 
@@ -141,10 +232,7 @@ def estimate(
             det["z_mm"] = round(z, 1)
             estimated_count += 1
 
-    logger.info(
-        f"Z estimation: applied to {estimated_count} detections across {len(frames)} frames"
-    )
-    return frames
+    return estimated_count
 
 
 def load_z_calibration(result_dir: Path) -> dict | None:
@@ -201,12 +289,26 @@ def apply_z_to_result(result_dir: Path, class_name: str = "crane hook") -> dict:
     if video_resolution is None:
         raise ValueError("No video_resolution found in z_calibration")
 
-    model = calibrate(labels, frames, video_resolution, class_name=class_name)
+    size_metric = z_cal.get("size_metric", "h_px")
+    targets = z_cal.get("targets")
+    reference_real_width_mm = z_cal.get("reference_real_width_mm")
+
+    model = calibrate(
+        labels, frames, video_resolution,
+        class_name=class_name,
+        size_metric=size_metric,
+        targets=targets,
+        reference_real_width_mm=reference_real_width_mm,
+    )
 
     z_cal["model"] = model
     z_cal["class_name"] = class_name
 
-    frames = estimate(model, frames, video_resolution, class_name=class_name)
+    frames = estimate(
+        model, frames, video_resolution,
+        class_name=class_name,
+        size_metric=size_metric,
+    )
 
     data["z_calibration"] = z_cal
     data["frames"] = frames

@@ -7,7 +7,7 @@ import shutil
 import zipfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 from fastapi import APIRouter, HTTPException, Request, WebSocket
@@ -742,9 +742,17 @@ class ZCalibrationLabel(BaseModel):
     detection_index: int = 0
 
 
+class ZCalibrationTarget(BaseModel):
+    class_name: str
+    real_width_mm: float
+
+
 class ZCalibrationRequest(BaseModel):
     labels: list[ZCalibrationLabel]
     class_name: str = "crane hook"
+    size_metric: str = "h_px"
+    reference_real_width_mm: float | None = None
+    targets: list[ZCalibrationTarget] | None = None
 
 
 def _resolve_result_dir(
@@ -804,12 +812,16 @@ async def save_z_calibration(
 
     video_resolution = _get_video_resolution(project_path, video_id)
 
-    calibration_data = {
+    calibration_data: dict[str, Any] = {
         "labels": [l.model_dump() for l in request.labels],
         "class_name": request.class_name,
-        "size_metric": "h_px",
+        "size_metric": request.size_metric,
         "video_resolution": video_resolution,
     }
+    if request.reference_real_width_mm is not None:
+        calibration_data["reference_real_width_mm"] = request.reference_real_width_mm
+    if request.targets is not None:
+        calibration_data["targets"] = [t.model_dump() for t in request.targets]
 
     z_estimator.save_z_calibration(result_dir, calibration_data)
     return {"message": "Z calibration saved", "labels_count": len(request.labels)}

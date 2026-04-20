@@ -24,6 +24,7 @@ import GpuConnectionPanel from '@/components/GpuConnectionPanel'
 import LogViewer from '@/components/LogViewer'
 import PositionTimeline from '@/components/HeightTimeline'
 import LiveDetectionReadout from '@/components/LiveDetectionReadout'
+import ZGapReadout from '@/components/ZGapReadout'
 import type { InferenceConfig, InferenceGPUSubmitRequest, RFDETRModelSize, GPUType } from '@/types'
 
 export default function InferencePage() {
@@ -553,12 +554,16 @@ export default function InferencePage() {
                       const vw = vid?.width || 1920
                       const vh = vid?.height || 1080
                       return (
-                        <div className="xl:max-h-[calc(100vh-200px)] xl:overflow-y-auto">
+                        <div className="xl:max-h-[calc(100vh-200px)] xl:overflow-y-auto space-y-4">
                           <LiveDetectionReadout
                             frames={detailResult.frames}
                             currentTime={videoTime}
                             videoWidth={vw}
                             videoHeight={vh}
+                          />
+                          <ZGapReadout
+                            frames={detailResult.frames}
+                            currentTime={videoTime}
                           />
                         </div>
                       )

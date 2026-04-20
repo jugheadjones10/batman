@@ -311,6 +311,13 @@ export interface ZCalibrationModel {
   k?: number
   a?: number
   b?: number
+  focal_length_px?: number
+  targets?: { class_name: string; model: ZCalibrationModel }[]
+}
+
+export interface ZCalibrationTarget {
+  class_name: string
+  real_width_mm: number
 }
 
 export interface ZCalibration {
@@ -318,6 +325,8 @@ export interface ZCalibration {
   model: ZCalibrationModel | null
   class_name: string
   size_metric: string
+  reference_real_width_mm?: number | null
+  targets?: ZCalibrationTarget[] | null
   video_resolution?: { width: number; height: number }
 }
 
