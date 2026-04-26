@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react'
-import type { InferenceResult } from '@/types'
+import { useMemo, useState } from 'react'
+import type { BoundingBox, InferenceResult, ZCalibration } from '@/types'
 
 const DETECTION_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
@@ -15,12 +15,15 @@ interface LiveDetectionReadoutProps {
   currentTime: number
   videoWidth: number
   videoHeight: number
+  zCalibration?: ZCalibration | null
 }
 
 interface ClassReadout {
   className: string
   color: string
   confidence: number | null
+  trackId: number | null
+  trackSource: 'matched' | 'lost' | null
   x: number | null
   y: number | null
   z: number | null
@@ -41,11 +44,28 @@ function findClosestFrameIndex(frames: InferenceResult[], time: number): number 
   return lo
 }
 
+function computeZForBox(
+  cal: ZCalibration | null | undefined,
+  box: BoundingBox,
+  vw: number,
+  vh: number,
+): number | null {
+  if (!cal || !cal.model) return null
+  const s = Math.max(box.width * vw, box.height * vh)
+  if (s <= 0) return null
+  if (cal.model.type === 'k_over_s' && cal.model.k != null) return cal.model.k / s
+  if (cal.model.type === 'linear_inv' && cal.model.m != null && cal.model.c != null) {
+    return cal.model.m / s + cal.model.c
+  }
+  return null
+}
+
 export default function LiveDetectionReadout({
   frames,
   currentTime,
   videoWidth,
   videoHeight,
+  zCalibration,
 }: LiveDetectionReadoutProps) {
   const [skipFrames, setSkipFrames] = useState(1)
 
@@ -70,38 +90,53 @@ export default function LiveDetectionReadout({
     ? Math.floor(rawFrameIndex / skipFrames) * skipFrames
     : rawFrameIndex
 
-  const prevIndexRef = useRef(quantizedIndex)
-  const prevReadoutsRef = useRef<ClassReadout[]>([])
+  const currentFrame = quantizedIndex >= 0 && quantizedIndex < frames.length
+    ? frames[Math.min(quantizedIndex, frames.length - 1)]
+    : null
 
   const readouts = useMemo<ClassReadout[]>(() => {
-    if (quantizedIndex === prevIndexRef.current && prevReadoutsRef.current.length > 0) {
-      return prevReadoutsRef.current
-    }
-    prevIndexRef.current = quantizedIndex
     const idx = Math.min(quantizedIndex, frames.length - 1)
     const frame = idx >= 0 ? frames[idx] : null
     const result = classNames.map((cls) => {
       if (!frame) {
-        return { className: cls, color: classColorMap[cls], confidence: null, x: null, y: null, z: null }
+        return {
+          className: cls,
+          color: classColorMap[cls],
+          confidence: null,
+          trackId: null,
+          trackSource: null,
+          x: null,
+          y: null,
+          z: null,
+        }
       }
       const dets = frame.detections.filter((d) => d.class_name === cls)
       if (dets.length === 0) {
-        return { className: cls, color: classColorMap[cls], confidence: null, x: null, y: null, z: null }
+        return {
+          className: cls,
+          color: classColorMap[cls],
+          confidence: null,
+          trackId: null,
+          trackSource: null,
+          x: null,
+          y: null,
+          z: null,
+        }
       }
       const best = dets.reduce((a, b) => (a.confidence > b.confidence ? a : b))
       return {
         className: cls,
         color: classColorMap[cls],
         confidence: best.confidence,
+        trackId: best.track_id ?? null,
+        trackSource: best.track_source ?? null,
         x: best.box.x * videoWidth,
         y: best.box.y * videoHeight,
-        z: best.z_mm ?? null,
+        z: best.z_mm ?? computeZForBox(zCalibration, best.box, videoWidth, videoHeight),
       }
     })
-    prevReadoutsRef.current = result
     return result
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quantizedIndex, frames, classNames, classColorMap, videoWidth, videoHeight])
+  }, [quantizedIndex, frames, classNames, classColorMap, videoWidth, videoHeight, zCalibration])
 
   if (classNames.length === 0) return null
 
@@ -109,7 +144,7 @@ export default function LiveDetectionReadout({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
-          Live Detection Readout
+          Live Tracked Detection Readout
         </span>
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] text-muted-foreground mr-1">Update speed</span>
@@ -139,14 +174,41 @@ export default function LiveDetectionReadout({
               {r.className}
             </span>
           </div>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6 gap-2">
             <ReadoutBox label="Confidence" value={r.confidence != null ? `${(r.confidence * 100).toFixed(1)}%` : null} />
+            <ReadoutBox label="Track" value={r.trackId != null ? `#${r.trackId}` : null} />
+            <ReadoutBox
+              label="Source"
+              value={r.trackSource === 'lost' ? 'extrap.' : r.trackSource === 'matched' ? 'measured' : null}
+            />
             <ReadoutBox label="X (px)" value={r.x != null ? r.x.toFixed(1) : null} />
             <ReadoutBox label="Y (px)" value={r.y != null ? r.y.toFixed(1) : null} />
             <ReadoutBox label="Z (mm)" value={r.z != null ? r.z.toFixed(1) : null} />
           </div>
         </div>
       ))}
+      <div className="rounded-lg border border-border bg-neutral-900/80 p-3">
+        <div className="flex items-center gap-2 mb-2.5">
+          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 bg-amber-400" />
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Spreader ↔ Container Skew
+          </span>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <ReadoutBox
+            label="Skew (°)"
+            value={currentFrame?.skew_deg != null ? currentFrame.skew_deg.toFixed(2) : null}
+          />
+          <ReadoutBox
+            label="Spreader (°)"
+            value={currentFrame?.spreader_deg != null ? currentFrame.spreader_deg.toFixed(2) : null}
+          />
+          <ReadoutBox
+            label="Container (°)"
+            value={currentFrame?.container_deg != null ? currentFrame.container_deg.toFixed(2) : null}
+          />
+        </div>
+      </div>
     </div>
   )
 }

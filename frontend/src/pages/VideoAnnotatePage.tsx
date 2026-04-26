@@ -104,7 +104,7 @@ export default function VideoAnnotatePage() {
   })
 
   const createAnnotationMutation = useMutation({
-    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
+    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox; polygon?: number[][] }) =>
       api.annotations.create(projectName!, data),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
@@ -114,8 +114,8 @@ export default function VideoAnnotatePage() {
   })
 
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box }: { id: number; box: BoundingBox }) =>
-      api.annotations.update(projectName!, id, { box }),
+    mutationFn: ({ id, box, polygon }: { id: number; box: BoundingBox; polygon?: number[][] }) =>
+      api.annotations.update(projectName!, id, { box, ...(polygon !== undefined && { polygon }) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
       queryClient.invalidateQueries({ queryKey: ['video-frames', projectName, videoId] })
@@ -195,15 +195,18 @@ export default function VideoAnnotatePage() {
   }, [filmstripMode, frameInterval])
 
   const handleCreateAnnotation = useCallback(
-    (box: BoundingBox, classId: number) => {
+    (box: BoundingBox, classId: number, polygon?: number[][]) => {
       if (!currentFrame) return
-      createAnnotationMutation.mutate({ frame_id: currentFrame.id, class_label_id: classId, box })
+      createAnnotationMutation.mutate({ frame_id: currentFrame.id, class_label_id: classId, box, polygon })
     },
     [currentFrame, createAnnotationMutation]
   )
 
   const handleUpdateAnnotation = useCallback(
-    (id: number, box: BoundingBox) => updateAnnotationMutation.mutate({ id, box }),
+    (id: number, box: BoundingBox, polygon?: number[][] | null) => {
+      const polyArg = polygon === null ? undefined : polygon
+      updateAnnotationMutation.mutate({ id, box, polygon: polyArg })
+    },
     [updateAnnotationMutation]
   )
 
@@ -219,6 +222,7 @@ export default function VideoAnnotatePage() {
         frame_id: currentFrameId,
         class_label_id: annotation.class_label_id,
         box: annotation.box,
+        ...(annotation.polygon && { polygon: annotation.polygon }),
       })
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
       queryClient.invalidateQueries({ queryKey: ['video-frames', projectName, videoId] })

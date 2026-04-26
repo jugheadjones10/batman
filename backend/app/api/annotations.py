@@ -102,6 +102,7 @@ async def list_frame_annotations(project_name: str, frame_id: str):
                     width=ann_data["width"],
                     height=ann_data["height"],
                 ),
+                polygon=ann_data.get("polygon"),
                 track_id=ann_data.get("track_id"),
                 confidence=ann_data.get("confidence", 1.0),
                 source=ann_data.get("source", "manual"),
@@ -133,7 +134,7 @@ async def create_annotation(project_name: str, data: AnnotationCreate):
     # Color palette
     colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD", "#98D8C8"]
 
-    annotations_meta[str(ann_id)] = {
+    ann_record = {
         "frame_id": data.frame_id,
         "class_label_id": data.class_label_id,
         "track_id": data.track_id,
@@ -148,6 +149,9 @@ async def create_annotation(project_name: str, data: AnnotationCreate):
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
+    if data.polygon is not None:
+        ann_record["polygon"] = data.polygon
+    annotations_meta[str(ann_id)] = ann_record
 
     _save_annotations_meta(project_path, annotations_meta)
 
@@ -166,6 +170,7 @@ async def create_annotation(project_name: str, data: AnnotationCreate):
         class_name=class_name,
         class_color=colors[class_id % len(colors)],
         box=data.box,
+        polygon=data.polygon,
         track_id=data.track_id,
         confidence=1.0,
         source=data.source,
@@ -210,6 +215,8 @@ async def update_annotation(project_name: str, annotation_id: int, data: Annotat
         ann_data["is_exemplar"] = data.is_exemplar
     if data.exemplar_type is not None:
         ann_data["exemplar_type"] = data.exemplar_type
+    if data.polygon is not None:
+        ann_data["polygon"] = data.polygon
 
     ann_data["updated_at"] = now.isoformat()
     _save_annotations_meta(project_path, annotations_meta)
@@ -229,6 +236,7 @@ async def update_annotation(project_name: str, annotation_id: int, data: Annotat
             width=ann_data["width"],
             height=ann_data["height"],
         ),
+        polygon=ann_data.get("polygon"),
         track_id=ann_data.get("track_id"),
         confidence=ann_data.get("confidence", 1.0),
         source=ann_data.get("source", "manual"),

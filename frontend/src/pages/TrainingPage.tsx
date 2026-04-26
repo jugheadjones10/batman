@@ -53,7 +53,16 @@ const MODEL_OPTIONS: { id: RFDETRModelSize; nameKey: string; descKey: string }[]
   { id: 'base', nameKey: 'RF-DETR Base', descKey: 'Balanced' },
   { id: 'medium', nameKey: 'RF-DETR Medium', descKey: 'More accurate' },
   { id: 'large', nameKey: 'RF-DETR Large', descKey: 'Most accurate' },
+  { id: 'xlarge', nameKey: 'RF-DETR XLarge', descKey: 'Biggest (seg only)' },
 ]
+
+// RF-DETR-Seg ships only for the sizes listed below; keep in sync with
+// _RFDETR_CLASS_TABLE in src/core/trainer.py. The "base" size is intentionally
+// excluded — picking it with task=segmentation is remapped to "medium" on the
+// backend, so we disable it in the UI to avoid surprising the user.
+const SEG_AVAILABLE_SIZES = new Set<RFDETRModelSize>([
+  'nano', 'small', 'medium', 'large', 'xlarge',
+])
 
 const GPU_OPTIONS: { id: GPUType; name: string; desc: string }[] = [
   { id: 'h200', name: 'H200', desc: '141 GB' },
@@ -74,6 +83,7 @@ export default function TrainingPage() {
   const [label, setLabel] = useState('')
   const [training, setTraining] = useState<TrainingConfig>({
     model: 'base',
+    task: 'detection',
     epochs: 50,
     batch_size: null,
     image_size: 640,
@@ -382,24 +392,63 @@ export default function TrainingPage() {
                 <p className="text-xs text-muted-foreground mt-1">{t('training.runLabelHint')}</p>
               </div>
 
-              {/* Model selection */}
+              {/* Task toggle (detection vs segmentation) */}
               <div>
-                <label className="text-sm font-medium mb-2 block">{t('training.modelSize')}</label>
-                <div className="grid grid-cols-5 gap-2">
-                  {MODEL_OPTIONS.map((m) => (
+                <label className="text-sm font-medium mb-2 block">Task</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'detection', name: 'Detection', desc: 'Axis-aligned bboxes' },
+                    { id: 'segmentation', name: 'Segmentation', desc: 'Masks + skew angle' },
+                  ] as const).map((opt) => (
                     <button
-                      key={m.id}
-                      onClick={() => setTraining({ ...training, model: m.id })}
+                      key={opt.id}
+                      onClick={() => {
+                        const nextTask = opt.id
+                        // If switching to segmentation and the current size has no
+                        // seg variant, auto-pick "medium" which is always available.
+                        const nextModel: RFDETRModelSize =
+                          nextTask === 'segmentation' && !SEG_AVAILABLE_SIZES.has(training.model)
+                            ? 'medium'
+                            : training.model
+                        setTraining({ ...training, task: nextTask, model: nextModel })
+                      }}
                       className={`p-3 rounded-lg border text-left transition-colors ${
-                        training.model === m.id
+                        (training.task ?? 'detection') === opt.id
                           ? 'border-primary bg-primary/10'
                           : 'border-border hover:border-primary/50'
                       }`}
                     >
-                      <div className="font-medium text-sm">{m.nameKey}</div>
-                      <div className="text-xs text-muted-foreground">{m.descKey}</div>
+                      <div className="font-medium text-sm">{opt.name}</div>
+                      <div className="text-xs text-muted-foreground">{opt.desc}</div>
                     </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Model selection */}
+              <div>
+                <label className="text-sm font-medium mb-2 block">{t('training.modelSize')}</label>
+                <div className="grid grid-cols-6 gap-2">
+                  {MODEL_OPTIONS.map((m) => {
+                    const isSeg = (training.task ?? 'detection') === 'segmentation'
+                    const disabled = isSeg && !SEG_AVAILABLE_SIZES.has(m.id)
+                    return (
+                      <button
+                        key={m.id}
+                        disabled={disabled}
+                        onClick={() => setTraining({ ...training, model: m.id })}
+                        className={`p-3 rounded-lg border text-left transition-colors ${
+                          training.model === m.id
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border hover:border-primary/50'
+                        } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                        title={disabled ? 'No RF-DETR-Seg variant at this size' : undefined}
+                      >
+                        <div className="font-medium text-sm">{m.nameKey}</div>
+                        <div className="text-xs text-muted-foreground">{m.descKey}</div>
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
 

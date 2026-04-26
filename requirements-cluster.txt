@@ -6,7 +6,7 @@ torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.24.0,<2.0  # numpy 2.x has compatibility issues with rfdetr
 pillow>=10.0.0
-rfdetr[metrics]>=1.0.0  # RF-DETR with TensorBoard support
+rfdetr[train,loggers]>=1.6.0  # RF-DETR 1.6+ ships the size-specific Seg variants (RFDETRSegNano/Small/Medium/Large/XLarge); `train` pulls pytorch_lightning, `loggers` pulls TensorBoard.
 supervision>=0.18.0
 tensorboard>=2.15.0
 

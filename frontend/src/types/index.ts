@@ -84,6 +84,8 @@ export interface Annotation {
   class_name: string
   class_color: string
   box: BoundingBox
+  /** Normalised polygon ([[x,y], ...] in [0,1]); present only for seg-enabled classes. */
+  polygon?: number[][] | null
   track_id?: number
   confidence: number
   source: 'auto' | 'manual' | 'corrected'
@@ -108,13 +110,16 @@ export interface Track {
 }
 
 // Training types (RF-DETR only, GPU cluster execution)
-export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large'
+export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large' | 'xlarge'
+export type RFDETRTask = 'detection' | 'segmentation'
 export type GPUType = 'h200' | 'h100-96' | 'h100-47' | 'a100-80' | 'a100-40' | 'nv'
 export type DataSource = 'manual_data' | 'imports' | 'videos'
 export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'train_and_val' | 'all_splits'
 
 export interface TrainingConfig {
   model: RFDETRModelSize
+  /** RF-DETR task; "segmentation" uses the RF-DETR-Seg family. Default: "detection". */
+  task?: RFDETRTask
   epochs: number
   batch_size: number | null  // null = auto based on GPU
   image_size: number
@@ -262,7 +267,11 @@ export interface Detection {
   class_id: number
   class_name: string
   track_id?: number
+  /** ByteTrack provenance: matched to a detector box, or Kalman-only lost-track prediction. */
+  track_source?: 'matched' | 'lost'
   z_mm?: number
+  /** Normalised polygon produced by RF-DETR-Seg (present for seg models only). */
+  mask?: number[][] | null
 }
 
 export interface InferenceResult {
@@ -270,6 +279,10 @@ export interface InferenceResult {
   timestamp: number
   detections: Detection[]
   inference_time_ms: number
+  /** Signed skew between spreader and container in (-90, 90], if both are present. */
+  skew_deg?: number
+  spreader_deg?: number
+  container_deg?: number
 }
 
 export interface InferenceResultSummary {
@@ -283,6 +296,7 @@ export interface InferenceResultSummary {
     frame_interval: number
     tracking: boolean
     tracking_mode: string
+    render_mode?: 'polygon' | 'bbox'
   }
   stats: {
     total_frames: number
@@ -292,6 +306,8 @@ export interface InferenceResultSummary {
   }
   has_video: boolean
   has_z_video?: boolean
+  has_raw_video?: boolean
+  has_bytetrack_video?: boolean
 }
 
 export interface InferenceResultMatrix {
@@ -300,6 +316,37 @@ export interface InferenceResultMatrix {
   results: Record<string, Record<string, InferenceResultSummary[] | null>>
 }
 
+/**
+ * Event streamed from POST /run-on-video/{video_id}/stream.
+ * - `stage` marks a coarse phase change (inference → encoding → post-process).
+ * - `progress` carries per-frame progress (~5 Hz during inference only).
+ * - `complete` is terminal with the persisted summary.
+ * - `error` is terminal with a human-readable message.
+ */
+export type InferenceProgressEvent =
+  | {
+      type: 'stage'
+      stage: 'running_inference' | 'encoding_video' | 'post_processing'
+      total_frames?: number
+    }
+  | {
+      type: 'progress'
+      current: number
+      total: number
+      avg_ms: number
+      avg_fps: number
+      eta_s: number | null
+    }
+  | {
+      type: 'complete'
+      inference_id: string
+      run_name: string
+      total_frames: number
+      avg_fps: number
+      avg_inference_time_ms: number
+    }
+  | { type: 'error'; message: string }
+
 export interface ZCalibrationLabel {
   frame_number: number
   z_mm: number
@@ -307,26 +354,18 @@ export interface ZCalibrationLabel {
 }
 
 export interface ZCalibrationModel {
-  type: string
+  type: 'k_over_s' | 'linear_inv'
   k?: number
-  a?: number
-  b?: number
-  focal_length_px?: number
-  targets?: { class_name: string; model: ZCalibrationModel }[]
-}
-
-export interface ZCalibrationTarget {
-  class_name: string
-  real_width_mm: number
+  m?: number
+  c?: number
 }
 
 export interface ZCalibration {
   labels: ZCalibrationLabel[]
   model: ZCalibrationModel | null
-  class_name: string
-  size_metric: string
-  reference_real_width_mm?: number | null
-  targets?: ZCalibrationTarget[] | null
+  reference_class: string
+  length_mm?: number | null
+  targets?: string[] | null
   video_resolution?: { width: number; height: number }
 }
 

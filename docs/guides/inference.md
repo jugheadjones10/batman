@@ -180,7 +180,7 @@ The detail panel uses a two-column layout on wide screens:
 
 ### Extracting Frames for Z-Axis Calibration
 
-After running inference, you can extract specific frames as JPEG images along with their bounding box data. This is useful for z-axis height estimation calibration (see [Z-Axis Height Estimation](z-axis-height-estimation.md)).
+After running inference, you can extract specific frames as JPEG images along with their bounding box data. This is useful for distance calibration (see [Distance Calibration (Z-axis)](z-axis-height-estimation.md)).
 
 1. Click a cell in the results matrix to open the detail panel
 2. Click **Open Frame Viewer** in the Extract Frames section
@@ -244,7 +244,7 @@ bbox_height_px = detection["box"]["height"] * video_resolution["height"]
 The visual Z-axis calibration tool lets you build a depth model directly from inference frames, without manually typing frame numbers.
 
 1. Click a cell in the results matrix to open the detail panel
-2. Click **Open Calibration** in the Z-Axis Height Estimation section
+2. Click **Open Calibration** in the Distance Calibration section
 3. The calibration viewer opens in a full-screen layout:
     - **Center**: the current frame with detection bounding box overlays
     - **Bottom filmstrip**: scrollable frame indicators with navigation controls (calibration points shown with a ruler icon)

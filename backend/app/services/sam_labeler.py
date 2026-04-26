@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 from loguru import logger
 from PIL import Image
@@ -256,6 +257,10 @@ class SAMLabeler:
                     if results and len(results) > 0:
                         result = results[0]
 
+                        mask_arrays = None
+                        if result.masks is not None and len(result.masks) > 0:
+                            mask_arrays = result.masks.data.cpu().numpy()
+
                         # Extract boxes from results
                         if result.boxes is not None and len(result.boxes) > 0:
                             for i in range(len(result.boxes)):
@@ -272,32 +277,37 @@ class SAMLabeler:
                                 w = (x2 - x1) / width
                                 h = (y2 - y1) / height
 
-                                detections.append(
-                                    {
-                                        "box": {
-                                            "x": float(cx),
-                                            "y": float(cy),
-                                            "width": float(w),
-                                            "height": float(h),
-                                        },
-                                        "confidence": conf,
-                                        "class_id": class_id,
-                                    }
-                                )
+                                det = {
+                                    "box": {
+                                        "x": float(cx),
+                                        "y": float(cy),
+                                        "width": float(w),
+                                        "height": float(h),
+                                    },
+                                    "confidence": conf,
+                                    "class_id": class_id,
+                                }
+                                if mask_arrays is not None and i < len(mask_arrays):
+                                    poly = self._mask_to_polygon_norm(
+                                        mask_arrays[i], width, height
+                                    )
+                                    if poly is not None:
+                                        det["polygon"] = poly
+                                detections.append(det)
 
-                        # Also extract from masks if no boxes
-                        elif result.masks is not None and len(result.masks) > 0:
-                            masks = result.masks.data.cpu().numpy()
-                            for mask in masks:
+                        elif mask_arrays is not None:
+                            for mask in mask_arrays:
                                 bbox = self._mask_to_bbox(mask, width, height)
                                 if bbox:
-                                    detections.append(
-                                        {
-                                            "box": bbox,
-                                            "confidence": 1.0,
-                                            "class_id": class_id,
-                                        }
-                                    )
+                                    det = {
+                                        "box": bbox,
+                                        "confidence": 1.0,
+                                        "class_id": class_id,
+                                    }
+                                    poly = self._mask_to_polygon_norm(mask, width, height)
+                                    if poly is not None:
+                                        det["polygon"] = poly
+                                    detections.append(det)
 
                 except Exception as e:
                     logger.warning(f"SAM3 failed for prompt '{prompt}': {e}")
@@ -351,13 +361,15 @@ class SAMLabeler:
                     for mask in masks:
                         bbox = self._mask_to_bbox(mask, width, height)
                         if bbox:
-                            detections.append(
-                                {
-                                    "box": bbox,
-                                    "confidence": 1.0,
-                                    "class_id": class_id,
-                                }
-                            )
+                            det = {
+                                "box": bbox,
+                                "confidence": 1.0,
+                                "class_id": class_id,
+                            }
+                            poly = self._mask_to_polygon_norm(mask, width, height)
+                            if poly is not None:
+                                det["polygon"] = poly
+                            detections.append(det)
 
             return detections
 
@@ -404,13 +416,15 @@ class SAMLabeler:
                     for mask in masks:
                         bbox = self._mask_to_bbox(mask, width, height)
                         if bbox:
-                            detections.append(
-                                {
-                                    "box": bbox,
-                                    "confidence": 1.0,
-                                    "class_id": class_id,
-                                }
-                            )
+                            det = {
+                                "box": bbox,
+                                "confidence": 1.0,
+                                "class_id": class_id,
+                            }
+                            poly = self._mask_to_polygon_norm(mask, width, height)
+                            if poly is not None:
+                                det["polygon"] = poly
+                            detections.append(det)
 
             return detections
 
@@ -504,6 +518,42 @@ class SAMLabeler:
         h = (y2 - y1) / img_height
 
         return {"x": float(cx), "y": float(cy), "width": float(w), "height": float(h)}
+
+    @staticmethod
+    def _mask_to_polygon_norm(
+        mask: np.ndarray,
+        img_width: int,
+        img_height: int,
+    ) -> list[list[float]] | None:
+        """Convert a binary mask to a simplified, normalised polygon ([[x,y], ...] in [0,1]).
+
+        Uses the largest external contour simplified with cv2.approxPolyDP at 1.5px.
+        Returns None for empty/degenerate masks.
+        """
+        try:
+            arr = np.asarray(mask)
+            if arr.ndim == 3:
+                arr = arr.squeeze()
+            if arr.ndim != 2:
+                return None
+            bin_mask = (arr > 0).astype(np.uint8)
+            if bin_mask.max() == 0:
+                return None
+            contours, _ = cv2.findContours(
+                bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if not contours:
+                return None
+            biggest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(biggest) <= 0:
+                return None
+            simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
+            pts = simplified.reshape(-1, 2)
+            if len(pts) < 3:
+                return None
+            return [[float(x) / img_width, float(y) / img_height] for x, y in pts]
+        except Exception:
+            return None
 
 
 # Global instance

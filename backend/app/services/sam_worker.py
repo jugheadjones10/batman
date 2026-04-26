@@ -37,6 +37,43 @@ def _mask_to_bbox(mask, img_width: int, img_height: int) -> dict | None:
     return {"x": float(cx), "y": float(cy), "width": float(w), "height": float(h)}
 
 
+def _mask_to_polygon_norm(mask, img_width: int, img_height: int):
+    """Extract the largest contour of a binary mask and normalise to [0,1]."""
+    try:
+        import cv2
+        import numpy as np
+        if hasattr(mask, "detach"):
+            mask = mask.detach().cpu().numpy()
+        elif hasattr(mask, "cpu"):
+            mask = mask.cpu().numpy()
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = arr.squeeze()
+        if arr.ndim != 2:
+            return None
+        bin_mask = (arr > 0).astype(np.uint8)
+        if bin_mask.max() == 0:
+            return None
+        contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        biggest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(biggest) <= 0:
+            return None
+        simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
+        pts = simplified.reshape(-1, 2)
+        if len(pts) < 3:
+            return None
+        return [[float(x) / img_width, float(y) / img_height] for x, y in pts]
+    except Exception:
+        return None
+
+
+def _mask_bbox_norm(mask, img_width: int, img_height: int) -> dict | None:
+    """Binary mask → normalised center xywh bbox (used when SAM3 returns mask but no box)."""
+    return _mask_to_bbox(mask, img_width, img_height)
+
+
 def run_one(predictor, image_path: Path, class_prompts: list[str]) -> list[dict]:
     """Run SAM3 on one image; return list of detections."""
     from PIL import Image
@@ -53,6 +90,10 @@ def run_one(predictor, image_path: Path, class_prompts: list[str]) -> list[dict]
                 continue
             result = results[0]
 
+            mask_arrays = None
+            if result.masks is not None and len(result.masks) > 0:
+                mask_arrays = result.masks.data.cpu().numpy()
+
             if result.boxes is not None and len(result.boxes) > 0:
                 for i in range(len(result.boxes)):
                     xyxy = result.boxes.xyxy[i].cpu().numpy()
@@ -66,17 +107,26 @@ def run_one(predictor, image_path: Path, class_prompts: list[str]) -> list[dict]
                     cy = (y1 + y2) / 2 / height
                     w = (x2 - x1) / width
                     h = (y2 - y1) / height
-                    detections.append({
+                    det = {
                         "box": {"x": float(cx), "y": float(cy), "width": float(w), "height": float(h)},
                         "confidence": conf,
                         "class_id": class_id,
-                    })
-            elif result.masks is not None and len(result.masks) > 0:
-                masks = result.masks.data.cpu().numpy()
-                for mask in masks:
+                    }
+                    # Attach polygon (derived from the matching mask) when SAM3 returned masks.
+                    if mask_arrays is not None and i < len(mask_arrays):
+                        poly = _mask_to_polygon_norm(mask_arrays[i], width, height)
+                        if poly is not None:
+                            det["polygon"] = poly
+                    detections.append(det)
+            elif mask_arrays is not None:
+                for mask in mask_arrays:
                     bbox = _mask_to_bbox(mask, width, height)
                     if bbox:
-                        detections.append({"box": bbox, "confidence": 1.0, "class_id": class_id})
+                        det = {"box": bbox, "confidence": 1.0, "class_id": class_id}
+                        poly = _mask_to_polygon_norm(mask, width, height)
+                        if poly is not None:
+                            det["polygon"] = poly
+                        detections.append(det)
         except Exception:
             continue
 

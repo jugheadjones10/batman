@@ -105,6 +105,91 @@ class TrainingConfig:
     patience: int = 10
     grad_accum: int = 1
     resume: str | None = None
+    task: str = "detection"  # "detection" | "segmentation"
+
+
+# Native resolutions for RF-DETR-Seg variants (no block-size rounding).
+# Detection variants use block_size rounding of image_size; Seg variants use
+# these native values directly. See .cursor/rules/rfdetr-resolution.mdc.
+RFDETR_SEG_NATIVE_RESOLUTION = {
+    "nano": 312,
+    "small": 384,
+    "medium": 432,
+    "large": 504,
+    "xlarge": 624,
+}
+
+
+# RF-DETR class dispatch table: (task, size) → class name in the `rfdetr` module.
+# The segmentation family has no "base" variant; callers requesting ("segmentation", "base")
+# should be remapped to "medium" (closest in capacity).
+_RFDETR_CLASS_TABLE: dict[tuple[str, str], str] = {
+    ("detection", "nano"): "RFDETRNano",
+    ("detection", "small"): "RFDETRSmall",
+    ("detection", "base"): "RFDETRBase",
+    ("detection", "medium"): "RFDETRMedium",
+    ("detection", "large"): "RFDETRLarge",
+    ("segmentation", "nano"): "RFDETRSegNano",
+    ("segmentation", "small"): "RFDETRSegSmall",
+    ("segmentation", "medium"): "RFDETRSegMedium",
+    ("segmentation", "large"): "RFDETRSegLarge",
+    ("segmentation", "xlarge"): "RFDETRSegXLarge",
+}
+
+
+def resolve_rfdetr_class(task: str, model_size: str):
+    """Import and return the RF-DETR class for (task, size), or raise ValueError.
+
+    Segmentation does not have a "base" variant; callers that pass ("segmentation", "base")
+    are transparently mapped to "medium". This keeps the existing detection default from
+    breaking seg-mode flows that haven't yet chosen a size.
+    """
+    import rfdetr
+
+    task_norm = (task or "detection").lower()
+    size_norm = (model_size or "base").lower()
+    if task_norm == "segmentation" and size_norm == "base":
+        size_norm = "medium"
+
+    cls_name = _RFDETR_CLASS_TABLE.get((task_norm, size_norm))
+    if cls_name is None:
+        valid = sorted({s for (t, s) in _RFDETR_CLASS_TABLE if t == task_norm})
+        raise ValueError(
+            f"No RF-DETR class for task={task_norm!r}, size={size_norm!r}. "
+            f"Valid sizes for {task_norm}: {valid}"
+        )
+
+    try:
+        return getattr(rfdetr, cls_name)
+    except AttributeError as e:
+        # Older rfdetr versions (<1.6) ship only `RFDETRSegPreview` for segmentation.
+        # Fall back to it so users on older installs aren't fully blocked; they lose
+        # the ability to pick a size but can still train/run seg.
+        if task_norm == "segmentation" and hasattr(rfdetr, "RFDETRSegPreview"):
+            try:
+                import importlib.metadata as _md
+                installed = _md.version("rfdetr")
+            except Exception:
+                installed = "?"
+            import sys
+            print(
+                f"[trainer] WARNING: rfdetr=={installed} does not expose {cls_name}; "
+                f"falling back to RFDETRSegPreview. Upgrade to rfdetr>=1.6 to use "
+                f"size-specific Seg variants (Nano/Small/Medium/Large/XLarge).",
+                file=sys.stderr,
+            )
+            return getattr(rfdetr, "RFDETRSegPreview")
+        try:
+            import importlib.metadata as _md
+            installed = _md.version("rfdetr")
+        except Exception:
+            installed = "?"
+        raise RuntimeError(
+            f"rfdetr=={installed} does not expose {cls_name}. "
+            f"Upgrade to rfdetr>=1.6 which ships the size-specific segmentation variants. "
+            f"In a uv-managed .venv: `uv sync` after pulling latest; "
+            f"with pip: `pip install -U 'rfdetr[metrics]>=1.6.0'`."
+        ) from e
 
 
 def set_seed(seed: int) -> None:
@@ -474,6 +559,31 @@ def create_coco_split(
             y_min = cy - h / 2
             category_id = class_id_map[original_class_id]
 
+            # COCO `segmentation` is a list-of-flat-polygons (pixel coords).
+            # Use the real polygon when present, else a rectangular fallback from the bbox.
+            # This keeps every annotation compatible with RF-DETR-Seg training even for
+            # detection-only classes; for those classes the mask is just the bbox itself.
+            polygon_norm = ann.get("polygon")
+            if (
+                polygon_norm
+                and isinstance(polygon_norm, list)
+                and len(polygon_norm) >= 3
+            ):
+                flat_poly = []
+                for pt in polygon_norm:
+                    if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                        flat_poly = []
+                        break
+                    flat_poly.append(float(pt[0]) * img_width)
+                    flat_poly.append(float(pt[1]) * img_height)
+                segmentation = [flat_poly] if flat_poly else [
+                    [x_min, y_min, x_min + w, y_min, x_min + w, y_min + h, x_min, y_min + h]
+                ]
+            else:
+                segmentation = [
+                    [x_min, y_min, x_min + w, y_min, x_min + w, y_min + h, x_min, y_min + h]
+                ]
+
             frame_annotations.append(
                 {
                     "id": annotation_id,
@@ -482,6 +592,7 @@ def create_coco_split(
                     "bbox": [x_min, y_min, w, h],
                     "area": w * h,
                     "iscrowd": 0,
+                    "segmentation": segmentation,
                 }
             )
             annotation_id += 1
@@ -784,16 +895,23 @@ class RFDETRTrainer:
     Handles training, inference, and export of RF-DETR models.
     """
 
-    def __init__(self, model_size: str = "base", checkpoint: Path | None = None):
+    def __init__(
+        self,
+        model_size: str = "base",
+        checkpoint: Path | None = None,
+        task: str = "detection",
+    ):
         """
         Initialize trainer.
 
         Args:
-            model_size: Model size ('nano', 'small', 'base', 'medium', 'large')
+            model_size: Model size ('nano', 'small', 'base', 'medium', 'large', or 'xlarge' for seg)
             checkpoint: Optional path to pre-trained checkpoint
+            task: 'detection' or 'segmentation' (selects the RF-DETR-Seg family)
         """
         self.model_size = model_size
         self.checkpoint = checkpoint
+        self.task = task
         self._model = None
 
     @property
@@ -804,18 +922,8 @@ class RFDETRTrainer:
         return self._model
 
     def _load_model(self):
-        """Load the RF-DETR model based on size."""
-        if self.model_size == "large":
-            from rfdetr import RFDETRLarge as Model
-        elif self.model_size == "medium":
-            from rfdetr import RFDETRMedium as Model
-        elif self.model_size == "small":
-            from rfdetr import RFDETRSmall as Model
-        elif self.model_size == "nano":
-            from rfdetr import RFDETRNano as Model
-        else:
-            from rfdetr import RFDETRBase as Model
-
+        """Load the RF-DETR model for the configured (task, size)."""
+        Model = resolve_rfdetr_class(self.task, self.model_size)
         if self.checkpoint:
             return Model(pretrain_weights=str(self.checkpoint))
         return Model()
@@ -843,14 +951,24 @@ class RFDETRTrainer:
             config = TrainingConfig()
 
         device = get_device(config.device)
+        if config.task and config.task != self.task:
+            self.task = config.task
+            self._model = None
 
-        # Resolution must be divisible by patch_size * num_windows for the backbone.
-        # base/large use patch_size=14, num_windows=4 → block_size=56
-        # small/nano/medium use patch_size=16, num_windows=2 → block_size=32
-        block_size = 56 if self.model_size in ("base", "large") else 32
-        resolution = (config.image_size // block_size) * block_size
-        if resolution < 280:
-            resolution = 280
+        if self.task == "segmentation":
+            # Seg variants are trained at their native input sizes; image_size is informational.
+            resolution = RFDETR_SEG_NATIVE_RESOLUTION.get(
+                "medium" if self.model_size == "base" else self.model_size,
+                432,
+            )
+        else:
+            # Resolution must be divisible by patch_size * num_windows for the backbone.
+            # base/large use patch_size=14, num_windows=4 → block_size=56
+            # small/nano/medium use patch_size=16, num_windows=2 → block_size=32
+            block_size = 56 if self.model_size in ("base", "large") else 32
+            resolution = (config.image_size // block_size) * block_size
+            if resolution < 280:
+                resolution = 280
 
         # Build training arguments
         train_kwargs = {
@@ -963,18 +1081,13 @@ class RFDETRTrainer:
         return export_path
 
 
-def _load_rfdetr_model(checkpoint_path: Path, model_size: str = "base"):
-    """Instantiate the correct RF-DETR variant for the given model size."""
-    if model_size == "large":
-        from rfdetr import RFDETRLarge as Model
-    elif model_size == "medium":
-        from rfdetr import RFDETRMedium as Model
-    elif model_size == "small":
-        from rfdetr import RFDETRSmall as Model
-    elif model_size == "nano":
-        from rfdetr import RFDETRNano as Model
-    else:
-        from rfdetr import RFDETRBase as Model
+def _load_rfdetr_model(
+    checkpoint_path: Path,
+    model_size: str = "base",
+    task: str = "detection",
+):
+    """Instantiate the correct RF-DETR variant for the given (task, size)."""
+    Model = resolve_rfdetr_class(task, model_size)
     return Model(pretrain_weights=str(checkpoint_path))
 
 
@@ -984,6 +1097,7 @@ def measure_latency(
     warmup_runs: int = 5,
     test_runs: int = 20,
     model_size: str = "base",
+    task: str = "detection",
 ) -> float:
     """
     Measure inference latency on a dummy image.
@@ -1000,7 +1114,7 @@ def measure_latency(
     """
     import time
 
-    model = _load_rfdetr_model(checkpoint_path, model_size)
+    model = _load_rfdetr_model(checkpoint_path, model_size, task=task)
     dummy_img = np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8)
 
     # Warmup

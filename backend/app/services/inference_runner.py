@@ -1,17 +1,28 @@
 """Inference service for running trained models on videos."""
 
+import asyncio
 import time
 from pathlib import Path
-from typing import AsyncGenerator, Literal, Optional
+from typing import AsyncGenerator, Callable, Literal, Optional
 
 import cv2
 import numpy as np
 from loguru import logger
 
+# Type alias for the streaming progress callback used by the API layer to
+# report granular progress to the client. Callback is invoked synchronously
+# from the inference worker thread with a plain dict event, e.g.
+#   {"type": "stage", "stage": "encoding_video"}
+#   {"type": "progress", "current": 120, "total": 450,
+#    "avg_ms": 42.1, "avg_fps": 23.7, "eta_s": 14}
+# The callback must be fast and non-blocking; event-loop bridging (e.g.
+# asyncio.Queue.put_nowait via call_soon_threadsafe) should happen inside it.
+ProgressCallback = Callable[[dict], None]
+
 from backend.app.config import settings
 from backend.app.services.tracker import Tracker, TrackingConfig
 from src.core.inference import Detection, draw_detections
-from src.core.trainer import get_device, get_device_info
+from src.core.trainer import get_device, get_device_info, resolve_rfdetr_class
 
 
 class InferenceRunner:
@@ -21,23 +32,19 @@ class InferenceRunner:
         self.model = None
         self.model_path: Optional[Path] = None
         self.model_type: Optional[str] = None
+        self.model_task: str = "detection"
         self.class_names: list[str] = []
         self.current_run_name: Optional[str] = None
         self._device: Optional[str] = None
 
     @staticmethod
-    def _load_rfdetr_model(checkpoint_path: Path, model_size: str = "base"):
-        """Instantiate the correct RF-DETR variant for the given model size."""
-        if model_size == "large":
-            from rfdetr import RFDETRLarge as Model
-        elif model_size == "medium":
-            from rfdetr import RFDETRMedium as Model
-        elif model_size == "small":
-            from rfdetr import RFDETRSmall as Model
-        elif model_size == "nano":
-            from rfdetr import RFDETRNano as Model
-        else:
-            from rfdetr import RFDETRBase as Model
+    def _load_rfdetr_model(
+        checkpoint_path: Path,
+        model_size: str = "base",
+        task: str = "detection",
+    ):
+        """Instantiate the correct RF-DETR variant for (task, size)."""
+        Model = resolve_rfdetr_class(task, model_size)
         return Model(pretrain_weights=str(checkpoint_path))
 
     async def load_model(
@@ -47,22 +54,24 @@ class InferenceRunner:
         model_type: str = "yolo",
         device: str = "auto",
         model_size: str = "base",
+        task: str = "detection",
     ):
         """Load a trained model onto the given device (auto, cuda, mps, cpu)."""
         self.model_path = checkpoint_path
         self.model_type = model_type
+        self.model_task = task
         self.class_names = class_names
         resolved = get_device(device)
         self._device = resolved
         info = get_device_info(resolved)
-        logger.info(f"Loading model on {info.get('name', resolved)}")
+        logger.info(f"Loading model on {info.get('name', resolved)} (task={task})")
 
         if model_type == "yolo":
             from ultralytics import YOLO
 
             self.model = YOLO(str(checkpoint_path))
         elif model_type == "rfdetr":
-            self.model = self._load_rfdetr_model(checkpoint_path, model_size)
+            self.model = self._load_rfdetr_model(checkpoint_path, model_size, task=task)
             if hasattr(self.model, "to") and resolved != "cpu":
                 try:
                     import torch
@@ -191,15 +200,45 @@ class InferenceRunner:
         enable_tracking: bool = False,
         tracking_config: Optional[TrackingConfig] = None,
         detection_interval: int = 1,  # Run detection every N frames (1 = every frame)
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> dict:
-        """
-        Run inference on entire video and optionally save annotated output.
+        """Run inference on entire video and optionally save annotated output.
 
-        Returns:
-            Summary statistics and results
+        The actual heavy work is offloaded to a thread so the event loop stays
+        responsive (e.g. for SSE streaming clients polling other endpoints).
         """
+        return await asyncio.to_thread(
+            self._run_on_video_full_sync,
+            video_path,
+            output_path,
+            confidence_threshold,
+            iou_threshold,
+            enable_tracking,
+            tracking_config,
+            detection_interval,
+            progress_callback,
+        )
+
+    def _run_on_video_full_sync(
+        self,
+        video_path: Path,
+        output_path: Optional[Path],
+        confidence_threshold: float,
+        iou_threshold: float,
+        enable_tracking: bool,
+        tracking_config: Optional[TrackingConfig],
+        detection_interval: int,
+        progress_callback: Optional[ProgressCallback],
+    ) -> dict:
         if self.model is None:
             raise RuntimeError("Model not loaded")
+
+        def emit(event: dict) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(event)
+                except Exception as e:
+                    logger.debug(f"progress_callback failed: {e}")
 
         cap = cv2.VideoCapture(str(video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -225,9 +264,24 @@ class InferenceRunner:
         else:
             logger.info(f"Starting inference on {total_frames} frames...")
 
+        emit({"type": "stage", "stage": "running_inference", "total_frames": total_frames})
+        # Push an initial 0% tick so the UI shows "starting" rather than staying
+        # indeterminate while the first frame is being read / warmed up.
+        emit(
+            {
+                "type": "progress",
+                "current": 0,
+                "total": total_frames,
+                "avg_ms": 0.0,
+                "avg_fps": 0.0,
+                "eta_s": None,
+            }
+        )
+
         try:
             frame_num = 0
             last_log_time = time.time()
+            last_progress_emit = 0.0
             last_detections = []  # Cache last detections for interpolation
 
             while True:
@@ -291,6 +345,7 @@ class InferenceRunner:
                             confidence=d.get("confidence", 1.0),
                             track_id=d.get("track_id"),
                             z_mm=d.get("z_mm"),
+                            mask=d.get("mask"),
                         )
                         for d in detections
                     ]
@@ -299,8 +354,29 @@ class InferenceRunner:
 
                 frame_num += 1
 
-                # Log progress every 2 seconds
                 current_time = time.time()
+                # Emit progress to the streaming client ~5 Hz. This is cheap
+                # (a dict push onto a bounded queue) and gives a responsive bar.
+                if current_time - last_progress_emit >= 0.2 or frame_num >= total_frames:
+                    avg_ms = (
+                        sum(frame_times[-30:]) / len(frame_times[-30:]) if frame_times else 0
+                    )
+                    avg_fps = 1000.0 / avg_ms if avg_ms > 0 else 0.0
+                    remaining = max(total_frames - frame_num, 0)
+                    eta_s = (remaining * avg_ms) / 1000 if avg_ms > 0 else None
+                    emit(
+                        {
+                            "type": "progress",
+                            "current": frame_num,
+                            "total": total_frames,
+                            "avg_ms": avg_ms,
+                            "avg_fps": avg_fps,
+                            "eta_s": eta_s,
+                        }
+                    )
+                    last_progress_emit = current_time
+
+                # Log progress every 2 seconds
                 if current_time - last_log_time >= 2.0:
                     progress = (frame_num / total_frames) * 100
                     avg_ms = sum(frame_times[-30:]) / len(frame_times[-30:]) if frame_times else 0
@@ -317,6 +393,7 @@ class InferenceRunner:
 
         # Re-encode to H.264 so browsers can play the video
         if output_path and output_path.exists():
+            emit({"type": "stage", "stage": "encoding_video"})
             # #region agent log
             import json as _json
 
@@ -461,6 +538,10 @@ class InferenceRunner:
     def _parse_rfdetr_results(self, results, img_shape=None) -> list[dict]:
         """Parse RF-DETR model output to common format (normalized center box, class_name, etc.).
         img_shape: (height, width) of the image; required to normalize pixel coords from the model.
+
+        For segmentation models (results.mask present), extracts the largest contour from each
+        instance mask, simplifies it with approxPolyDP, and attaches it as a normalised polygon
+        under the "mask" field on each detection.
         """
         out = []
         if results is None:
@@ -474,13 +555,16 @@ class InferenceRunner:
         n = len(results.xyxy)
         if n == 0:
             return out
-        # RF-DETR returns pixel coords; normalize to [0,1] for drawing (expects center + size)
         if img_shape is not None:
             img_h, img_w = int(img_shape[0]), int(img_shape[1])
             if img_w <= 0 or img_h <= 0:
                 return out
         else:
             img_w = img_h = 1
+
+        masks = getattr(results, "mask", None)
+        has_masks = masks is not None and len(masks) == n
+
         for i in range(n):
             xyxy = results.xyxy[i]
             if hasattr(xyxy, "tolist"):
@@ -501,15 +585,62 @@ class InferenceRunner:
                 if class_id < len(self.class_names)
                 else f"class_{class_id}"
             )
-            out.append(
-                {
-                    "box": {"x": cx_norm, "y": cy_norm, "width": w_norm, "height": h_norm},
-                    "class_id": class_id,
-                    "class_name": class_name,
-                    "confidence": conf,
-                }
-            )
+            det = {
+                "box": {"x": cx_norm, "y": cy_norm, "width": w_norm, "height": h_norm},
+                "class_id": class_id,
+                "class_name": class_name,
+                "confidence": conf,
+            }
+            if has_masks:
+                poly = _mask_to_polygon_norm(masks[i], img_w, img_h)
+                if poly is not None:
+                    det["mask"] = poly
+            out.append(det)
         return out
+
+
+def _mask_to_polygon_norm(mask, img_w: int, img_h: int) -> Optional[list[list[float]]]:
+    """Extract the largest contour of a binary mask and return as a normalised polygon.
+
+    Accepts HxW numpy arrays / torch tensors; any non-zero value is treated as inside.
+    The contour is simplified with cv2.approxPolyDP at epsilon=1.5px to keep result.json small.
+    Returns None if the mask is empty, degenerate, or any step fails.
+    """
+    try:
+        if hasattr(mask, "detach"):
+            mask = mask.detach().cpu().numpy()
+        elif hasattr(mask, "cpu"):
+            mask = mask.cpu().numpy()
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = arr.squeeze()
+        if arr.ndim != 2:
+            return None
+        bin_mask = (arr > 0).astype(np.uint8)
+        if bin_mask.max() == 0:
+            return None
+
+        contours, _ = cv2.findContours(
+            bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return None
+        biggest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(biggest) <= 0:
+            return None
+
+        simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
+        pts = simplified.reshape(-1, 2)
+        if len(pts) < 3:
+            return None
+
+        return [
+            [float(x) / img_w, float(y) / img_h]
+            for x, y in pts
+        ]
+    except Exception as e:
+        logger.debug(f"mask_to_polygon_norm failed: {e}")
+        return None
 
 
 # Global instance

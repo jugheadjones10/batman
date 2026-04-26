@@ -4,9 +4,11 @@ import asyncio
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +46,56 @@ def _find_free_port(start_port: int = 6006, max_attempts: int = 100) -> int:
             except OSError:
                 continue
     raise RuntimeError(f"No free port in range {start_port}-{start_port + max_attempts}")
+
+
+def _terminate_local_training_process(run_name: str, local_pid: int | None) -> None:
+    """Best-effort stop for local training across backend reloads.
+
+    Primary path uses the in-memory Popen handle. If that state is gone (e.g. dev
+    server reload), we fall back to terminating the recorded PID directly.
+    """
+    proc = _local_training_processes.get(run_name)
+    if proc is not None:
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            logger.warning(f"Failed to terminate tracked local process: {e}")
+        finally:
+            _local_training_processes.pop(run_name, None)
+        return
+
+    if not local_pid:
+        return
+
+    try:
+        # SIGTERM first so training can flush logs/checkpoints.
+        os.kill(local_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        logger.warning(f"Failed to terminate local PID {local_pid}: {e}")
+        return
+
+    # Wait briefly, then hard-kill if still alive.
+    for _ in range(10):
+        try:
+            os.kill(local_pid, 0)
+        except ProcessLookupError:
+            return
+        except Exception:
+            break
+        time.sleep(0.5)
+
+    try:
+        os.kill(local_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        logger.warning(f"Failed to force-kill local PID {local_pid}: {e}")
 
 
 # ── Dataset export (kept) ────────────────────────────────────────────────
@@ -206,6 +258,7 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
         output_dir=output_dir,
         output_dataset=output_dataset,
         model=request.training.model,
+        task=request.training.task,
         epochs=request.training.epochs,
         batch_size=batch_size,
         image_size=request.training.image_size,
@@ -235,10 +288,10 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
     # Save meta.json locally
     runs_dir = project_path / "runs"
     runs_dir.mkdir(exist_ok=True)
+    run_id = _next_run_id(runs_dir)
     run_dir = runs_dir / run_name
     run_dir.mkdir(exist_ok=True)
 
-    run_id = len(list(runs_dir.iterdir()))
     now = datetime.utcnow()
 
     meta = {
@@ -304,6 +357,8 @@ def _build_local_train_argv(
         "auto",
         "--model",
         request.training.model,
+        "--task",
+        request.training.task,
         "--epochs",
         str(request.training.epochs),
         "--image-size",
@@ -364,10 +419,10 @@ async def submit_training_local(project_name: str, request: LocalTrainingSubmitR
 
     runs_dir = project_path / "runs"
     runs_dir.mkdir(exist_ok=True)
+    run_id = _next_run_id(runs_dir)
     run_dir = runs_dir / run_name
     run_dir.mkdir(exist_ok=True)
 
-    run_id = len(list(runs_dir.iterdir()))
     now = datetime.utcnow()
 
     meta = {
@@ -462,27 +517,76 @@ async def submit_training_local(project_name: str, request: LocalTrainingSubmitR
 
 # ── List / get training runs ────────────────────────────────────────────
 
+# rfdetr <1.6 emitted `Epoch: [N] [batch/total]` lines; 1.6+ routes training through
+# pytorch_lightning (no per-batch line) and prints `(epoch N)` in rf-detr logger lines.
 _EPOCH_HEADER_RE = re.compile(r"Epoch:\s*\[(\d+)\]")
 _BATCH_PROGRESS_RE = re.compile(r"Epoch:\s*\[\d+\]\s*\[\s*(\d+)/(\d+)\]")
+_EPOCH_PAREN_RE = re.compile(r"\(epoch\s+(\d+)\)", re.IGNORECASE)
+
+
+def _parse_progress_from_metrics_csv(csv_path: Path) -> int | None:
+    """Return the last epoch number recorded in metrics.csv, or ``None``.
+
+    rfdetr (via pytorch_lightning) writes one or more rows per epoch with the epoch
+    index in the first column. We only need the max value seen so far, so we scan
+    from the tail and stop at the first valid row.
+    """
+    if not csv_path.exists():
+        return None
+    try:
+        size = csv_path.stat().st_size
+        # 16 KiB tail is plenty — each row is ~2-3 KiB of loss columns at most.
+        read_bytes = min(size, 16384)
+        with open(csv_path, "rb") as f:
+            f.seek(max(0, size - read_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    # Walk lines from the bottom, skip incomplete trailing line.
+    lines = tail.splitlines()
+    for line in reversed(lines):
+        first = line.split(",", 1)[0].strip()
+        if first.isdigit():
+            return int(first)
+    return None
 
 
 def _parse_progress_from_log(log_path: Path, total_epochs: int) -> tuple[float, int | None]:
     """Read the tail of a training log and extract epoch-level progress.
 
     Returns (progress_fraction, current_epoch).  progress is 0.0-1.0.
+
+    Prefers ``metrics.csv`` (sibling file, authoritative) and falls back to log
+    regexes for both pre-1.6 (`Epoch: [N] [k/total]`) and 1.6+ (`(epoch N)`) rfdetr
+    log formats.
     """
-    if total_epochs <= 0 or not log_path.exists():
+    if total_epochs <= 0:
         return 0.0, None
+
+    metrics_epoch: int | None = None
+    if log_path.exists():
+        metrics_epoch = _parse_progress_from_metrics_csv(log_path.parent / "metrics.csv")
+
+    if metrics_epoch is not None:
+        # One completed epoch in metrics.csv ≈ (metrics_epoch + 1) / total_epochs of
+        # work done. Cap at total so the bar doesn't overshoot if logging lags behind.
+        progress = (metrics_epoch + 1) / total_epochs
+        return min(max(progress, 0.0), 1.0), metrics_epoch
+
+    if not log_path.exists():
+        return 0.0, None
+
     try:
         size = log_path.stat().st_size
-        read_bytes = min(size, 8192)
+        read_bytes = min(size, 16384)
         with open(log_path, "rb") as f:
             f.seek(max(0, size - read_bytes))
             tail = f.read().decode("utf-8", errors="replace")
     except OSError:
         return 0.0, None
 
-    current_epoch = None
+    current_epoch: int | None = None
     batch_step = 0
     batch_total = 1
     for line in tail.splitlines():
@@ -493,6 +597,10 @@ def _parse_progress_from_log(log_path: Path, total_epochs: int) -> tuple[float, 
             if bm:
                 batch_step = int(bm.group(1))
                 batch_total = max(int(bm.group(2)), 1)
+            continue
+        pm = _EPOCH_PAREN_RE.search(line)
+        if pm:
+            current_epoch = int(pm.group(1))
 
     if current_epoch is None:
         return 0.0, None
@@ -511,6 +619,31 @@ def _is_local_training_run(run_dir: Path) -> bool:
         or (run_dir / "tensorboard").is_dir()
         or bool(list(run_dir.glob("*.pth")))
     )
+
+
+def _next_run_id(runs_dir: Path) -> int:
+    """Return a run id that doesn't collide with any existing meta.json id.
+
+    The old `len(list(runs_dir.iterdir()))` approach collides when runs are
+    created, deleted, or renamed between submissions (two different runs end
+    up with the same id, which then breaks id-based lookups in the frontend
+    and in `load_model`). Walk existing meta.json files and pick max+1.
+    """
+    max_id = 0
+    if runs_dir.exists():
+        for child in runs_dir.iterdir():
+            meta_path = child / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                with open(meta_path) as f:
+                    existing = json.load(f)
+                existing_id = int(existing.get("id", 0))
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                continue
+            if existing_id > max_id:
+                max_id = existing_id
+    return max_id + 1
 
 
 def _local_run_info(project_name: str, run_dir: Path, run_index: int) -> TrainingRunInfo | None:
@@ -833,18 +966,12 @@ async def cancel_training_run(project_name: str, run_name: str):
             gpu_service.cancel_job(job_id)
         except Exception as e:
             logger.warning(f"scancel failed: {e}")
-    elif local_pid and run_name in _local_training_processes:
-        proc = _local_training_processes[run_name]
+    elif local_pid:
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception as e:
-            logger.warning(f"Failed to kill local process: {e}")
-        if run_name in _local_training_processes:
-            del _local_training_processes[run_name]
+            pid = int(local_pid)
+        except (TypeError, ValueError):
+            pid = None
+        _terminate_local_training_process(run_name, pid)
 
     meta["status"] = "cancelled"
     meta["completed_at"] = datetime.utcnow().isoformat()

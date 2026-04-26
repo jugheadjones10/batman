@@ -316,6 +316,27 @@ class DatasetExporter:
                     w = box["width"] * width
                     h = box["height"] * height
 
+                    # COCO segmentation: real polygon when we have one, rectangular fallback otherwise.
+                    polygon_norm = ann.get("polygon")
+                    segmentation = None
+                    if (
+                        polygon_norm
+                        and isinstance(polygon_norm, list)
+                        and len(polygon_norm) >= 3
+                    ):
+                        flat_poly = []
+                        valid = True
+                        for pt in polygon_norm:
+                            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                                valid = False
+                                break
+                            flat_poly.append(float(pt[0]) * width)
+                            flat_poly.append(float(pt[1]) * height)
+                        if valid and flat_poly:
+                            segmentation = [flat_poly]
+                    if segmentation is None:
+                        segmentation = [[x, y, x + w, y, x + w, y + h, x, y + h]]
+
                     coco_data["annotations"].append({
                         "id": annotation_id,
                         "image_id": image_id,
@@ -323,6 +344,7 @@ class DatasetExporter:
                         "bbox": [x, y, w, h],
                         "area": w * h,
                         "iscrowd": 0,
+                        "segmentation": segmentation,
                     })
                     annotation_id += 1
 

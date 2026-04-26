@@ -22,7 +22,7 @@ dependencies = [
     "supervision>=0.25.0",
     "timm>=1.0.0",  # Required by SAM3
     "clip @ git+https://github.com/ultralytics/CLIP.git",  # Required by SAM3 text prompts
-    "rfdetr[metrics]>=1.0.0",  # RF-DETR with TensorBoard support
+    "rfdetr[train,loggers]>=1.6.0",  # RF-DETR 1.6+ ships the size-specific Seg variants (RFDETRSegNano/Small/Medium/Large/XLarge). `train` pulls pytorch_lightning; `loggers` pulls TensorBoard.
     "tensorboard>=2.15.0",  # Training visualization
     
     # Video/Image processing

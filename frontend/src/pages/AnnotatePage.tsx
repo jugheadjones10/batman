@@ -85,7 +85,7 @@ export default function AnnotatePage() {
 
   // Create annotation mutation
   const createAnnotationMutation = useMutation({
-    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
+    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox; polygon?: number[][] }) =>
       api.annotations.create(projectName!, data),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
@@ -96,8 +96,12 @@ export default function AnnotatePage() {
 
   // Update annotation mutation
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box, class_label_id }: { id: number; box?: BoundingBox; class_label_id?: number }) => {
-      return api.annotations.update(projectName!, id, { ...(box && { box }), ...(class_label_id !== undefined && { class_label_id }) })
+    mutationFn: ({ id, box, class_label_id, polygon }: { id: number; box?: BoundingBox; class_label_id?: number; polygon?: number[][] }) => {
+      return api.annotations.update(projectName!, id, {
+        ...(box && { box }),
+        ...(class_label_id !== undefined && { class_label_id }),
+        ...(polygon !== undefined && { polygon }),
+      })
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
@@ -193,15 +197,18 @@ export default function AnnotatePage() {
   const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
   const handleCreateAnnotation = useCallback(
-    (box: BoundingBox, classId: number) => {
+    (box: BoundingBox, classId: number, polygon?: number[][]) => {
       if (!currentImage) return
-      createAnnotationMutation.mutate({ frame_id: currentImage.frame_id, class_label_id: classId, box })
+      createAnnotationMutation.mutate({ frame_id: currentImage.frame_id, class_label_id: classId, box, polygon })
     },
     [currentImage, createAnnotationMutation]
   )
 
   const handleUpdateAnnotation = useCallback(
-    (id: number, box: BoundingBox) => updateAnnotationMutation.mutate({ id, box }),
+    (id: number, box: BoundingBox, polygon?: number[][] | null) => {
+      const polyArg = polygon === null ? undefined : polygon
+      updateAnnotationMutation.mutate({ id, box, polygon: polyArg })
+    },
     [updateAnnotationMutation]
   )
 
@@ -217,6 +224,7 @@ export default function AnnotatePage() {
         frame_id: currentImage.frame_id,
         class_label_id: annotation.class_label_id,
         box: annotation.box,
+        ...(annotation.polygon && { polygon: annotation.polygon }),
       })
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage.frame_id] })
       return created

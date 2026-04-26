@@ -18,7 +18,14 @@ export default defineConfig({
         // In WSL2 + Windows: if frontend runs in Windows and backend in WSL, use localhost or set VITE_API_PROXY_TARGET
         target: process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
-        timeout: 120000, // 2 min so long-running / auto-label etc. don't socket hang up
+        // `timeout` is the incoming-socket timeout; `proxyTimeout` is the
+        // upstream/outgoing timeout. Both must cover the slowest legitimate
+        // request (e.g. ByteTrack comparison render on a long video can take
+        // ~2+ min); otherwise the socket is closed client-side and the
+        // frontend sees `TypeError: Failed to fetch` even though the backend
+        // eventually completes successfully.
+        timeout: 900000, // 15 min
+        proxyTimeout: 900000, // 15 min
         // Forward Range header for video streaming (browsers use it for <video>)
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {

@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 import cv2
-from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.app.api.projects import get_project_path, load_project_config
 from backend.app.config import settings
@@ -21,7 +21,7 @@ from backend.app.models.training import InferenceConfig, InferenceGPUSubmitReque
 from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
-from backend.app.services import z_estimator
+from backend.app.services import skew_estimator, z_estimator
 from src.core.project import Project
 from src.core.trainer import find_best_checkpoint
 
@@ -31,13 +31,22 @@ router = APIRouter(prefix="/projects/{project_name}/inference", tags=["inference
 
 
 class LoadModelRequest(BaseModel):
-    run_id: int
+    # `run_name` is the unique identifier (directory name on disk). `run_id` is
+    # kept for backwards compatibility but is NOT reliably unique — historical
+    # meta.json files can share an id because the old generator used
+    # `len(iterdir())`, so a by-id lookup can resolve to the wrong run. Prefer
+    # `run_name` whenever the frontend has it.
+    run_name: Optional[str] = None
+    run_id: Optional[int] = None
     device: Optional[str] = None  # auto, cuda, mps, cpu; default from settings
 
 
 @router.post("/load-model")
 async def load_model(project_name: str, request: LoadModelRequest):
     """Load a trained model for inference."""
+    if request.run_name is None and request.run_id is None:
+        raise HTTPException(status_code=400, detail="run_name or run_id is required")
+
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -49,6 +58,7 @@ async def load_model(project_name: str, request: LoadModelRequest):
     checkpoint_path = None
     model_type = "rfdetr"
     model_size = "base"
+    task = "detection"
     run_name = None
 
     for run_dir in runs_dir.iterdir():
@@ -59,21 +69,31 @@ async def load_model(project_name: str, request: LoadModelRequest):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        if meta["id"] == request.run_id:
+        matches = (
+            run_dir.name == request.run_name
+            if request.run_name is not None
+            else meta.get("id") == request.run_id
+        )
+        if matches:
             checkpoint_path = meta.get("checkpoint_path")
             run_name = run_dir.name
             model_field = meta.get("model", meta.get("base_model", ""))
             if "rfdetr" in model_field or "rf-detr" in model_field:
                 model_type = "rfdetr"
 
-            # Extract variant: "rf-detr-small" → "small", or from config
-            for variant in ("nano", "small", "medium", "base", "large"):
+            # Extract variant: "rf-detr-small" → "small", or from config.
+            # Order matters: check "xlarge" before "large" so it doesn't match the prefix.
+            for variant in ("nano", "small", "medium", "base", "xlarge", "large"):
                 if variant in model_field:
                     model_size = variant
                     break
-            cfg_model = (meta.get("config") or {}).get("training", {}).get("model")
+            cfg_training = (meta.get("config") or {}).get("training", {})
+            cfg_model = cfg_training.get("model")
             if cfg_model:
                 model_size = cfg_model
+            cfg_task = cfg_training.get("task") or meta.get("task")
+            if cfg_task:
+                task = cfg_task
 
             # Fallback: meta may not have checkpoint_path (e.g. local run before backend wrote it)
             if not checkpoint_path:
@@ -95,6 +115,10 @@ async def load_model(project_name: str, request: LoadModelRequest):
                 with open(class_info_path) as f:
                     class_info = json.load(f)
                 classes = class_info.get("classes", classes)
+                # class_info.json may also carry task (written by cli/train)
+                ci_task = class_info.get("task")
+                if ci_task:
+                    task = ci_task
             break
 
     if not checkpoint_path:
@@ -106,11 +130,16 @@ async def load_model(project_name: str, request: LoadModelRequest):
 
     device = request.device if request.device else settings.device
     await inference_runner.load_model(
-        checkpoint_path, classes, model_type, device=device, model_size=model_size
+        checkpoint_path,
+        classes,
+        model_type,
+        device=device,
+        model_size=model_size,
+        task=task,
     )
     inference_runner.current_run_name = run_name
 
-    return {"message": "Model loaded successfully", "run_name": run_name}
+    return {"message": "Model loaded successfully", "run_name": run_name, "task": task}
 
 
 @router.post("/run-on-image")
@@ -157,13 +186,15 @@ async def run_on_image(
     return result
 
 
-@router.post("/run-on-video/{video_id}")
-async def run_on_video(
-    project_name: str,
-    video_id: str,
-    config: InferenceConfig,
-):
-    """Run inference on a video, persist results, and return them."""
+def _prepare_run_on_video(
+    project_name: str, video_id: str, config: InferenceConfig
+) -> tuple[Path, str, Path, str, Path, TrackingConfig]:
+    """Validate state and resolve paths for a `run-on-video` request.
+
+    Returns (project_path, run_name, video_path, inference_id, result_dir,
+    tracking_config). Raises HTTPException on any precondition failure so the
+    error surfaces before a streaming response is opened (SSE can't set status).
+    """
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
@@ -194,21 +225,24 @@ async def run_on_video(
     else:
         tracking_config = TrackingConfig.occlusion_tolerant()
 
-    project = Project.load(project_path)
     inference_id = datetime.now(SGT).strftime("%Y%m%d_%H%M%S")
     result_dir = project_path / "inference" / run_name / video_id / inference_id
     result_dir.mkdir(parents=True, exist_ok=True)
-    output_path = result_dir / "detected.mp4"
 
-    result = await inference_runner.run_on_video_full(
-        video_path,
-        output_path=output_path,
-        confidence_threshold=config.confidence_threshold,
-        iou_threshold=config.iou_threshold,
-        enable_tracking=config.enable_tracking,
-        tracking_config=tracking_config,
-        detection_interval=config.detection_interval,
-    )
+    return project_path, run_name, video_path, inference_id, result_dir, tracking_config
+
+
+def _persist_inference_result(
+    project_path: Path,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    result_dir: Path,
+    config: InferenceConfig,
+    result: dict,
+) -> dict:
+    """Write result.json and run the skew estimator. Returns the enriched result."""
+    video_resolution = _get_video_resolution(project_path, video_id)
 
     persist_data = {
         "run_name": run_name,
@@ -230,15 +264,149 @@ async def run_on_video(
             ),
             "avg_inference_time_ms": result.get("avg_inference_time_ms", 0),
         },
+        "video_resolution": video_resolution,
         "frames": result.get("results", []),
     }
     with open(result_dir / "result.json", "w") as f:
         json.dump(persist_data, f, indent=2)
 
+    # Score per-frame skew between spreader and container (only has any effect
+    # when the current model is segmentation-capable and masks are present).
+    try:
+        skew_summary = skew_estimator.apply_skew_to_result(result_dir, video_resolution)
+        result["skew"] = skew_summary
+    except Exception as e:
+        logger.warning(f"skew_estimator failed for {result_dir}: {e}")
+
     result["persisted"] = True
     result["run_name"] = run_name
     result["inference_id"] = inference_id
     return result
+
+
+@router.post("/run-on-video/{video_id}")
+async def run_on_video(
+    project_name: str,
+    video_id: str,
+    config: InferenceConfig,
+):
+    """Run inference on a video, persist results, and return them."""
+    project_path, run_name, video_path, inference_id, result_dir, tracking_config = (
+        _prepare_run_on_video(project_name, video_id, config)
+    )
+
+    result = await inference_runner.run_on_video_full(
+        video_path,
+        output_path=result_dir / "detected.mp4",
+        confidence_threshold=config.confidence_threshold,
+        iou_threshold=config.iou_threshold,
+        enable_tracking=config.enable_tracking,
+        tracking_config=tracking_config,
+        detection_interval=config.detection_interval,
+    )
+
+    return _persist_inference_result(
+        project_path, run_name, video_id, inference_id, result_dir, config, result
+    )
+
+
+@router.post("/run-on-video/{video_id}/stream")
+async def run_on_video_stream(
+    project_name: str,
+    video_id: str,
+    config: InferenceConfig,
+):
+    """Run inference on a video and stream progress events via SSE.
+
+    The stream emits JSON-encoded events in order:
+      1. `{"type": "stage", "stage": "running_inference", "total_frames": N}`
+      2. Repeated `{"type": "progress", "current": i, "total": N, "avg_fps": f,
+         "eta_s": t}` (~5 Hz).
+      3. `{"type": "stage", "stage": "encoding_video"}` while ffmpeg re-encodes.
+      4. `{"type": "stage", "stage": "post_processing"}` during skew/save.
+      5. Terminal `{"type": "complete", "inference_id": ..., "total_frames": N,
+         "avg_fps": f, ...}` OR `{"type": "error", "message": ...}`.
+
+    Precondition errors (no model, missing video, etc.) raise HTTP 4xx *before*
+    the stream opens so the client can surface them naturally.
+    """
+    project_path, run_name, video_path, inference_id, result_dir, tracking_config = (
+        _prepare_run_on_video(project_name, video_id, config)
+    )
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+    SENTINEL = object()
+
+    def on_progress(event: dict) -> None:
+        # Called from the inference worker thread; bounce onto the event loop.
+        # Drop updates silently if the queue is full — progress is idempotent
+        # and the next tick will replace the value anyway.
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+        except RuntimeError:
+            pass
+
+    async def runner() -> None:
+        try:
+            result = await inference_runner.run_on_video_full(
+                video_path,
+                output_path=result_dir / "detected.mp4",
+                confidence_threshold=config.confidence_threshold,
+                iou_threshold=config.iou_threshold,
+                enable_tracking=config.enable_tracking,
+                tracking_config=tracking_config,
+                detection_interval=config.detection_interval,
+                progress_callback=on_progress,
+            )
+            await queue.put({"type": "stage", "stage": "post_processing"})
+            persisted = _persist_inference_result(
+                project_path, run_name, video_id, inference_id, result_dir, config, result
+            )
+            await queue.put(
+                {
+                    "type": "complete",
+                    "inference_id": inference_id,
+                    "run_name": run_name,
+                    "total_frames": persisted["total_frames"],
+                    "avg_fps": persisted.get("avg_fps", 0),
+                    "avg_inference_time_ms": persisted.get("avg_inference_time_ms", 0),
+                }
+            )
+        except Exception as e:
+            logger.exception(f"inference stream failed: {e}")
+            await queue.put({"type": "error", "message": str(e) or type(e).__name__})
+        finally:
+            await queue.put(SENTINEL)
+
+    task = asyncio.create_task(runner())
+
+    async def event_generator():
+        try:
+            while True:
+                item = await queue.get()
+                if item is SENTINEL:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            # Ensure the worker can't outlive the stream (client disconnect).
+            if not task.done():
+                task.cancel()
+            # Best-effort await; swallow CancelledError so FastAPI cleanup runs.
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/results")
@@ -317,6 +485,8 @@ async def get_inference_result(project_name: str, run_name: str, video_id: str, 
         result_base = project.inference_dir / run_name / video_id
     result["has_video"] = (result_base / "detected.mp4").exists()
     result["has_z_video"] = (result_base / "detected_z.mp4").exists()
+    result["has_raw_video"] = (result_base / "detected_raw.mp4").exists()
+    result["has_bytetrack_video"] = (result_base / "detected_bytetrack.mp4").exists()
     return result
 
 
@@ -332,12 +502,19 @@ async def get_inference_result_video(
     """Stream the detected video (with overlay) for an inference result. Supports Range for seeking.
     
     Use ?variant=z to stream the Z-overlay video (detected_z.mp4) instead of the default.
+    Use ?variant=raw to stream the no-tracker baseline (detected_raw.mp4).
+    Use ?variant=bytetrack to stream the ByteTrack comparison video (detected_bytetrack.mp4).
     """
     project_path = get_project_path(project_name)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    filename = "detected_z.mp4" if variant == "z" else "detected.mp4"
+    variant_files = {
+        "z": "detected_z.mp4",
+        "raw": "detected_raw.mp4",
+        "bytetrack": "detected_bytetrack.mp4",
+    }
+    filename = variant_files.get(variant or "", "detected.mp4")
     if inference_id == "legacy":
         video_path = project_path / "inference" / run_name / video_id / filename
     else:
@@ -742,17 +919,11 @@ class ZCalibrationLabel(BaseModel):
     detection_index: int = 0
 
 
-class ZCalibrationTarget(BaseModel):
-    class_name: str
-    real_width_mm: float
-
-
 class ZCalibrationRequest(BaseModel):
     labels: list[ZCalibrationLabel]
-    class_name: str = "crane hook"
-    size_metric: str = "h_px"
-    reference_real_width_mm: float | None = None
-    targets: list[ZCalibrationTarget] | None = None
+    reference_class: str
+    length_mm: float | None = None
+    target_classes: list[str] = Field(default_factory=list)
 
 
 def _resolve_result_dir(
@@ -814,14 +985,12 @@ async def save_z_calibration(
 
     calibration_data: dict[str, Any] = {
         "labels": [l.model_dump() for l in request.labels],
-        "class_name": request.class_name,
-        "size_metric": request.size_metric,
+        "reference_class": request.reference_class,
+        "targets": list(request.target_classes),
         "video_resolution": video_resolution,
     }
-    if request.reference_real_width_mm is not None:
-        calibration_data["reference_real_width_mm"] = request.reference_real_width_mm
-    if request.targets is not None:
-        calibration_data["targets"] = [t.model_dump() for t in request.targets]
+    if request.length_mm is not None:
+        calibration_data["length_mm"] = request.length_mm
 
     z_estimator.save_z_calibration(result_dir, calibration_data)
     return {"message": "Z calibration saved", "labels_count": len(request.labels)}
@@ -969,6 +1138,258 @@ async def export_z_video(
                 tmp_path.unlink(missing_ok=True)
 
     return {"message": "Video re-exported with Z overlays", "output_path": str(output_path)}
+
+
+class RerenderRequest(BaseModel):
+    render_mode: str = "polygon"  # "polygon" | "bbox"
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/rerender")
+async def rerender_detected_video_endpoint(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    request: RerenderRequest,
+):
+    """Re-bake `detected.mp4` with a different overlay mode (polygon / bbox).
+
+    Reads the existing `result.json` (no re-inference) and the original source
+    video, then writes a new `detected.mp4` with overlays drawn according to
+    the requested render_mode. The chosen mode is persisted back into
+    `result.json#config.render_mode` for future reference.
+    """
+    mode = (request.render_mode or "polygon").lower()
+    if mode not in ("polygon", "bbox"):
+        raise HTTPException(
+            status_code=400,
+            detail="render_mode must be one of: polygon, bbox",
+        )
+
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    result_path = result_dir / "result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    videos_meta_path = project_path / "videos" / "videos.json"
+    if not videos_meta_path.exists():
+        raise HTTPException(status_code=404, detail="No videos found")
+    with open(videos_meta_path) as f:
+        videos_meta = json.load(f)
+    if str(video_id) not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    source_video_path = Path(videos_meta[str(video_id)]["original_path"])
+    if not source_video_path.exists():
+        raise HTTPException(status_code=404, detail="Source video file not found")
+
+    output_path = result_dir / "detected.mp4"
+
+    from src.core.inference import rerender_detected_video
+
+    try:
+        frames_written = await asyncio.to_thread(
+            rerender_detected_video,
+            source_video_path,
+            result_path,
+            output_path,
+            mode,
+        )
+    except Exception as e:
+        logger.exception("Rerender failed")
+        raise HTTPException(status_code=500, detail=f"Rerender failed: {e}") from e
+
+    # Persist the chosen mode in result.json so the UI can reflect the current state.
+    try:
+        with open(result_path) as f:
+            data = json.load(f)
+        cfg = data.get("config") or {}
+        cfg["render_mode"] = mode
+        data["config"] = cfg
+        with open(result_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to persist render_mode in result.json: {e}")
+
+    return {
+        "message": f"Video re-rendered in '{mode}' mode",
+        "render_mode": mode,
+        "frames_written": frames_written,
+        "output_path": str(output_path),
+    }
+
+
+class RenderComparisonRequest(BaseModel):
+    render_mode: str = "polygon"
+    track_activation_threshold: float = Field(0.25, ge=0, le=1)
+    lost_track_buffer: int = Field(30, ge=1, le=600)
+    minimum_matching_threshold: float = Field(0.8, ge=0, le=1)
+
+
+@router.post("/results/{run_name}/{video_id}/{inference_id}/render-comparison")
+async def render_comparison_endpoint(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    request: RenderComparisonRequest,
+):
+    """Render side-by-side comparison videos: raw per-frame detections vs
+    sv.ByteTrack, both derived from the existing result.json (no re-inference).
+
+    Writes `detected_raw.mp4` and `detected_bytetrack.mp4` into the inference
+    result directory. Served via the existing video endpoint with
+    ?variant=raw or ?variant=bytetrack.
+    """
+    mode = (request.render_mode or "polygon").lower()
+    if mode not in ("polygon", "bbox"):
+        raise HTTPException(
+            status_code=400,
+            detail="render_mode must be one of: polygon, bbox",
+        )
+
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    result_path = result_dir / "result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    videos_meta_path = project_path / "videos" / "videos.json"
+    if not videos_meta_path.exists():
+        raise HTTPException(status_code=404, detail="No videos found")
+    with open(videos_meta_path) as f:
+        videos_meta = json.load(f)
+    if str(video_id) not in videos_meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    source_video_path = Path(videos_meta[str(video_id)]["original_path"])
+    if not source_video_path.exists():
+        raise HTTPException(status_code=404, detail="Source video file not found")
+
+    out_raw = result_dir / "detected_raw.mp4"
+    out_bt = result_dir / "detected_bytetrack.mp4"
+
+    from src.core.inference import render_comparison_videos
+
+    try:
+        frames_written = await asyncio.to_thread(
+            render_comparison_videos,
+            source_video_path,
+            result_path,
+            out_raw,
+            out_bt,
+            mode,
+            request.track_activation_threshold,
+            request.lost_track_buffer,
+            request.minimum_matching_threshold,
+        )
+    except Exception as e:
+        logger.exception("Comparison render failed")
+        raise HTTPException(
+            status_code=500, detail=f"Comparison render failed: {e}"
+        ) from e
+
+    return {
+        "message": "Comparison videos rendered",
+        "frames_written": frames_written,
+        "has_raw_video": out_raw.exists(),
+        "has_bytetrack_video": out_bt.exists(),
+        "bytetrack_config": {
+            "track_activation_threshold": request.track_activation_threshold,
+            "lost_track_buffer": request.lost_track_buffer,
+            "minimum_matching_threshold": request.minimum_matching_threshold,
+        },
+    }
+
+
+@router.get("/results/{run_name}/{video_id}/{inference_id}/bytetrack-frames")
+async def get_bytetrack_frames(
+    project_name: str,
+    run_name: str,
+    video_id: str,
+    inference_id: str,
+    track_activation_threshold: float = Query(0.25, ge=0, le=1),
+    lost_track_buffer: int = Query(30, ge=1, le=600),
+    minimum_matching_threshold: float = Query(0.8, ge=0, le=1),
+):
+    """Return a `frames[]` list with per-frame detections re-associated by
+    sv.ByteTrack (including Kalman gap-fills for tracks lost within
+    `lost_track_buffer`).
+
+    This is the same transformation used to render the ByteTrack comparison
+    video, but returned as JSON so the frontend can drive a second schematic
+    and compare raw-vs-tracked stability. Computed on the fly each call; no
+    video decoding is performed.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
+    result_path = result_dir / "result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Inference result not found")
+
+    with open(result_path) as f:
+        result_data = json.load(f)
+
+    # Need fps for ByteTrack's frame-rate-derived buffer math, and video
+    # dimensions to convert normalized boxes to the pixel space the tracker
+    # expects (its default kalman motion model is scale-aware).
+    videos_meta_path = project_path / "videos" / "videos.json"
+    fps = 30.0
+    vid_w = 1920
+    vid_h = 1080
+    if videos_meta_path.exists():
+        try:
+            with open(videos_meta_path) as f:
+                vm = json.load(f)
+            v = vm.get(str(video_id)) or {}
+            fps = float(v.get("fps") or fps)
+            vid_w = int(v.get("width") or vid_w)
+            vid_h = int(v.get("height") or vid_h)
+        except Exception as e:
+            logger.warning(f"Failed to read videos.json for bytetrack-frames: {e}")
+
+    # Fall back to result.json's video_resolution if available.
+    vr = result_data.get("video_resolution") or {}
+    vid_w = int(vr.get("width") or vid_w)
+    vid_h = int(vr.get("height") or vid_h)
+
+    from src.core.inference import compute_bytetrack_frames
+
+    try:
+        frames = await asyncio.to_thread(
+            compute_bytetrack_frames,
+            result_data,
+            fps,
+            vid_w,
+            vid_h,
+            track_activation_threshold,
+            lost_track_buffer,
+            minimum_matching_threshold,
+        )
+    except Exception as e:
+        logger.exception("bytetrack-frames computation failed")
+        raise HTTPException(
+            status_code=500, detail=f"bytetrack-frames failed: {e}"
+        ) from e
+
+    return {
+        "frames": frames,
+        "bytetrack_config": {
+            "track_activation_threshold": track_activation_threshold,
+            "lost_track_buffer": lost_track_buffer,
+            "minimum_matching_threshold": minimum_matching_threshold,
+        },
+    }
 
 
 @router.websocket("/stream/{video_id}")

@@ -138,6 +138,7 @@ export const api = {
       frame_id: number | string
       class_label_id: number
       box: import('@/types').BoundingBox
+      polygon?: number[][]
       track_id?: number
       source?: string
     }) =>
@@ -148,6 +149,7 @@ export const api = {
     update: (projectName: string, annotationId: number, data: Partial<{
       class_label_id: number
       box: import('@/types').BoundingBox
+      polygon: number[][]
       track_id: number
     }>) =>
       request<import('@/types').Annotation>(
@@ -286,7 +288,7 @@ export const api = {
         { method: 'POST', body: JSON.stringify(data) }
       ),
     cancel: (projectName: string, runName: string) =>
-      request<{ status: string }>(`/projects/${projectName}/training/runs/${runName}/cancel`, {
+      request<{ status: string }>(`/projects/${projectName}/training/runs/${encodeURIComponent(runName)}/cancel`, {
         method: 'POST',
       }),
     listRuns: (projectName: string) =>
@@ -323,10 +325,10 @@ export const api = {
 
   // Inference
   inference: {
-    loadModel: (projectName: string, runId: number, device?: string) =>
+    loadModel: (projectName: string, runName: string, device?: string) =>
       request<{ message: string }>(`/projects/${projectName}/inference/load-model`, {
         method: 'POST',
-        body: JSON.stringify({ run_id: runId, device: device ?? undefined }),
+        body: JSON.stringify({ run_name: runName, device: device ?? undefined }),
       }),
     runOnImage: (projectName: string, frameId: number, config?: {
       confidence_threshold?: number
@@ -349,6 +351,59 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(config),
       }),
+    /**
+     * Run inference with a live progress stream (SSE). Yields each event from
+     * the backend so the caller can render a progress bar backed by the actual
+     * per-frame progress of the inference worker.
+     *
+     * Preconditions (no model loaded, missing video, etc.) are returned as
+     * HTTP 4xx *before* the stream opens, so failures from bad state throw
+     * immediately with the backend detail message.
+     */
+    runOnVideoWithProgress: async function* (
+      projectName: string,
+      videoId: number | string,
+      config: import('@/types').InferenceConfig,
+      signal?: AbortSignal,
+    ): AsyncGenerator<import('@/types').InferenceProgressEvent> {
+      const response = await fetch(
+        `${API_BASE}/projects/${projectName}/inference/run-on-video/${videoId}/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config),
+          signal,
+        },
+      )
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'Inference failed' }))
+        throw new Error(error.detail || `Request failed: ${response.status}`)
+      }
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('Streaming not supported')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // SSE events are separated by a blank line (\n\n).
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const part of parts) {
+          const line = part.trim()
+          if (!line.startsWith('data:')) continue
+          const payload = line.slice(5).trim()
+          if (!payload) continue
+          try {
+            yield JSON.parse(payload) as import('@/types').InferenceProgressEvent
+          } catch {
+            // Malformed frame — skip but keep streaming.
+          }
+        }
+      }
+    },
     exportVideo: (projectName: string, videoId: number | string, config: import('@/types').InferenceConfig) =>
       request<{
         output_path: string
@@ -366,8 +421,16 @@ export const api = {
       request<import('@/types').InferenceResultSummary & { frames: import('@/types').InferenceResult[] }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`
       ),
-    videoUrl: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
-      `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video`,
+    videoUrl: (
+      projectName: string,
+      runName: string,
+      videoId: string,
+      inferenceId: string,
+      variant?: 'z' | 'raw' | 'bytetrack',
+    ) => {
+      const base = `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video`
+      return variant ? `${base}?variant=${variant}` : base
+    },
     zVideoUrl: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
       `${getVideoBase() || ''}${API_BASE}/projects/${encodeURIComponent(projectName)}/inference/results/${encodeURIComponent(runName)}/${encodeURIComponent(videoId)}/${encodeURIComponent(inferenceId)}/video?variant=z`,
     deleteResult: (projectName: string, runName: string, videoId: string, inferenceId: string) =>
@@ -414,11 +477,10 @@ export const api = {
       ),
     saveZCalibration: (
       projectName: string, runName: string, videoId: string, inferenceId: string,
-      labels: import('@/types').ZCalibrationLabel[], className: string = 'crane hook',
+      labels: import('@/types').ZCalibrationLabel[], referenceClass: string,
       opts?: {
-        sizeMetric?: string
-        referenceRealWidthMm?: number | null
-        targets?: import('@/types').ZCalibrationTarget[] | null
+        lengthMm?: number | null
+        targetClasses?: string[]
       },
     ) =>
       request<{ message: string; labels_count: number }>(
@@ -427,10 +489,9 @@ export const api = {
           method: 'POST',
           body: JSON.stringify({
             labels,
-            class_name: className,
-            size_metric: opts?.sizeMetric ?? 'h_px',
-            reference_real_width_mm: opts?.referenceRealWidthMm ?? null,
-            targets: opts?.targets ?? null,
+            reference_class: referenceClass,
+            length_mm: opts?.lengthMm ?? null,
+            target_classes: opts?.targetClasses ?? [],
           }),
         }
       ),
@@ -444,6 +505,76 @@ export const api = {
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-export-video`,
         { method: 'POST' }
       ),
+    rerender: (
+      projectName: string,
+      runName: string,
+      videoId: string,
+      inferenceId: string,
+      renderMode: 'polygon' | 'bbox',
+    ) =>
+      request<{ message: string; render_mode: string; frames_written: number; output_path: string }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/rerender`,
+        { method: 'POST', body: JSON.stringify({ render_mode: renderMode }) }
+      ),
+    renderComparison: (
+      projectName: string,
+      runName: string,
+      videoId: string,
+      inferenceId: string,
+      options?: {
+        render_mode?: 'polygon' | 'bbox'
+        track_activation_threshold?: number
+        lost_track_buffer?: number
+        minimum_matching_threshold?: number
+      },
+    ) =>
+      request<{
+        message: string
+        frames_written: number
+        has_raw_video: boolean
+        has_bytetrack_video: boolean
+        bytetrack_config: {
+          track_activation_threshold: number
+          lost_track_buffer: number
+          minimum_matching_threshold: number
+        }
+      }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/render-comparison`,
+        { method: 'POST', body: JSON.stringify(options ?? {}) },
+      ),
+    getBytetrackFrames: (
+      projectName: string,
+      runName: string,
+      videoId: string,
+      inferenceId: string,
+      params?: {
+        track_activation_threshold?: number
+        lost_track_buffer?: number
+        minimum_matching_threshold?: number
+      },
+    ) => {
+      const q = new URLSearchParams()
+      if (params?.track_activation_threshold != null) {
+        q.set('track_activation_threshold', String(params.track_activation_threshold))
+      }
+      if (params?.lost_track_buffer != null) {
+        q.set('lost_track_buffer', String(params.lost_track_buffer))
+      }
+      if (params?.minimum_matching_threshold != null) {
+        q.set('minimum_matching_threshold', String(params.minimum_matching_threshold))
+      }
+      const qs = q.toString()
+      return request<{
+        frames: import('@/types').InferenceResult[]
+        bytetrack_config: {
+          track_activation_threshold: number
+          lost_track_buffer: number
+          minimum_matching_threshold: number
+        }
+      }>(
+        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/bytetrack-frames${qs ? `?${qs}` : ''}`,
+      )
+    },
   },
 
   // Import

@@ -1,12 +1,14 @@
 ---
-description: RF-DETR backbone resolution constraints per model variant
+description: RF-DETR backbone resolution constraints per model variant (detection + segmentation)
 globs: src/core/trainer.py
 alwaysApply: false
 ---
 
 # RF-DETR Resolution Requirements
 
-The RF-DETR backbone requires input resolution to be divisible by `patch_size * num_windows` (called `block_size`). This varies by model:
+## Detection variants
+
+The RF-DETR detection backbone requires input resolution to be divisible by `patch_size * num_windows` (called `block_size`). This varies by model:
 
 | Model       | patch_size | num_windows | block_size |
 |-------------|-----------|-------------|------------|
@@ -27,6 +29,24 @@ resolution = (image_size // block_size) * block_size
 resolution = (image_size // 56) * 56
 ```
 
+## Segmentation variants (RF-DETR-Seg)
+
+Seg variants are published with **fixed native input resolutions**. Do **not** apply `block_size` rounding to them; use the native size directly. `user_image_size` is informational only when `task="segmentation"`.
+
+| Seg model       | native resolution |
+|-----------------|-------------------|
+| RFDETRSegNano   | 312               |
+| RFDETRSegSmall  | 384               |
+| RFDETRSegMedium | 432               |
+| RFDETRSegLarge  | 504               |
+| RFDETRSegXLarge | 624               |
+
+There is **no `RFDETRSegBase`** — when a caller asks for `(task="segmentation", size="base")`, map it to `medium` (432). This is done automatically by `resolve_rfdetr_class()` in `src/core/trainer.py`.
+
+The canonical resolution table lives at `RFDETR_SEG_NATIVE_RESOLUTION` in `src/core/trainer.py`. Keep it in sync with upstream RF-DETR releases.
+
 ## Inference: use the correct model class
 
-When loading a checkpoint for inference, always match the RF-DETR class to the variant that produced the checkpoint. Loading a "small" checkpoint into `RFDETRBase` will crash with a `state_dict` shape mismatch. Use `_load_rfdetr_model()` (in `trainer.py`) or `InferenceRunner._load_rfdetr_model()` instead of importing `RFDETRBase` directly.
+When loading a checkpoint for inference, always match the RF-DETR class to the `(task, size)` tuple that produced the checkpoint. Loading a "small" checkpoint into `RFDETRBase`, or a seg checkpoint into a detection class, will crash with a `state_dict` shape mismatch.
+
+Use `resolve_rfdetr_class(task, size)` (in `src/core/trainer.py`) or the `_load_rfdetr_model()` helpers — both thread through `task` — instead of importing concrete classes directly.

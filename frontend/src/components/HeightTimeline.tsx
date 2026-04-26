@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { InferenceResult } from '@/types'
+import type { BoundingBox, InferenceResult, ZCalibration } from '@/types'
 
 interface PositionTimelineProps {
   frames: InferenceResult[]
@@ -9,6 +9,7 @@ interface PositionTimelineProps {
   targetClass?: string
   videoWidth?: number
   videoHeight?: number
+  zCalibration?: ZCalibration | null
 }
 
 interface DataPoint {
@@ -28,6 +29,31 @@ const METRIC_CONFIG = {
   y: { title: 'Y Position vs. Time', unit: 'px', color: '#fb923c' },
 }
 
+const SVG_W = 800
+const SVG_H = 140
+const PAD_LEFT = 48
+const PAD_RIGHT = 8
+const PAD_TOP = 10
+const PAD_BOTTOM = 24
+const PLOT_W = SVG_W - PAD_LEFT - PAD_RIGHT
+const PLOT_H = SVG_H - PAD_TOP - PAD_BOTTOM
+
+function computeZForBox(
+  cal: ZCalibration | null | undefined,
+  box: BoundingBox,
+  vw: number,
+  vh: number,
+): number | null {
+  if (!cal || !cal.model) return null
+  const s = Math.max(box.width * vw, box.height * vh)
+  if (s <= 0) return null
+  if (cal.model.type === 'k_over_s' && cal.model.k != null) return cal.model.k / s
+  if (cal.model.type === 'linear_inv' && cal.model.m != null && cal.model.c != null) {
+    return cal.model.m / s + cal.model.c
+  }
+  return null
+}
+
 export default function PositionTimeline({
   frames,
   currentTime,
@@ -36,19 +62,20 @@ export default function PositionTimeline({
   targetClass = 'crane hook',
   videoWidth = 1,
   videoHeight = 1,
+  zCalibration,
 }: PositionTimelineProps) {
   const config = METRIC_CONFIG[metric]
 
   const points = useMemo<DataPoint[]>(() => {
     const result: DataPoint[] = []
     for (const frame of frames) {
-      const det = frame.detections.find(
-        (d) => d.class_name === targetClass && (metric !== 'z' || d.z_mm != null)
-      )
+      const det = frame.detections.find((d) => d.class_name === targetClass)
       if (!det) continue
 
       let value: number | undefined
-      if (metric === 'z') value = det.z_mm ?? undefined
+      if (metric === 'z') {
+        value = det.z_mm ?? computeZForBox(zCalibration, det.box, videoWidth, videoHeight) ?? undefined
+      }
       else if (metric === 'x') value = det.box.x * videoWidth
       else value = det.box.y * videoHeight
 
@@ -57,55 +84,54 @@ export default function PositionTimeline({
       }
     }
     return result
-  }, [frames, metric, targetClass, videoWidth, videoHeight])
+  }, [frames, metric, targetClass, videoWidth, videoHeight, zCalibration])
 
-  if (points.length < 2) return null
+  const plot = useMemo(() => {
+    if (points.length < 2) return null
 
-  const values = points.map((p) => p.value)
-  const minV = Math.min(...values)
-  const maxV = Math.max(...values)
-  const vRange = maxV - minV || 1
-  const vPad = vRange * 0.08
-  const plotMinV = minV - vPad
-  const plotMaxV = maxV + vPad
-  const plotVRange = plotMaxV - plotMinV
+    const values = points.map((p) => p.value)
+    const minV = Math.min(...values)
+    const maxV = Math.max(...values)
+    const vRange = maxV - minV || 1
+    const vPad = vRange * 0.08
+    const plotMinV = minV - vPad
+    const plotMaxV = maxV + vPad
+    const plotVRange = plotMaxV - plotMinV
 
-  const svgW = 800
-  const svgH = 140
-  const padLeft = 48
-  const padRight = 8
-  const padTop = 10
-  const padBottom = 24
-  const plotW = svgW - padLeft - padRight
-  const plotH = svgH - padTop - padBottom
+    const minT = 0
+    const maxT = duration && duration > 0 ? duration : points[points.length - 1].timestamp
+    const tRange = maxT - minT || 1
 
-  const minT = 0
-  const maxT = duration && duration > 0 ? duration : points[points.length - 1].timestamp
-  const tRange = maxT - minT || 1
+    const toX = (t: number) => PAD_LEFT + ((t - minT) / tRange) * PLOT_W
+    const toY = (v: number) => PAD_TOP + PLOT_H - ((v - plotMinV) / plotVRange) * PLOT_H
 
-  const toX = (t: number) => padLeft + ((t - minT) / tRange) * plotW
-  const toY = (v: number) => padTop + plotH - ((v - plotMinV) / plotVRange) * plotH
+    const pathD = points
+      .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(p.timestamp).toFixed(1)},${toY(p.value).toFixed(1)}`)
+      .join(' ')
 
-  const pathD = points
-    .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(p.timestamp).toFixed(1)},${toY(p.value).toFixed(1)}`)
-    .join(' ')
+    const areaD = `${pathD} L${toX(points[points.length - 1].timestamp).toFixed(1)},${(PAD_TOP + PLOT_H).toFixed(1)} L${toX(points[0].timestamp).toFixed(1)},${(PAD_TOP + PLOT_H).toFixed(1)} Z`
 
-  const areaD = `${pathD} L${toX(points[points.length - 1].timestamp).toFixed(1)},${(padTop + plotH).toFixed(1)} L${toX(points[0].timestamp).toFixed(1)},${(padTop + plotH).toFixed(1)} Z`
+    const yTickCount = 3
+    const yTicks = Array.from({ length: yTickCount + 1 }, (_, i) => {
+      const v = minV + (vRange * i) / yTickCount
+      return { v, y: toY(v), label: `${Math.round(v)}` }
+    })
+
+    const xTickInterval = tRange <= 30 ? 5 : tRange <= 120 ? 15 : tRange <= 300 ? 30 : 60
+    const xTicks: { t: number; x: number; label: string }[] = []
+    for (let t = 0; t <= maxT; t += xTickInterval) {
+      xTicks.push({ t, x: toX(t), label: formatTime(t) })
+    }
+
+    return { minV, maxV, minT, tRange, pathD, areaD, yTicks, xTicks }
+  }, [points, duration])
+
+  if (!plot) return null
 
   const showPlayhead = currentTime != null && duration != null && duration > 0
-  const playheadX = showPlayhead ? toX(currentTime!) : 0
-
-  const yTickCount = 3
-  const yTicks = Array.from({ length: yTickCount + 1 }, (_, i) => {
-    const v = minV + (vRange * i) / yTickCount
-    return { v, label: `${Math.round(v)}` }
-  })
-
-  const xTickInterval = tRange <= 30 ? 5 : tRange <= 120 ? 15 : tRange <= 300 ? 30 : 60
-  const xTicks: { t: number; label: string }[] = []
-  for (let t = 0; t <= maxT; t += xTickInterval) {
-    xTicks.push({ t, label: formatTime(t) })
-  }
+  const playheadX = showPlayhead
+    ? PAD_LEFT + (((currentTime ?? 0) - plot.minT) / plot.tRange) * PLOT_W
+    : 0
 
   return (
     <div className="w-full">
@@ -114,22 +140,22 @@ export default function PositionTimeline({
           {config.title}
         </span>
         <span className="text-[10px] text-muted-foreground font-mono">
-          {Math.round(minV)} – {Math.round(maxV)} {config.unit}
+          {Math.round(plot.minV)} – {Math.round(plot.maxV)} {config.unit}
         </span>
       </div>
       <svg
-        viewBox={`0 0 ${svgW} ${svgH}`}
+        viewBox={`0 0 ${SVG_W} ${SVG_H}`}
         className="w-full rounded-lg border border-border bg-neutral-900/80"
         preserveAspectRatio="none"
       >
         {/* Horizontal grid lines */}
-        {yTicks.map((tick) => (
+        {plot.yTicks.map((tick) => (
           <line
             key={tick.v}
-            x1={padLeft}
-            y1={toY(tick.v)}
-            x2={padLeft + plotW}
-            y2={toY(tick.v)}
+            x1={PAD_LEFT}
+            y1={tick.y}
+            x2={PAD_LEFT + PLOT_W}
+            y2={tick.y}
             stroke="currentColor"
             strokeOpacity={0.07}
             strokeWidth={1}
@@ -137,11 +163,11 @@ export default function PositionTimeline({
         ))}
 
         {/* Y-axis labels */}
-        {yTicks.map((tick) => (
+        {plot.yTicks.map((tick) => (
           <text
             key={tick.v}
-            x={padLeft - 4}
-            y={toY(tick.v) + 3}
+            x={PAD_LEFT - 4}
+            y={tick.y + 3}
             textAnchor="end"
             className="fill-muted-foreground"
             fontSize={9}
@@ -153,8 +179,8 @@ export default function PositionTimeline({
 
         {/* Y-axis unit */}
         <text
-          x={padLeft - 4}
-          y={padTop - 1}
+          x={PAD_LEFT - 4}
+          y={PAD_TOP - 1}
           textAnchor="end"
           className="fill-muted-foreground"
           fontSize={8}
@@ -163,11 +189,11 @@ export default function PositionTimeline({
         </text>
 
         {/* X-axis labels */}
-        {xTicks.map((tick) => (
+        {plot.xTicks.map((tick) => (
           <text
             key={tick.t}
-            x={toX(tick.t)}
-            y={svgH - 4}
+            x={tick.x}
+            y={SVG_H - 4}
             textAnchor="middle"
             className="fill-muted-foreground"
             fontSize={9}
@@ -178,11 +204,11 @@ export default function PositionTimeline({
         ))}
 
         {/* Area fill */}
-        <path d={areaD} fill={config.color} fillOpacity={0.08} />
+        <path d={plot.areaD} fill={config.color} fillOpacity={0.08} />
 
         {/* Line */}
         <path
-          d={pathD}
+          d={plot.pathD}
           fill="none"
           stroke={config.color}
           strokeWidth={1.5}
@@ -195,16 +221,16 @@ export default function PositionTimeline({
           <>
             <line
               x1={playheadX}
-              y1={padTop}
+              y1={PAD_TOP}
               x2={playheadX}
-              y2={padTop + plotH}
+              y2={PAD_TOP + PLOT_H}
               stroke="#ffffff"
               strokeOpacity={0.6}
               strokeWidth={1.5}
             />
             <circle
               cx={playheadX}
-              cy={padTop}
+              cy={PAD_TOP}
               r={3}
               fill="#ffffff"
               fillOpacity={0.6}

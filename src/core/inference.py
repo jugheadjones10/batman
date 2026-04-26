@@ -31,6 +31,9 @@ class Detection:
     confidence: float
     track_id: int | None = None
     z_mm: float | None = None
+    # Normalised instance segmentation polygon, list of [x, y] in [0, 1] image coords.
+    # Only populated when running a segmentation model (RF-DETR-Seg).
+    mask: list[list[float]] | None = None
 
 
 @dataclass
@@ -112,6 +115,7 @@ class RFDETRInference:
         checkpoint: Path,
         class_names: list[str] | None = None,
         model_size: str = "base",
+        task: str = "detection",
     ):
         """
         Initialize inference engine.
@@ -120,9 +124,11 @@ class RFDETRInference:
             checkpoint: Path to model checkpoint
             class_names: List of class names (loaded from class_info.json if not provided)
             model_size: Model size ('base', 'large', etc.)
+            task: "detection" or "segmentation"
         """
         self.checkpoint = Path(checkpoint)
         self.model_size = model_size
+        self.task = task
 
         # Load class names
         if class_names:
@@ -205,7 +211,8 @@ class RFDETRInference:
             optimize_compile: Whether to use JIT compilation (may fail on some systems)
         """
         import torch
-        from rfdetr import RFDETRBase, RFDETRLarge
+
+        from src.core.trainer import resolve_rfdetr_class
 
         load_start = time.time()
 
@@ -219,11 +226,11 @@ class RFDETRInference:
                 device = "cpu"
 
         self._device = device
-        logger.info(f"Loading model on {device}")
+        logger.info(f"Loading model on {device} (task={self.task}, size={self.model_size})")
 
         # Load model
         weights_start = time.time()
-        ModelClass = RFDETRLarge if self.model_size == "large" else RFDETRBase
+        ModelClass = resolve_rfdetr_class(self.task, self.model_size)
         self.model = ModelClass(pretrain_weights=str(self.checkpoint))
         weights_time = time.time() - weights_start
         logger.info(f"Loaded pretrained weights in {weights_time:.2f}s")
@@ -277,22 +284,32 @@ class RFDETRInference:
         # Run inference
         detections = self.model.predict(image, threshold=config.confidence_threshold)
 
-        # Convert to Detection objects
+        # Grab image size for mask normalisation (PIL → (w, h))
+        img_w, img_h = image.size
+
+        masks = getattr(detections, "mask", None)
+
         results = []
         if hasattr(detections, "xyxy") and len(detections.xyxy) > 0:
-            for i in range(len(detections.xyxy)):
+            n = len(detections.xyxy)
+            has_masks = masks is not None and len(masks) == n
+            for i in range(n):
                 class_id = int(detections.class_id[i])
                 class_name = (
                     self.class_names[class_id]
                     if class_id < len(self.class_names)
                     else f"class_{class_id}"
                 )
+                poly = None
+                if has_masks:
+                    poly = _mask_to_polygon_norm_core(masks[i], img_w, img_h)
                 results.append(
                     Detection(
                         bbox=tuple(detections.xyxy[i].tolist()),
                         class_id=class_id,
                         class_name=class_name,
                         confidence=float(detections.confidence[i]),
+                        mask=poly,
                     )
                 )
 
@@ -498,11 +515,53 @@ COLOR_PALETTE = [
 ]
 
 
+def _mask_to_polygon_norm_core(mask, img_w: int, img_h: int) -> list[list[float]] | None:
+    """Extract largest-contour polygon from a binary mask, normalised to [0,1].
+
+    Returns None if the mask is empty, degenerate, or any conversion step fails.
+    Used by RFDETRInference.predict_image for segmentation models.
+    """
+    try:
+        import cv2
+
+        if hasattr(mask, "detach"):
+            mask = mask.detach().cpu().numpy()
+        elif hasattr(mask, "cpu"):
+            mask = mask.cpu().numpy()
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = arr.squeeze()
+        if arr.ndim != 2:
+            return None
+        bin_mask = (arr > 0).astype(np.uint8)
+        if bin_mask.max() == 0:
+            return None
+
+        contours, _ = cv2.findContours(
+            bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return None
+        biggest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(biggest) <= 0:
+            return None
+
+        simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
+        pts = simplified.reshape(-1, 2)
+        if len(pts) < 3:
+            return None
+
+        return [[float(x) / img_w, float(y) / img_h] for x, y in pts]
+    except Exception:
+        return None
+
+
 def draw_detections(
     image: np.ndarray,
     detections: list[Detection],
     thickness: int = 2,
     font_scale: float = 0.6,
+    render_mode: str = "polygon",
 ) -> np.ndarray:
     """
     Draw detection bounding boxes with class-name-only labels on an image.
@@ -512,19 +571,44 @@ def draw_detections(
         detections: List of Detection objects
         thickness: Line thickness
         font_scale: Font scale for box labels
+        render_mode: One of:
+            - "polygon": draw polygon if mask present, else fall back to bbox (default)
+            - "bbox":    always draw bbox, never polygon
 
     Returns:
         Annotated image
     """
     import cv2
 
+    if render_mode not in ("polygon", "bbox"):
+        render_mode = "polygon"
+
     result = image.copy()
+    h, w = result.shape[:2]
+    overlay = None  # Allocate lazily only if we actually have masks to draw
 
     for det in detections:
         x1, y1, x2, y2 = [int(c) for c in det.bbox]
         color = COLOR_PALETTE[det.class_id % len(COLOR_PALETTE)]
 
-        cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
+        drew_polygon = False
+        if render_mode != "bbox" and det.mask:
+            try:
+                pts_px = np.array(
+                    [[int(round(px * w)), int(round(py * h))] for px, py in det.mask],
+                    dtype=np.int32,
+                )
+                if len(pts_px) >= 3:
+                    if overlay is None:
+                        overlay = result.copy()
+                    cv2.fillPoly(overlay, [pts_px], color)
+                    cv2.polylines(result, [pts_px], True, color, max(1, thickness - 1))
+                    drew_polygon = True
+            except Exception:
+                pass
+
+        if not drew_polygon:
+            cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
         label = det.class_name
         (label_w, label_h), baseline = cv2.getTextSize(
@@ -541,7 +625,544 @@ def draw_detections(
             thickness,
         )
 
+    if overlay is not None:
+        cv2.addWeighted(overlay, 0.35, result, 0.65, 0, dst=result)
+
     return result
+
+
+def rerender_detected_video(
+    source_video_path: Path,
+    result_json_path: Path,
+    output_path: Path,
+    render_mode: str = "polygon",
+) -> int:
+    """Re-bake the overlay video from a saved result.json + the source video.
+
+    Reads per-frame detections from `result_json_path` and writes an mp4 with
+    overlays drawn according to `render_mode` (see draw_detections for values).
+    The output is written first in mp4v and then transcoded to H.264 via ffmpeg
+    so browsers can stream it with seeking.
+
+    Args:
+        source_video_path: Path to the original source video.
+        result_json_path: Path to result.json produced by inference.
+        output_path: Destination mp4 (e.g. .../detected.mp4). Will be overwritten.
+        render_mode: One of "polygon" | "bbox".
+
+    Returns:
+        Number of frames written.
+    """
+    import cv2
+    import json as _json
+    import subprocess as _sp
+
+    if not source_video_path.exists():
+        raise FileNotFoundError(f"Source video not found: {source_video_path}")
+    if not result_json_path.exists():
+        raise FileNotFoundError(f"result.json not found: {result_json_path}")
+
+    with open(result_json_path) as f:
+        data = _json.load(f)
+
+    frames_list = data.get("frames", [])
+    frame_map: dict[int, dict] = {f["frame_number"]: f for f in frames_list if "frame_number" in f}
+
+    cap = cv2.VideoCapture(str(source_video_path))
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (vid_w, vid_h))
+        try:
+            frames_written = 0
+            for frame_num in range(total_frames):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame_data = frame_map.get(frame_num)
+                if frame_data:
+                    det_objects = [
+                        Detection(
+                            bbox=(
+                                (d["box"]["x"] - d["box"]["width"] / 2) * vid_w,
+                                (d["box"]["y"] - d["box"]["height"] / 2) * vid_h,
+                                (d["box"]["x"] + d["box"]["width"] / 2) * vid_w,
+                                (d["box"]["y"] + d["box"]["height"] / 2) * vid_h,
+                            ),
+                            class_id=d.get("class_id", 0),
+                            class_name=d.get("class_name", ""),
+                            confidence=d.get("confidence", 1.0),
+                            track_id=d.get("track_id"),
+                            z_mm=d.get("z_mm"),
+                            mask=d.get("mask"),
+                        )
+                        for d in frame_data.get("detections", [])
+                    ]
+                    frame = draw_detections(frame, det_objects, render_mode=render_mode)
+
+                writer.write(frame)
+                frames_written += 1
+        finally:
+            writer.release()
+    finally:
+        cap.release()
+
+    # Re-encode to H.264 so the browser can stream it with Range seeking.
+    if output_path.exists():
+        tmp_path = output_path.with_suffix(".tmp.mp4")
+        try:
+            proc = _sp.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(output_path),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-an",
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                timeout=600,
+            )
+            if proc.returncode == 0 and tmp_path.exists():
+                tmp_path.replace(output_path)
+        except FileNotFoundError:
+            # ffmpeg not installed — leave the mp4v file as-is.
+            pass
+        except Exception:
+            pass
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    return frames_written
+
+
+def render_comparison_videos(
+    source_video_path: Path,
+    result_json_path: Path,
+    out_raw_path: Path,
+    out_bytetrack_path: Path,
+    render_mode: str = "polygon",
+    track_activation_threshold: float = 0.25,
+    lost_track_buffer: int = 30,
+    minimum_matching_threshold: float = 0.8,
+) -> int:
+    """Render a pair of annotated MP4s from an existing result.json for A/B
+    comparison of raw per-frame detections vs sv.ByteTrack.
+
+    - out_raw_path: per-frame detections drawn as-is, with no tracker at all.
+      Shows the native flicker / missed frames of the detector.
+    - out_bytetrack_path: the same per-frame detections piped through
+      sv.ByteTrack. Both matched detections and currently-lost tracks (still
+      within lost_track_buffer) are rendered, so Kalman predictions visibly
+      fill in missed frames. ByteTrack is an online / causal tracker, so the
+      behaviour here is identical to what it would produce live.
+
+    Both videos are written in a single pass over the source video and then
+    remuxed to H.264 via ffmpeg so browsers can stream them with Range
+    seeking. The function is safe to call multiple times; outputs are
+    overwritten deterministically.
+
+    Args:
+        source_video_path: Path to the original source video.
+        result_json_path: Path to result.json produced by a prior inference run.
+        out_raw_path: Destination mp4 for the untracked baseline.
+        out_bytetrack_path: Destination mp4 for the ByteTrack variant.
+        render_mode: One of "polygon" | "bbox". Applies to the raw side;
+            the ByteTrack side always draws bboxes because segmentation masks
+            are not preserved through the tracker's association step.
+        track_activation_threshold: ByteTrack high-confidence gating threshold.
+        lost_track_buffer: Frames a lost track is kept alive with Kalman
+            predictions before being removed.
+        minimum_matching_threshold: IoU association threshold.
+
+    Returns:
+        Number of frames written per output.
+    """
+    import cv2
+    import json as _json
+    import subprocess as _sp
+
+    if not source_video_path.exists():
+        raise FileNotFoundError(f"Source video not found: {source_video_path}")
+    if not result_json_path.exists():
+        raise FileNotFoundError(f"result.json not found: {result_json_path}")
+
+    with open(result_json_path) as f:
+        data = _json.load(f)
+
+    frames_list = data.get("frames", [])
+    frame_map: dict[int, dict] = {
+        f["frame_number"]: f for f in frames_list if "frame_number" in f
+    }
+
+    cap = cv2.VideoCapture(str(source_video_path))
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Precompute class-aware ByteTrack output so the video overlay and the
+        # schematic comparison show exactly the same tracked data (see the
+        # docstring on compute_bytetrack_frames for why per-class tracking
+        # matters — class-agnostic IoU association makes spreader/container
+        # steal each other's tracks).
+        bt_frames = compute_bytetrack_frames(
+            data,
+            fps=fps,
+            vid_w=vid_w,
+            vid_h=vid_h,
+            track_activation_threshold=track_activation_threshold,
+            lost_track_buffer=lost_track_buffer,
+            minimum_matching_threshold=minimum_matching_threshold,
+        )
+        bt_frame_map: dict[int, dict] = {
+            f["frame_number"]: f for f in bt_frames if "frame_number" in f
+        }
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        raw_writer = cv2.VideoWriter(str(out_raw_path), fourcc, fps, (vid_w, vid_h))
+        bt_writer = cv2.VideoWriter(
+            str(out_bytetrack_path), fourcc, fps, (vid_w, vid_h)
+        )
+
+        def _denorm_dets(frame_data: dict | None) -> list[Detection]:
+            if not frame_data:
+                return []
+            dets: list[Detection] = []
+            for d in frame_data.get("detections", []):
+                b = d["box"]
+                dets.append(
+                    Detection(
+                        bbox=(
+                            (b["x"] - b["width"] / 2) * vid_w,
+                            (b["y"] - b["height"] / 2) * vid_h,
+                            (b["x"] + b["width"] / 2) * vid_w,
+                            (b["y"] + b["height"] / 2) * vid_h,
+                        ),
+                        class_id=d.get("class_id", 0),
+                        class_name=d.get("class_name", ""),
+                        confidence=d.get("confidence", 1.0),
+                        track_id=d.get("track_id"),
+                        z_mm=d.get("z_mm"),
+                        mask=d.get("mask"),
+                    )
+                )
+            return dets
+
+        try:
+            frames_written = 0
+            for frame_num in range(total_frames):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                raw_dets = _denorm_dets(frame_map.get(frame_num))
+                bt_dets = _denorm_dets(bt_frame_map.get(frame_num))
+
+                raw_writer.write(
+                    draw_detections(frame, raw_dets, render_mode=render_mode)
+                )
+                bt_writer.write(draw_detections(frame, bt_dets, render_mode="bbox"))
+                frames_written += 1
+        finally:
+            raw_writer.release()
+            bt_writer.release()
+    finally:
+        cap.release()
+
+    for out_path in (out_raw_path, out_bytetrack_path):
+        if not out_path.exists():
+            continue
+        tmp_path = out_path.with_suffix(".tmp.mp4")
+        try:
+            proc = _sp.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(out_path),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-an",
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                timeout=600,
+            )
+            if proc.returncode == 0 and tmp_path.exists():
+                tmp_path.replace(out_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    return frames_written
+
+
+def compute_bytetrack_frames(
+    result_data: dict,
+    fps: float,
+    vid_w: int,
+    vid_h: int,
+    track_activation_threshold: float = 0.25,
+    lost_track_buffer: int = 30,
+    minimum_matching_threshold: float = 0.8,
+) -> list[dict]:
+    """Re-run sv.ByteTrack over an existing result.json's per-frame detections
+    and return a `frames[]` list in the same normalized schema.
+
+    The returned frames preserve `frame_number`, `timestamp`, and
+    `is_keyframe`, but replace `detections` with ByteTrack's output:
+
+      - Matched tracks use the tracker's Kalman-posterior box (the KF state
+        after fusing the prior prediction with the new measurement), tagged
+        with a stable per-class `track_id` and `track_source="matched"`.
+        This is what supervision
+        computes internally but discards in `update_with_detections`; we
+        recover it via `tracker.tracked_tracks[*].tlbr`. Surfacing the
+        posterior instead of the raw input bbox is the cheapest way to
+        reduce RF-DETR's frame-to-frame box jitter (which compounds badly
+        through `z ∝ 1 / max(w_px, h_px)` on the schematic).
+      - Tracks currently inside `lost_track_buffer` without a matching
+        detection are emitted with their Kalman-predicted box (prior only)
+        and `track_source="lost"`.
+        Both matched and lost boxes therefore come from the same KF state
+        vector, so there is no visual discontinuity between measured and
+        extrapolated frames.
+      - No `z_mm` is carried on the output. The persisted `z_mm` in
+        `result.json` was computed from the *raw* bbox, so pairing it with
+        a smoothed bbox would re-introduce the jitter on the only signal
+        that's consumed for z. The UI recomputes z on the fly from the
+        emitted box via the project calibration (same `k / max(w_px, h_px)`
+        formula the backend uses), keeping box and z strictly consistent.
+
+    The tracker runs CLASS-AWARE: one independent `sv.ByteTrack` per class.
+    This matters because supervision's ByteTrack does pure IoU association
+    and happily matches a track of class A to a detection of class B if
+    their boxes overlap — which they always do for e.g. a spreader sitting
+    on top of a container. Empirically that causes ~30% of long-running
+    tracks to swap classes between frames, making the raw vs. tracked
+    schematic flicker worse than the raw trace. Per-class trackers
+    eliminate that failure mode entirely.
+
+    No video I/O is performed; this is a pure transformation of the JSON.
+    """
+    import supervision as sv
+
+    raw_frames = sorted(
+        result_data.get("frames", []),
+        key=lambda fr: fr.get("frame_number", 0),
+    )
+
+    def _to_norm_box(x1: float, y1: float, x2: float, y2: float) -> dict:
+        return {
+            "x": float(((x1 + x2) / 2.0) / vid_w),
+            "y": float(((y1 + y2) / 2.0) / vid_h),
+            "width": float((x2 - x1) / vid_w),
+            "height": float((y2 - y1) / vid_h),
+        }
+
+    def _new_tracker() -> "sv.ByteTrack":
+        return sv.ByteTrack(
+            track_activation_threshold=track_activation_threshold,
+            lost_track_buffer=lost_track_buffer,
+            minimum_matching_threshold=minimum_matching_threshold,
+            frame_rate=int(round(fps)) if fps > 0 else 30,
+        )
+
+    # Per-class state. Each class_name gets its own ByteTrack instance, and
+    # we remap the tracker's (local, per-class) ids onto globally-unique ids
+    # so the consumer never sees a collision between classes.
+    class_trackers: dict[str, sv.ByteTrack] = {}
+    # (class_name, local_tid) -> (global_tid, class_id)
+    tid_map: dict[tuple[str, int], tuple[int, int]] = {}
+    global_tid_counter = 0
+
+    out: list[dict] = []
+    for frame in raw_frames:
+        raw_dets: list[dict] = list(frame.get("detections", []))
+
+        # Group detections by class_name so each tracker only sees its own
+        # class. Retain original indices to merge z_mm back in.
+        by_cls: dict[str, list[tuple[int, dict]]] = {}
+        for i, d in enumerate(raw_dets):
+            cname = d.get("class_name", "")
+            by_cls.setdefault(cname, []).append((i, d))
+
+        # Ensure every class we've ever seen gets .update() called this
+        # frame (even with zero detections) so its Kalman predictions and
+        # lost-buffer bookkeeping advance in sync with the video clock.
+        all_classes = set(class_trackers.keys()) | set(by_cls.keys())
+
+        det_out: list[dict] = []
+        for cname in all_classes:
+            tracker = class_trackers.get(cname)
+            if tracker is None:
+                tracker = _new_tracker()
+                class_trackers[cname] = tracker
+
+            cls_dets = by_cls.get(cname, [])
+            if cls_dets:
+                xyxy = np.array(
+                    [
+                        [
+                            (d["box"]["x"] - d["box"]["width"] / 2) * vid_w,
+                            (d["box"]["y"] - d["box"]["height"] / 2) * vid_h,
+                            (d["box"]["x"] + d["box"]["width"] / 2) * vid_w,
+                            (d["box"]["y"] + d["box"]["height"] / 2) * vid_h,
+                        ]
+                        for _, d in cls_dets
+                    ],
+                    dtype=np.float32,
+                )
+                confidence = np.array(
+                    [d.get("confidence", 1.0) for _, d in cls_dets],
+                    dtype=np.float32,
+                )
+                class_id = np.array(
+                    [d.get("class_id", 0) for _, d in cls_dets],
+                    dtype=int,
+                )
+                sv_in = sv.Detections(
+                    xyxy=xyxy,
+                    confidence=confidence,
+                    class_id=class_id,
+                    data={"local_idx": np.arange(len(cls_dets), dtype=int)},
+                )
+            else:
+                sv_in = sv.Detections(
+                    xyxy=np.empty((0, 4), dtype=np.float32),
+                    confidence=np.empty((0,), dtype=np.float32),
+                    class_id=np.empty((0,), dtype=int),
+                    data={"local_idx": np.empty((0,), dtype=int)},
+                )
+
+            tracked = tracker.update_with_detections(sv_in)
+
+            # supervision's `update_with_detections` runs the Kalman update
+            # internally (so every matched STrack's `mean` is the posterior)
+            # but then returns the *raw input* detections with only a
+            # `tracker_id` stapled on — i.e. the smoothing is computed and
+            # thrown away. Build an external_track_id → STrack lookup off
+            # the tracker's private state so we can emit the posterior bbox
+            # (`strack.tlbr`) instead of `tracked.xyxy[i]`. This removes the
+            # matched-vs-lost asymmetry: every box we emit, measured or
+            # extrapolated, now comes from the same KF state vector.
+            strack_by_tid: dict[int, object] = {
+                int(t.external_track_id): t
+                for t in tracker.tracked_tracks
+                if getattr(t, "external_track_id", -1) >= 0
+            }
+
+            for i in range(len(tracked)):
+                local_tid = int(tracked.tracker_id[i])
+                cid = int(tracked.class_id[i])
+
+                key = (cname, local_tid)
+                mapping = tid_map.get(key)
+                if mapping is None:
+                    global_tid_counter += 1
+                    mapping = (global_tid_counter, cid)
+                    tid_map[key] = mapping
+                gtid, _ = mapping
+
+                strack = strack_by_tid.get(local_tid)
+                if strack is not None:
+                    tlbr = strack.tlbr
+                    x1, y1, x2, y2 = (
+                        float(tlbr[0]),
+                        float(tlbr[1]),
+                        float(tlbr[2]),
+                        float(tlbr[3]),
+                    )
+                else:
+                    # Defensive fallback — shouldn't happen, because every
+                    # tracker_id in `tracked` came from an STrack that was
+                    # just joined into `self.tracked_tracks`.
+                    x1, y1, x2, y2 = (float(c) for c in tracked.xyxy[i])
+
+                det: dict = {
+                    "box": _to_norm_box(x1, y1, x2, y2),
+                    "confidence": float(tracked.confidence[i]),
+                    "class_id": cid,
+                    "class_name": cname,
+                    "track_id": gtid,
+                    "track_source": "matched",
+                }
+                # Deliberately NO `z_mm` here; see the function docstring.
+                # The emitted box is Kalman-smoothed, so the raw-bbox-based
+                # `z_mm` from result.json would be inconsistent; the UI
+                # recomputes z from this box via the project calibration.
+                det_out.append(det)
+
+            # Kalman fills from this class's lost buffer (no z_mm — UI
+            # re-estimates z from the predicted box via calibration).
+            for strack in tracker.lost_tracks:
+                local_tid = int(getattr(strack, "external_track_id", -1))
+                if local_tid < 0:
+                    continue
+                mapping = tid_map.get((cname, local_tid))
+                if mapping is None:
+                    # Never had a matched detection for this track → no class
+                    # metadata to attach; skip.
+                    continue
+                gtid, cid = mapping
+                tlbr = strack.tlbr
+                x1, y1, x2, y2 = (
+                    float(tlbr[0]),
+                    float(tlbr[1]),
+                    float(tlbr[2]),
+                    float(tlbr[3]),
+                )
+                det_out.append(
+                    {
+                        "box": _to_norm_box(x1, y1, x2, y2),
+                        "confidence": float(getattr(strack, "score", 0.0)),
+                        "class_id": cid,
+                        "class_name": cname,
+                        "track_id": gtid,
+                        "track_source": "lost",
+                    }
+                )
+
+        out.append(
+            {
+                "frame_number": int(frame.get("frame_number", 0)),
+                "timestamp": float(frame.get("timestamp", 0.0)),
+                "is_keyframe": bool(frame.get("is_keyframe", False)),
+                "detections": det_out,
+            }
+        )
+
+    return out
 
 
 def save_results_json(
@@ -580,6 +1201,7 @@ def save_results_json(
                     "confidence": det.confidence,
                     "track_id": det.track_id,
                     **({"z_mm": det.z_mm} if det.z_mm is not None else {}),
+                    **({"mask": det.mask} if det.mask is not None else {}),
                 }
                 for det in frame.detections
             ],
