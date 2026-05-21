@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import type { BoundingBox, InferenceResult, ZCalibration } from '@/types'
+import { computeZForDetection } from '@/lib/zCalibration'
+import type { InferenceResult, ZCalibration } from '@/types'
 
 const DETECTION_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
@@ -42,22 +43,6 @@ function findClosestFrameIndex(frames: InferenceResult[], time: number): number 
     return lo - 1
   }
   return lo
-}
-
-function computeZForBox(
-  cal: ZCalibration | null | undefined,
-  box: BoundingBox,
-  vw: number,
-  vh: number,
-): number | null {
-  if (!cal || !cal.model) return null
-  const s = Math.max(box.width * vw, box.height * vh)
-  if (s <= 0) return null
-  if (cal.model.type === 'k_over_s' && cal.model.k != null) return cal.model.k / s
-  if (cal.model.type === 'linear_inv' && cal.model.m != null && cal.model.c != null) {
-    return cal.model.m / s + cal.model.c
-  }
-  return null
 }
 
 export default function LiveDetectionReadout({
@@ -132,7 +117,7 @@ export default function LiveDetectionReadout({
         trackSource: best.track_source ?? null,
         x: best.box.x * videoWidth,
         y: best.box.y * videoHeight,
-        z: best.z_mm ?? computeZForBox(zCalibration, best.box, videoWidth, videoHeight),
+        z: best.z_mm ?? computeZForDetection(zCalibration, best, videoWidth, videoHeight),
       }
     })
     return result

@@ -2,7 +2,7 @@
 
 Batman turns bounding boxes into **real-world distance** (`z_mm`). Given a detection with a pixel-sized box, the system reports how far the object is from the camera — typically used to read crane-hook position along the optical axis, or to measure how far away a shipping container is in a top-down yard view.
 
-This guide explains the intuition, the math, and the three calibration modes the system actually ships.
+This guide explains the intuition, the math, the measurement sources, and the calibration modes the system actually ships.
 
 > For the angular counterpart — how *twisted* the container is relative to the spreader — see [Segmentation & Skew Angle](segmentation-and-skew.md). `z_mm` and `skew_deg` live in the same `result.json` and render side-by-side in the live overlay.
 
@@ -176,7 +176,7 @@ Whatever fit you run on the spreader (Mode 1 or Mode 2) transfers **directly** t
 
 ### The fit
 
-Run Mode 1 or Mode 2 exactly as described above on the reference class (the one whose distance you can measure directly, i.e. the spreader). Then apply the resulting model to every detection whose class is in the target list:
+Run Mode 1 or Mode 2 exactly as described above on the reference class (the one whose distance you can measure directly, i.e. the spreader). Then apply the resulting model to the detections whose class is in the target list:
 
 - 1 label → every target uses `Z = k / s`
 - 2+ labels → every target uses `Z = m / s + c`
@@ -203,18 +203,51 @@ You pick the length of the container being lifted; Batman assumes the spreader h
 
 If no length is selected and the target list is empty, the system fits a plain single-class model on the reference class only. The simple case stays simple.
 
+## Measurement sources
+
+The model always fits against a pixel size `s`, but `s` can now come from either of two sources.
+
+### Whole bbox longer side
+
+This is the historical default:
+
+```
+s = max(bbox.width × video_width_px,
+        bbox.height × video_height_px)
+```
+
+Use it when the whole spreader or reference object is visible and the detector's bbox is stable.
+
+### Round feature → equivalent length
+
+If the whole spreader is partially missing but the small round top feature is visible, the system can detect that feature and scale its pixel diameter into the equivalent whole-spreader/container length:
+
+```
+diameter_px = max(round_feature_bbox.width × video_width_px,
+                  round_feature_bbox.height × video_height_px)
+
+equivalent_size_ratio = length_mm / round_feature_diameter_mm
+s = diameter_px × equivalent_size_ratio
+```
+
+`length_mm` is the same 20 / 40 / 45 ft spreader/container length used by the multi-target model. `round_feature_diameter_mm` is the measured physical diameter of the round feature. The ratio is computed and stored in `result.json` for auditability; it is not hardcoded in the app.
+
+This keeps the calibration on the same physical scale as whole container bboxes. During estimation, the round feature class uses the scaled `s`, while container targets still use their own whole-bbox longer side.
+
 ---
 
 ## Using it from the UI
 
 Open a finished inference run on the **Inference** page and expand the **Z-Axis Calibration** panel.
 
-1. **Container length (ℓ)** — dropdown of 20 / 40 / 45 ft. Sets the shared real-world size for the reference and every target. Leave blank to run a plain single-class fit on the reference with no targets.
-2. **Reference Class** — the class you'll calibrate with (the one whose distance you can actually measure; typically the spreader).
-3. **Estimation Targets** — one row per additional class you want distances for. They all inherit the same fit as the reference; there is no per-target size field. The reference class is auto-added if missing.
-4. **Calibration Points** — for each calibration frame, enter the frame number and ground-truth distance in mm. 1 works; 2+ is better.
-5. **Calibrate & Estimate** — fits the model, writes `z_mm` onto every matching detection in every frame, and persists into the run's `result.json`.
-6. **Re-export Video with Z** — re-encodes the annotated video with the distance overlays baked in.
+1. **Measurement Source** — choose the whole bbox longer side, or the round feature diameter scaled to equivalent spreader length.
+2. **Container/spreader length (ℓ)** — dropdown of 20 / 40 / 45 ft. Sets the shared real-world size for the spreader and every target. It is required for round-feature mode.
+3. **Round feature diameter** — shown only in round-feature mode. Enter the physical feature diameter in mm; the UI previews `length_mm / round_feature_diameter_mm`.
+4. **Reference Class / Round Feature Class** — the class you'll calibrate with. In round-feature mode this should be the detected round feature class, not the whole spreader class.
+5. **Estimation Targets** — one row per additional class you want distances for. The reference class is auto-added if missing.
+6. **Calibration Points** — for each calibration frame, enter the frame number and ground-truth distance in mm. 1 works; 2+ is better. In round-feature mode the frame only needs a clear round feature detection at the known spreader distance.
+7. **Calibrate & Estimate** — fits the model, writes `z_mm` onto every matching detection in every frame, and persists into the run's `result.json`.
+8. **Re-export Video with Z** — re-encodes the annotated video with the distance overlays baked in.
 
 !!! warning "Length-sharing assumption"
     Every class in the target list must genuinely share the same real-world length `ℓ` as the reference. A telescoping spreader locked onto a container satisfies this by construction. A free-floating container at a different ISO length, or a bare spreader not yet engaged, does not — exclude those frames or re-calibrate with the correct `ℓ`.
@@ -247,6 +280,7 @@ Once calibrated, a run's `result.json` gains a `z_calibration` block and every m
     "length_mm": 12192,
     "targets": ["spreader", "container"],
     "video_resolution": {"width": 1920, "height": 1080},
+    "measurement_source": "bbox_longer_side",
     "model": {"type": "linear_inv", "m": 7606790.0, "c": -30.2}
   },
   "frames": [
@@ -260,7 +294,19 @@ Once calibrated, a run's `result.json` gains a `z_calibration` block and every m
 }
 ```
 
-Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_inv` for 2+); they just leave `targets` empty (or equal to `[reference_class]`) and estimate only the reference class. `length_mm` is informational — it documents which container size `k` / `m` were derived on, and is not used at estimation time.
+Round-feature calibrations add the physical feature fields:
+
+```json
+{
+  "measurement_source": "round_feature_equivalent_length",
+  "reference_class": "spreader_round_top",
+  "length_mm": 12192,
+  "round_feature_diameter_mm": 250,
+  "equivalent_size_ratio": 48.768
+}
+```
+
+Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_inv` for 2+); they just leave `targets` empty (or equal to `[reference_class]`) and estimate only the reference class. For whole-bbox mode, `length_mm` is informational at estimation time. For round-feature mode, `length_mm` and `round_feature_diameter_mm` define the stored `equivalent_size_ratio`.
 
 ---
 
@@ -268,6 +314,7 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
 
 - `backend/app/services/z_estimator.py`
   - `_longer_side_px()` — the single source of truth for `s` (max of bbox width and height in pixels).
+  - `_measurement_size_px()` — chooses between raw bbox size and round-feature equivalent length.
   - `calibrate()` — builds `(s, z)` pairs on the reference class and returns one flat model.
   - `_fit_single_class()` — closed-form OLS on `(1/s, z)`, with the 1-label shortcut and degenerate fallback.
   - `estimate()` — applies the flat model to every detection whose class is in `target_classes`, writing `z_mm` in-place.
@@ -276,6 +323,7 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
 - `frontend/src/components/ZCalibrationPanel.tsx` — the calibration UI.
 - `frontend/src/pages/ZCalibrationPage.tsx` — the full-screen frame picker for selecting calibration frames.
 - `frontend/src/components/SideViewSchematic.tsx` — the live elevation diagram of camera / spreader / container on the inference detail page.
+- `frontend/src/lib/zCalibration.ts` — shared frontend fallback calculation for bbox and round-feature measurement sources.
 
 ---
 
@@ -285,6 +333,7 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
 - **Prefer 2+ points.** The intercept `c` is where most of the real-world accuracy comes from.
 - **Don't extrapolate far beyond your labels.** `Z = m/s + c` is a linear fit in `1/s`. Well outside the calibration range the linearisation drifts and errors grow.
 - **Pick the container length you're lifting.** 20 / 40 / 45 ft are the three standard ISO options. The spreader telescopes to match, so a single selection covers both.
+- **Store physical dimensions, not magic ratios.** Round-feature mode records both the spreader/container length and the round feature diameter, then computes the ratio from those values.
 - **Reference class as a target.** If you want distances for the reference class itself, include it — but the system adds it automatically if you forget.
 - **Re-calibrate if the camera moves or the container size changes.** The model bakes the camera geometry *and* the chosen `ℓ` into `k` / `m` / `c`; any physical change to mounting, zoom, or ISO length invalidates the fit.
 

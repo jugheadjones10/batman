@@ -3,11 +3,10 @@
 import asyncio
 import io
 import json
-import shutil
 import zipfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal
 
 import cv2
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
@@ -18,10 +17,10 @@ from pydantic import BaseModel, Field
 from backend.app.api.projects import get_project_path, load_project_config
 from backend.app.config import settings
 from backend.app.models.training import InferenceConfig, InferenceGPUSubmitRequest
+from backend.app.services import skew_estimator, z_estimator
 from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
-from backend.app.services import skew_estimator, z_estimator
 from src.core.project import Project
 from src.core.trainer import find_best_checkpoint
 
@@ -36,9 +35,9 @@ class LoadModelRequest(BaseModel):
     # meta.json files can share an id because the old generator used
     # `len(iterdir())`, so a by-id lookup can resolve to the wrong run. Prefer
     # `run_name` whenever the frontend has it.
-    run_name: Optional[str] = None
-    run_id: Optional[int] = None
-    device: Optional[str] = None  # auto, cuda, mps, cpu; default from settings
+    run_name: str | None = None
+    run_id: int | None = None
+    device: str | None = None  # auto, cuda, mps, cpu; default from settings
 
 
 @router.post("/load-model")
@@ -924,6 +923,11 @@ class ZCalibrationRequest(BaseModel):
     reference_class: str
     length_mm: float | None = None
     target_classes: list[str] = Field(default_factory=list)
+    measurement_source: Literal["bbox_longer_side", "round_feature_equivalent_length"] = (
+        "bbox_longer_side"
+    )
+    round_feature_diameter_mm: float | None = None
+    feature_to_spreader_z_offset_mm: float = 0
 
 
 def _resolve_result_dir(
@@ -983,14 +987,33 @@ async def save_z_calibration(
 
     video_resolution = _get_video_resolution(project_path, video_id)
 
+    equivalent_size_ratio: float | None = None
+    if request.measurement_source == z_estimator.ROUND_FEATURE_EQUIVALENT_LENGTH:
+        if request.length_mm is None or request.length_mm <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Round feature calibration requires a positive container/spreader length",
+            )
+        if request.round_feature_diameter_mm is None or request.round_feature_diameter_mm <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Round feature calibration requires a positive round feature diameter",
+            )
+        equivalent_size_ratio = request.length_mm / request.round_feature_diameter_mm
+
     calibration_data: dict[str, Any] = {
-        "labels": [l.model_dump() for l in request.labels],
+        "labels": [label.model_dump() for label in request.labels],
         "reference_class": request.reference_class,
         "targets": list(request.target_classes),
         "video_resolution": video_resolution,
+        "measurement_source": request.measurement_source,
+        "feature_to_spreader_z_offset_mm": request.feature_to_spreader_z_offset_mm,
     }
     if request.length_mm is not None:
         calibration_data["length_mm"] = request.length_mm
+    if request.measurement_source == z_estimator.ROUND_FEATURE_EQUIVALENT_LENGTH:
+        calibration_data["round_feature_diameter_mm"] = request.round_feature_diameter_mm
+        calibration_data["equivalent_size_ratio"] = equivalent_size_ratio
 
     z_estimator.save_z_calibration(result_dir, calibration_data)
     return {"message": "Z calibration saved", "labels_count": len(request.labels)}
@@ -1053,9 +1076,10 @@ async def export_z_video(
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    from src.core.inference import Detection as DetObj, draw_detections
     import subprocess as _sp
-    import time as _time
+
+    from src.core.inference import Detection as DetObj
+    from src.core.inference import draw_detections
 
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)

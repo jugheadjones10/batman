@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Box } from 'lucide-react'
 import { api } from '@/api/client'
-import type { BoundingBox, InferenceResult, ZCalibration } from '@/types'
+import { computeZForBox } from '@/lib/zCalibration'
+import type { BoundingBox, InferenceResult } from '@/types'
 
 interface SideViewSchematicProps {
   frames: InferenceResult[]
@@ -35,6 +36,9 @@ const HORIZ_FOOTPRINT_FRAC = 0.55
 // Dimension bracket columns drawn to the left of the shapes.
 const INNER_BRACKET_X = 70
 const OUTER_BRACKET_X = 22
+const MIN_Z_AXIS_MM = 8000
+const Z_AXIS_HEADROOM_MM = 2500
+const Z_AXIS_ROUNDING_MM = 1000
 
 function findClosestFrameIndex(frames: InferenceResult[], time: number): number {
   if (frames.length === 0) return -1
@@ -62,31 +66,6 @@ function bestDetection(frame: InferenceResult | null, cls: string): SlotData {
   if (dets.length === 0) return { z: null, box: null }
   const best = dets.reduce((a, b) => (a.confidence > b.confidence ? a : b))
   return { z: best.z_mm ?? null, box: best.box }
-}
-
-/**
- * Compute distance-to-camera for a bounding box on the fly, using the single
- * flat calibration model. Every class in `calibration.targets` shares the same
- * fit (the spreader telescopes to match the container, so ℓ is shared), so
- * there's no per-class lookup.
- *
- * `s = max(box.width * vw, box.height * vh)` — the longer bbox side in pixels,
- * matching `z_estimator._longer_side_px`.
- */
-function computeZForBox(
-  cal: ZCalibration | null | undefined,
-  box: BoundingBox,
-  vw: number,
-  vh: number,
-): number | null {
-  if (!cal || !cal.model) return null
-  const s = Math.max(box.width * vw, box.height * vh)
-  if (s <= 0) return null
-  if (cal.model.type === 'k_over_s' && cal.model.k != null) return cal.model.k / s
-  if (cal.model.type === 'linear_inv' && cal.model.m != null && cal.model.c != null) {
-    return cal.model.m / s + cal.model.c
-  }
-  return null
 }
 
 export default function SideViewSchematic({
@@ -129,6 +108,11 @@ export default function SideViewSchematic({
   // Prefer a class whose name literally mentions "spreader" (but not "container"),
   // so a hypothetical `container_spreader` class doesn't claim both slots.
   const defaultSpreader =
+    (calibration?.measurement_source === 'round_feature_equivalent_length' &&
+    calibration.reference_class &&
+    allClasses.includes(calibration.reference_class)
+      ? calibration.reference_class
+      : undefined) ??
     allClasses.find((c) => /spreader/i.test(c) && !/container/i.test(c)) ??
     (calibration?.reference_class && allClasses.includes(calibration.reference_class)
       ? calibration.reference_class
@@ -192,7 +176,13 @@ export default function SideViewSchematic({
   let zSpreader: number | null = spreader.z
   let spreaderZSource: 'measured' | 'estimated' | null = spreader.z != null ? 'measured' : null
   if (zSpreader == null && spreader.box != null) {
-    const computed = computeZForBox(calibration, spreader.box, videoWidth, videoHeight)
+    const computed = computeZForBox(
+      calibration,
+      spreader.box,
+      videoWidth,
+      videoHeight,
+      resolvedSpreader,
+    )
     if (computed != null && Number.isFinite(computed) && computed > 0) {
       zSpreader = computed
       spreaderZSource = 'estimated'
@@ -205,7 +195,13 @@ export default function SideViewSchematic({
   let zContainerTop: number | null = container.z
   let containerZSource: 'measured' | 'estimated' | null = container.z != null ? 'measured' : null
   if (zContainerTop == null && container.box != null) {
-    const computed = computeZForBox(calibration, container.box, videoWidth, videoHeight)
+    const computed = computeZForBox(
+      calibration,
+      container.box,
+      videoWidth,
+      videoHeight,
+      resolvedContainer,
+    )
     if (computed != null && Number.isFinite(computed) && computed > 0) {
       zContainerTop = computed
       containerZSource = 'estimated'
@@ -216,28 +212,15 @@ export default function SideViewSchematic({
   const spreaderToContainer =
     zSpreader != null && zContainerTop != null ? zContainerTop - zSpreader : null
 
-  // Axis range is driven by the deepest z we'll ever render on this schematic.
-  // We have to honour the same fallback chain that the per-frame renderer uses
-  // (detection.z_mm → flat-model extrapolation from the bbox), otherwise the
-  // ByteTrack side — which deliberately ships without z_mm so the UI can
-  // recompute z from the smoothed bbox — collapses to the 15 m floor while the
-  // raw side sizes to the real container depth (~25 m on a typical lift).
-  // Restrict to the two classes we actually draw so non-target classes without
-  // z_mm don't contaminate the axis with meaningless flat-model numbers.
-  const zMax = useMemo(() => {
-    const relevant = new Set([resolvedSpreader, resolvedContainer].filter(Boolean))
-    let deepest = 0
-    for (const f of frames) {
-      for (const d of f.detections) {
-        if (!relevant.has(d.class_name)) continue
-        let z: number | null = d.z_mm ?? null
-        if (z == null) z = computeZForBox(calibration, d.box, videoWidth, videoHeight)
-        if (z != null && Number.isFinite(z) && z > deepest) deepest = z
-      }
-    }
-    const withRoom = deepest + ISO_CONTAINER_HEIGHT_MM + 4000
-    return Math.max(Math.ceil(withRoom / 5000) * 5000, 15000)
-  }, [frames, calibration, resolvedSpreader, resolvedContainer, videoWidth, videoHeight])
+  // Zoom the vertical axis around the stack in the current frame. Using the
+  // deepest value across the entire run can make shallow frames bunch up near
+  // the camera, especially after switching to a small round-feature proxy.
+  const deepestVisibleMm = Math.max(zSpreader ?? 0, zContainerBottom ?? zContainerTop ?? 0)
+  const zMax = Math.max(
+    Math.ceil((deepestVisibleMm + Z_AXIS_HEADROOM_MM) / Z_AXIS_ROUNDING_MM) *
+      Z_AXIS_ROUNDING_MM,
+    MIN_Z_AXIS_MM,
+  )
 
   const mmToY = (mm: number) => TOP_Y + (mm / zMax) * (BOTTOM_Y - TOP_Y)
 
@@ -276,7 +259,11 @@ export default function SideViewSchematic({
       <div className="rounded-lg border border-border bg-neutral-900/80 p-3 space-y-3">
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <label className="text-[10px] text-muted-foreground block mb-1">Spreader class</label>
+            <label className="text-[10px] text-muted-foreground block mb-1">
+              {calibration?.measurement_source === 'round_feature_equivalent_length'
+                ? 'Spreader proxy class'
+                : 'Spreader class'}
+            </label>
             <select
               value={resolvedSpreader}
               onChange={(e) => setSpreaderClass(e.target.value)}

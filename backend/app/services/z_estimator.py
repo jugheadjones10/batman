@@ -13,18 +13,21 @@ container being picked, every class the user cares about shares the same ``ℓ``
 and therefore the same fit. There is no per-target rescaling — one flat model
 is broadcast across every class in ``targets``.
 
-``s`` is always the **longer side** of the axis-aligned bbox (in pixels). That
-side is the cleaner signal (largest pixel extent, insensitive to short-side
-rotation noise) and removes the axis-picking step from the UI.
+By default, ``s`` is the **longer side** of the axis-aligned bbox (in pixels).
+Round-feature calibration instead scales the feature's detected diameter by the
+known spreader-length/feature-diameter ratio so the fitted model stays on the
+same physical scale as container bboxes.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
+
+BBOX_LONGER_SIDE = "bbox_longer_side"
+ROUND_FEATURE_EQUIVALENT_LENGTH = "round_feature_equivalent_length"
 
 
 def _longer_side_px(det: dict, video_resolution: dict) -> float:
@@ -32,6 +35,31 @@ def _longer_side_px(det: dict, video_resolution: dict) -> float:
     w = det["box"]["width"] * video_resolution["width"]
     h = det["box"]["height"] * video_resolution["height"]
     return max(w, h)
+
+
+def _measurement_size_px(
+    det: dict,
+    video_resolution: dict,
+    *,
+    measurement_source: str = BBOX_LONGER_SIDE,
+    equivalent_size_ratio: float | None = None,
+    use_reference_feature: bool = False,
+) -> float:
+    """Return the pixel size used by the Z model for a detection.
+
+    Round-feature calibration converts the detected feature diameter into the
+    equivalent whole-spreader/container length before fitting the existing model.
+    Non-reference targets keep using their whole-object bbox size.
+    """
+    s = _longer_side_px(det, video_resolution)
+    if measurement_source != ROUND_FEATURE_EQUIVALENT_LENGTH or not use_reference_feature:
+        return s
+
+    if equivalent_size_ratio is None or equivalent_size_ratio <= 0:
+        raise ValueError(
+            "round_feature_equivalent_length requires a positive equivalent_size_ratio"
+        )
+    return s * equivalent_size_ratio
 
 
 def _fit_single_class(pairs: list[tuple[float, float]]) -> dict:
@@ -74,6 +102,8 @@ def calibrate(
     video_resolution: dict,
     reference_class: str,
     target_classes: list[str] | None = None,  # noqa: ARG001 (broadcast happens in estimate())
+    measurement_source: str = BBOX_LONGER_SIDE,
+    equivalent_size_ratio: float | None = None,
 ) -> dict:
     """Fit a flat pinhole model from the reference-class labels.
 
@@ -128,7 +158,13 @@ def calibrate(
                 )
                 continue
 
-        s = _longer_side_px(det, video_resolution)
+        s = _measurement_size_px(
+            det,
+            video_resolution,
+            measurement_source=measurement_source,
+            equivalent_size_ratio=equivalent_size_ratio,
+            use_reference_feature=True,
+        )
         if s <= 0:
             logger.warning(f"Z calibration: zero/negative size for frame {fn}, skipping")
             continue
@@ -143,7 +179,8 @@ def calibrate(
         logger.info(f"Z calibration: 1-point model, k={model['k']:.1f}")
     else:
         logger.info(
-            f"Z calibration: {len(pairs)}-point linear model, m={model['m']:.1f}, c={model['c']:.1f}"
+            f"Z calibration: {len(pairs)}-point linear model, "
+            f"m={model['m']:.1f}, c={model['c']:.1f}"
         )
     return model
 
@@ -153,6 +190,9 @@ def estimate(
     frames: list[dict],
     video_resolution: dict,
     target_classes: list[str],
+    reference_class: str | None = None,
+    measurement_source: str = BBOX_LONGER_SIDE,
+    equivalent_size_ratio: float | None = None,
 ) -> list[dict]:
     """Apply ``model`` to every detection whose class is in ``target_classes``.
 
@@ -172,7 +212,13 @@ def estimate(
             if det.get("class_name") not in target_set:
                 continue
 
-            s = _longer_side_px(det, video_resolution)
+            s = _measurement_size_px(
+                det,
+                video_resolution,
+                measurement_source=measurement_source,
+                equivalent_size_ratio=equivalent_size_ratio,
+                use_reference_feature=det.get("class_name") == reference_class,
+            )
             if s <= 0:
                 continue
 
@@ -259,6 +305,17 @@ def apply_z_to_result(result_dir: Path) -> dict:
     if not reference_class:
         raise ValueError("No reference_class found in z_calibration")
 
+    measurement_source = z_cal.get("measurement_source", BBOX_LONGER_SIDE)
+    if measurement_source not in {BBOX_LONGER_SIDE, ROUND_FEATURE_EQUIVALENT_LENGTH}:
+        raise ValueError(f"Unsupported z_calibration measurement_source '{measurement_source}'")
+
+    equivalent_size_ratio = z_cal.get("equivalent_size_ratio")
+    if measurement_source == ROUND_FEATURE_EQUIVALENT_LENGTH:
+        if equivalent_size_ratio is None or equivalent_size_ratio <= 0:
+            raise ValueError(
+                "round_feature_equivalent_length requires a positive equivalent_size_ratio"
+            )
+
     targets: list[str] = list(z_cal.get("targets") or [])
     if reference_class not in targets:
         targets.append(reference_class)
@@ -270,13 +327,23 @@ def apply_z_to_result(result_dir: Path) -> dict:
         video_resolution,
         reference_class=reference_class,
         target_classes=targets,
+        measurement_source=measurement_source,
+        equivalent_size_ratio=equivalent_size_ratio,
     )
 
     z_cal["model"] = model
     z_cal["reference_class"] = reference_class
     z_cal["targets"] = targets
 
-    frames = estimate(model, frames, video_resolution, target_classes=targets)
+    frames = estimate(
+        model,
+        frames,
+        video_resolution,
+        target_classes=targets,
+        reference_class=reference_class,
+        measurement_source=measurement_source,
+        equivalent_size_ratio=equivalent_size_ratio,
+    )
 
     data["z_calibration"] = z_cal
     data["frames"] = frames

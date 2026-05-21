@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
-import type { BoundingBox, InferenceResult, ZCalibration } from '@/types'
+import { computeZForDetection } from '@/lib/zCalibration'
+import type { InferenceResult, ZCalibration } from '@/types'
 
 interface PositionTimelineProps {
   frames: InferenceResult[]
@@ -38,22 +39,6 @@ const PAD_BOTTOM = 24
 const PLOT_W = SVG_W - PAD_LEFT - PAD_RIGHT
 const PLOT_H = SVG_H - PAD_TOP - PAD_BOTTOM
 
-function computeZForBox(
-  cal: ZCalibration | null | undefined,
-  box: BoundingBox,
-  vw: number,
-  vh: number,
-): number | null {
-  if (!cal || !cal.model) return null
-  const s = Math.max(box.width * vw, box.height * vh)
-  if (s <= 0) return null
-  if (cal.model.type === 'k_over_s' && cal.model.k != null) return cal.model.k / s
-  if (cal.model.type === 'linear_inv' && cal.model.m != null && cal.model.c != null) {
-    return cal.model.m / s + cal.model.c
-  }
-  return null
-}
-
 export default function PositionTimeline({
   frames,
   currentTime,
@@ -74,7 +59,7 @@ export default function PositionTimeline({
 
       let value: number | undefined
       if (metric === 'z') {
-        value = det.z_mm ?? computeZForBox(zCalibration, det.box, videoWidth, videoHeight) ?? undefined
+        value = det.z_mm ?? computeZForDetection(zCalibration, det, videoWidth, videoHeight) ?? undefined
       }
       else if (metric === 'x') value = det.box.x * videoWidth
       else value = det.box.y * videoHeight

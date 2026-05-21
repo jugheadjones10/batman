@@ -481,6 +481,9 @@ export const api = {
       opts?: {
         lengthMm?: number | null
         targetClasses?: string[]
+        measurementSource?: import('@/types').ZCalibrationMeasurementSource
+        roundFeatureDiameterMm?: number | null
+        featureToSpreaderZOffsetMm?: number | null
       },
     ) =>
       request<{ message: string; labels_count: number }>(
@@ -492,6 +495,9 @@ export const api = {
             reference_class: referenceClass,
             length_mm: opts?.lengthMm ?? null,
             target_classes: opts?.targetClasses ?? [],
+            measurement_source: opts?.measurementSource ?? 'bbox_longer_side',
+            round_feature_diameter_mm: opts?.roundFeatureDiameterMm ?? null,
+            feature_to_spreader_z_offset_mm: opts?.featureToSpreaderZOffsetMm ?? 0,
           }),
         }
       ),

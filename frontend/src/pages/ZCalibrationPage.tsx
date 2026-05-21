@@ -20,7 +20,12 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useToast } from '@/components/ui/Toaster'
 import { cn } from '@/lib/utils'
-import type { Detection, InferenceResult, ZCalibrationLabel } from '@/types'
+import type {
+  Detection,
+  InferenceResult,
+  ZCalibrationLabel,
+  ZCalibrationMeasurementSource,
+} from '@/types'
 
 const DETECTION_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 const FRAME_INTERVALS = [1, 2, 5, 10, 15, 30, 60] as const
@@ -65,6 +70,9 @@ export default function ZCalibrationPage() {
   const [referenceClass, setReferenceClass] = useState('')
   const [lengthMm, setLengthMm] = useState<number | null>(null)
   const [targets, setTargets] = useState<string[]>([])
+  const [measurementSource, setMeasurementSource] =
+    useState<ZCalibrationMeasurementSource>('bbox_longer_side')
+  const [roundFeatureDiameterMm, setRoundFeatureDiameterMm] = useState('')
   const [showInfo, setShowInfo] = useState(false)
 
   const { data: video } = useQuery({
@@ -128,6 +136,10 @@ export default function ZCalibrationPage() {
     if (cal.reference_class) setReferenceClass(cal.reference_class)
     if (cal.length_mm != null) setLengthMm(cal.length_mm)
     if (cal.targets?.length) setTargets([...cal.targets])
+    if (cal.measurement_source) setMeasurementSource(cal.measurement_source)
+    if (cal.round_feature_diameter_mm != null) {
+      setRoundFeatureDiameterMm(String(cal.round_feature_diameter_mm))
+    }
     setDidLoadExisting(true)
   }, [existingCal, allFrames.length, filteredFrames, didLoadExisting])
 
@@ -230,6 +242,15 @@ export default function ZCalibrationPage() {
   }, [referenceClass, lengthMm, targets.length, didLoadExisting])
 
   const hasTargets = targets.filter((t) => t.trim().length > 0).length > 0
+  const roundFeatureDiameter = parseFloat(roundFeatureDiameterMm)
+  const equivalentSizeRatio =
+    measurementSource === 'round_feature_equivalent_length' &&
+    lengthMm != null &&
+    lengthMm > 0 &&
+    Number.isFinite(roundFeatureDiameter) &&
+    roundFeatureDiameter > 0
+      ? lengthMm / roundFeatureDiameter
+      : null
 
   const addTarget = useCallback(() => {
     const available = classNames.find((c) => !targets.includes(c))
@@ -242,10 +263,26 @@ export default function ZCalibrationPage() {
       if (!refClass) throw new Error('No reference class selected')
       const cleaned = targets.filter((t) => t.trim().length > 0)
       const allTargets = cleaned.includes(refClass) ? cleaned : [refClass, ...cleaned]
+      if (measurementSource === 'round_feature_equivalent_length') {
+        if (lengthMm == null || lengthMm <= 0) {
+          throw new Error('Round feature calibration requires a container/spreader length')
+        }
+        if (!Number.isFinite(roundFeatureDiameter) || roundFeatureDiameter <= 0) {
+          throw new Error('Round feature calibration requires a positive round feature diameter')
+        }
+      }
 
       await api.inference.saveZCalibration(
         projectName!, runName!, videoId!, inferenceId!, validLabels, refClass,
-        { lengthMm: lengthMm ?? null, targetClasses: allTargets },
+        {
+          lengthMm: lengthMm ?? null,
+          targetClasses: allTargets,
+          measurementSource,
+          roundFeatureDiameterMm:
+            measurementSource === 'round_feature_equivalent_length'
+              ? roundFeatureDiameter
+              : null,
+        },
       )
       return api.inference.applyZEstimation(projectName!, runName!, videoId!, inferenceId!)
     },
@@ -393,6 +430,9 @@ export default function ZCalibrationPage() {
                 const width = det.box.width * 100
                 const height = det.box.height * 100
                 const color = classColorMap[det.class_name] || '#FF6B6B'
+                const isRoundReference =
+                  measurementSource === 'round_feature_equivalent_length' &&
+                  det.class_name === referenceClass
                 return (
                   <div
                     key={i}
@@ -402,8 +442,12 @@ export default function ZCalibrationPage() {
                       top: `${top}%`,
                       width: `${width}%`,
                       height: `${height}%`,
-                      border: `2px solid ${color}`,
+                      border: `${isRoundReference ? 3 : 2}px solid ${color}`,
                       borderRadius: 2,
+                      opacity:
+                        measurementSource === 'round_feature_equivalent_length' && !isRoundReference
+                          ? 0.35
+                          : 1,
                     }}
                   >
                     <span
@@ -546,6 +590,14 @@ export default function ZCalibrationPage() {
                   <span className="font-mono">{existingCal.z_calibration.length_mm} mm</span>
                 </div>
               )}
+              {existingCal.z_calibration.measurement_source === 'round_feature_equivalent_length' && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Round Ø</span>
+                  <span className="font-mono">
+                    {existingCal.z_calibration.round_feature_diameter_mm ?? '?'} mm
+                  </span>
+                </div>
+              )}
               {existingCal.z_calibration.targets?.length ? (
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Targets</span>
@@ -561,13 +613,33 @@ export default function ZCalibrationPage() {
         {/* Scrollable config area */}
         <div className="flex-1 overflow-y-auto min-h-0">
 
-          {/* Section 1: Container length (ℓ) */}
+          {/* Section 1: Measurement source */}
           <div className="p-3 border-b border-border space-y-2.5">
             <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block">
-              1. Container length (ℓ)
+              1. Measurement Source
             </label>
             <p className="text-[10px] text-muted-foreground leading-relaxed">
-              The real-world length shared by the spreader (which telescopes to match) and every target container. Leave blank for single-class mode.
+              Choose what apparent size is measured in calibration frames.
+            </p>
+            <select
+              value={measurementSource}
+              onChange={(e) => setMeasurementSource(e.target.value as ZCalibrationMeasurementSource)}
+              className="w-full rounded border bg-background px-2 py-1 text-xs h-7"
+            >
+              <option value="bbox_longer_side">Whole bbox longer side</option>
+              <option value="round_feature_equivalent_length">Round feature diameter</option>
+            </select>
+          </div>
+
+          {/* Section 2: Container length (ℓ) */}
+          <div className="p-3 border-b border-border space-y-2.5">
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block">
+              2. Container/spreader length (ℓ)
+            </label>
+            <p className="text-[10px] text-muted-foreground leading-relaxed">
+              {measurementSource === 'round_feature_equivalent_length'
+                ? 'Required for round feature mode; used with the feature diameter to compute the scale ratio.'
+                : 'The real-world length shared by the spreader (which telescopes to match) and every target container. Leave blank for single-class mode.'}
             </p>
             <select
               value={lengthMm ?? ''}
@@ -581,13 +653,39 @@ export default function ZCalibrationPage() {
             </select>
           </div>
 
-          {/* Section 2: Reference class */}
+          {measurementSource === 'round_feature_equivalent_length' && (
+            <div className="p-3 border-b border-border space-y-2.5">
+              <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block">
+                Round Feature Diameter
+              </label>
+              <Input
+                type="number"
+                min="0"
+                step="0.1"
+                placeholder="Diameter (mm)"
+                value={roundFeatureDiameterMm}
+                onChange={(e) => setRoundFeatureDiameterMm(e.target.value)}
+                className="h-7 text-xs"
+              />
+              <p className="text-[10px] text-muted-foreground leading-relaxed">
+                {equivalentSizeRatio != null
+                  ? `Equivalent spreader-size ratio: ${equivalentSizeRatio.toFixed(3)}x`
+                  : 'Enter diameter and length to preview the equivalent size ratio.'}
+              </p>
+            </div>
+          )}
+
+          {/* Section 3: Reference class */}
           <div className="p-3 border-b border-border space-y-2.5">
             <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block">
-              2. Reference Class
+              {measurementSource === 'round_feature_equivalent_length'
+                ? '3. Round Feature Class'
+                : '3. Reference Class'}
             </label>
             <p className="text-[10px] text-muted-foreground leading-relaxed">
-              The class you can measure distance to directly (typically the spreader — PLC hoist readout).
+              {measurementSource === 'round_feature_equivalent_length'
+                ? 'The detected round feature that acts as the spreader Z proxy. Matching boxes are emphasized in the viewer.'
+                : 'The class you can measure distance to directly (typically the spreader — PLC hoist readout).'}
             </p>
             <select
               value={referenceClass}
@@ -600,11 +698,11 @@ export default function ZCalibrationPage() {
             </select>
           </div>
 
-          {/* Section 3: Estimation Targets */}
+          {/* Section 4: Estimation Targets */}
           <div className="p-3 border-b border-border space-y-2.5">
             <div className="flex items-center justify-between">
               <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                3. Estimation Targets
+                4. Estimation Targets
               </label>
               <button
                 onClick={addTarget}
@@ -647,17 +745,21 @@ export default function ZCalibrationPage() {
               </div>
             )}
             <p className="text-[10px] text-muted-foreground italic">
-              Assumes every target shares the same real-world length as the reference (spreader telescopes to match the container).
+              {measurementSource === 'round_feature_equivalent_length'
+                ? 'The round feature is converted to equivalent spreader length; container targets still use their whole bbox length.'
+                : 'Assumes every target shares the same real-world length as the reference (spreader telescopes to match the container).'}
             </p>
           </div>
 
-          {/* Section 4: Calibration Points */}
+          {/* Section 5: Calibration Points */}
           <div className="p-3 space-y-2.5">
             <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block">
-              4. Calibration Points ({calibrationPoints.length})
+              5. Calibration Points ({calibrationPoints.length})
             </label>
             <p className="text-[10px] text-muted-foreground leading-relaxed">
-              {referenceClass
+              {measurementSource === 'round_feature_equivalent_length' && referenceClass
+                ? <>Frames where <strong>{referenceClass}</strong> is visible at a known spreader distance from the camera.</>
+                : referenceClass
                 ? <>Frames where <strong>{referenceClass}</strong> is at a known distance from the camera.</>
                 : 'Frames where the reference object is at a known distance from the camera.'}
             </p>
@@ -766,8 +868,17 @@ export default function ZCalibrationPage() {
                   Objects farther from the camera appear smaller. If you know an object's
                   real-world size and can measure its apparent size in pixels, the pinhole
                   camera model gives you the distance: <code className="px-1 py-0.5 bg-muted rounded text-[11px]">Z = k / s</code>, where
-                  <code className="px-1 py-0.5 bg-muted rounded text-[11px]">s</code> is the <strong>longer side</strong> of
-                  the bounding box in pixels. Batman always uses the longer side — it's the cleaner signal and removes the axis-picking step.
+                  <code className="px-1 py-0.5 bg-muted rounded text-[11px]">s</code> is the measured pixel size. Batman can use the
+                  whole bbox longer side, or a round feature diameter scaled to equivalent spreader length.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="text-foreground font-medium mb-1">Round feature mode</h4>
+                <p>
+                  Enter the spreader/container length and the physical round feature diameter. The app computes
+                  <code className="px-1 py-0.5 bg-muted rounded text-[11px]"> length / diameter</code> and applies that ratio
+                  to the detected feature diameter before fitting.
                 </p>
               </div>
 

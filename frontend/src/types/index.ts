@@ -360,6 +360,8 @@ export interface ZCalibrationModel {
   c?: number
 }
 
+export type ZCalibrationMeasurementSource = 'bbox_longer_side' | 'round_feature_equivalent_length'
+
 export interface ZCalibration {
   labels: ZCalibrationLabel[]
   model: ZCalibrationModel | null
@@ -367,5 +369,9 @@ export interface ZCalibration {
   length_mm?: number | null
   targets?: string[] | null
   video_resolution?: { width: number; height: number }
+  measurement_source?: ZCalibrationMeasurementSource
+  round_feature_diameter_mm?: number | null
+  equivalent_size_ratio?: number | null
+  feature_to_spreader_z_offset_mm?: number | null
 }
 
