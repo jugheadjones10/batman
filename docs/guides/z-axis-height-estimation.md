@@ -185,6 +185,12 @@ There is no separate `(k_target, m_target, c_target)`. One model drives all clas
 
 The bias intercept `c` from Mode 2 carries across classes for free, too: `c` encodes a camera/detector bias (the few-pixel bbox clip, the tape-measure offset) that has nothing to do with which class is in the frame, so it applies identically to every target.
 
+### Center container selection
+
+When a detector sees every container in the frame, Batman keeps those detections visible but only uses the **container closest to the image center** for container Z and spreader-to-container gap estimates. The chosen container is the target whose bbox center is nearest `(0.5, 0.5)` in normalized frame coordinates.
+
+This matches the crane-camera setup: the intended pickup container should be framed near the center of the video. Side containers still appear in overlays and exports, but they do not receive `z_mm` in a spreader→container calibration run, and they do not drive the side-view schematic, live readout, or Z graph.
+
 ### Picking `ℓ` from the UI
 
 In the calibration panel, `ℓ` is a dropdown of the three ISO container lengths:
@@ -246,7 +252,7 @@ Open a finished inference run on the **Inference** page and expand the **Z-Axis 
 4. **Reference Class / Round Feature Class** — the class you'll calibrate with. In round-feature mode this should be the detected round feature class, not the whole spreader class.
 5. **Estimation Targets** — one row per additional class you want distances for. The reference class is auto-added if missing.
 6. **Calibration Points** — for each calibration frame, enter the frame number and ground-truth distance in mm. 1 works; 2+ is better. In round-feature mode the frame only needs a clear round feature detection at the known spreader distance.
-7. **Calibrate & Estimate** — fits the model, writes `z_mm` onto every matching detection in every frame, and persists into the run's `result.json`.
+7. **Calibrate & Estimate** — fits the model, writes `z_mm` onto every matching non-container target and only the center container target in each frame, then persists into the run's `result.json`.
 8. **Re-export Video with Z** — re-encodes the annotated video with the distance overlays baked in.
 
 !!! warning "Length-sharing assumption"
@@ -267,7 +273,7 @@ The right-hand column of a calibrated inference run also renders a **Side-View S
 
 ## Persisted shape (`result.json`)
 
-Once calibrated, a run's `result.json` gains a `z_calibration` block and every matching detection gains a `z_mm` field. For a multi-target run it looks like:
+Once calibrated, a run's `result.json` gains a `z_calibration` block. Every matching non-container target gains a `z_mm` field; container targets gain `z_mm` only on the per-frame center-selected container. For a multi-target run it looks like:
 
 ```json
 {
@@ -287,7 +293,8 @@ Once calibrated, a run's `result.json` gains a `z_calibration` block and every m
     {
       "frame_number": 100,
       "detections": [
-        {"class_name": "container", "box": {...}, "confidence": 0.94, "z_mm": 8210.3}
+        {"class_name": "container", "box": {...}, "confidence": 0.94, "z_mm": 8210.3, "z_selected": true},
+        {"class_name": "container", "box": {...}, "confidence": 0.91}
       ]
     }
   ]
@@ -317,7 +324,8 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
   - `_measurement_size_px()` — chooses between raw bbox size and round-feature equivalent length.
   - `calibrate()` — builds `(s, z)` pairs on the reference class and returns one flat model.
   - `_fit_single_class()` — closed-form OLS on `(1/s, z)`, with the 1-label shortcut and degenerate fallback.
-  - `estimate()` — applies the flat model to every detection whose class is in `target_classes`, writing `z_mm` in-place.
+  - `_pick_center_detection()` — picks the target container closest to the normalized frame center.
+  - `estimate()` — applies the flat model to target detections, writing `z_mm` in-place; container targets are center-selected per frame.
   - `apply_z_to_result()` — end-to-end: read `result.json`, fit, estimate, write back; raises on legacy schemas.
 - `backend/app/api/inference.py` — REST endpoints: save calibration, apply estimation, re-export video.
 - `frontend/src/components/ZCalibrationPanel.tsx` — the calibration UI.

@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Box } from 'lucide-react'
 import { api } from '@/api/client'
+import { bestByConfidence, pickCenterDetection } from '@/lib/trackingPresentation'
 import { computeZForBox } from '@/lib/zCalibration'
-import type { BoundingBox, InferenceResult } from '@/types'
+import type { BoundingBox, Detection, InferenceResult } from '@/types'
 
 interface SideViewSchematicProps {
   frames: InferenceResult[]
@@ -60,12 +61,20 @@ interface SlotData {
   box: BoundingBox | null
 }
 
-function bestDetection(frame: InferenceResult | null, cls: string): SlotData {
-  if (!cls || !frame) return { z: null, box: null }
+function pickSlotDetection(
+  frame: InferenceResult | null,
+  cls: string,
+  centerTarget = false,
+): Detection | undefined {
+  if (!cls || !frame) return undefined
   const dets = frame.detections.filter((d) => d.class_name === cls)
-  if (dets.length === 0) return { z: null, box: null }
-  const best = dets.reduce((a, b) => (a.confidence > b.confidence ? a : b))
-  return { z: best.z_mm ?? null, box: best.box }
+  if (dets.length === 0) return undefined
+  return centerTarget ? pickCenterDetection(dets) : bestByConfidence(dets)
+}
+
+function detectionSlot(frame: InferenceResult | null, cls: string, centerTarget = false): SlotData {
+  const det = pickSlotDetection(frame, cls, centerTarget)
+  return { z: det?.z_mm ?? null, box: det?.box ?? null }
 }
 
 export default function SideViewSchematic({
@@ -156,8 +165,8 @@ export default function SideViewSchematic({
   }, [calibration, frames, resolvedContainer, videoWidth, videoHeight])
 
   const { spreader, container } = useMemo(() => {
-    const s = bestDetection(frame, resolvedSpreader)
-    const c = bestDetection(frame, resolvedContainer)
+    const s = detectionSlot(frame, resolvedSpreader)
+    const c = detectionSlot(frame, resolvedContainer, true)
     return { spreader: s, container: c }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frameIndex, resolvedSpreader, resolvedContainer, frames])

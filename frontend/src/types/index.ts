@@ -270,6 +270,8 @@ export interface Detection {
   /** ByteTrack provenance: matched to a detector box, or Kalman-only lost-track prediction. */
   track_source?: 'matched' | 'lost'
   z_mm?: number
+  /** Backend-selected center container target for Z/gap estimation. */
+  z_selected?: boolean
   /** Normalised polygon produced by RF-DETR-Seg (present for seg models only). */
   mask?: number[][] | null
 }

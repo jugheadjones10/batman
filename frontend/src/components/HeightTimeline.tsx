@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { bestByConfidence, isContainerClass, pickCenterDetection } from '@/lib/trackingPresentation'
 import { computeZForDetection } from '@/lib/zCalibration'
 import type { InferenceResult, ZCalibration } from '@/types'
 
@@ -54,7 +55,8 @@ export default function PositionTimeline({
   const points = useMemo<DataPoint[]>(() => {
     const result: DataPoint[] = []
     for (const frame of frames) {
-      const det = frame.detections.find((d) => d.class_name === targetClass)
+      const dets = frame.detections.filter((d) => d.class_name === targetClass)
+      const det = isContainerClass(targetClass) ? pickCenterDetection(dets) : bestByConfidence(dets)
       if (!det) continue
 
       let value: number | undefined

@@ -10,12 +10,15 @@ import DetectionOverlaySvg, { type OverlayBox } from '@/components/DetectionOver
 import { useSyncedVideoMirror } from '@/hooks/useSyncedVideoMirror'
 import { smoothFramesPerTrack } from '@/lib/oneEuroFilter'
 import {
+  bestByConfidence,
   buildTrackedOverlayBoxes,
   COLOR_EXTRAPOLATED,
   COLOR_MEASURED,
   DEFAULT_OEF,
   DEFAULT_TRACKER_PARAMS,
   findClosestFrameIndex,
+  isContainerClass,
+  pickCenterDetection,
   pickPrimaryTrackPerClassFrames,
 } from '@/lib/trackingPresentation'
 import type { Detection, InferenceResult } from '@/types'
@@ -31,24 +34,27 @@ interface TrackerParams {
   minimum_matching_threshold: number
 }
 
-/** Raw-side overlay: the single max-confidence detection per class. */
+/** Raw-side overlay: center container targets, max-confidence for other classes. */
 function pickRawOverlayBoxes(
   frame: InferenceResult | null,
   colorMap: Record<string, string>,
 ): { boxes: OverlayBox[]; total: number } {
   if (!frame) return { boxes: [], total: 0 }
-  const bestByClass = new Map<string, Detection>()
+  const detectionsByClass = new Map<string, Detection[]>()
   for (const d of frame.detections) {
-    const cur = bestByClass.get(d.class_name)
-    if (!cur || d.confidence > cur.confidence) bestByClass.set(d.class_name, d)
+    const arr = detectionsByClass.get(d.class_name)
+    if (arr) arr.push(d)
+    else detectionsByClass.set(d.class_name, [d])
   }
   const boxes: OverlayBox[] = []
-  for (const [cls, d] of bestByClass) {
+  for (const [cls, dets] of detectionsByClass) {
+    const d = isContainerClass(cls) ? pickCenterDetection(dets) : bestByConfidence(dets)
+    if (!d) continue
     boxes.push({
       key: `raw-${cls}`,
       box: d.box,
       color: colorMap[cls] ?? RAW_COLORS[0],
-      label: `${cls} ${(d.confidence * 100).toFixed(0)}%`,
+      label: `${cls}${isContainerClass(cls) ? ' center' : ''} ${(d.confidence * 100).toFixed(0)}%`,
     })
   }
   return { boxes, total: frame.detections.length }
@@ -421,10 +427,10 @@ export default function TrackingComparePage() {
               {/* Video pair */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <VideoPane
-                  title="Raw (per-frame best)"
+                  title="Raw (center container)"
                   legend={
                     <>
-                      <Swatch color="#22d3ee" /> max-conf per class
+                      <Swatch color="#22d3ee" /> center container, max-conf otherwise
                     </>
                   }
                   videoRef={videoRef}
@@ -436,7 +442,7 @@ export default function TrackingComparePage() {
                   onDuration={setVideoDuration}
                 />
                 <VideoPane
-                  title="ByteTrack (best track per class)"
+                  title="ByteTrack (center container)"
                   legend={
                     <>
                       <Swatch color={COLOR_MEASURED} /> measured
@@ -471,7 +477,7 @@ export default function TrackingComparePage() {
                 </div>
                 <div>
                   <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest mb-1">
-                    ByteTrack best track/class {oef.enabled ? '+ One Euro' : '(raw Kalman)'}
+                    ByteTrack center container {oef.enabled ? '+ One Euro' : '(raw Kalman)'}
                   </div>
                   {primaryTrackedFrames.length > 0 ? (
                     <SideViewSchematic

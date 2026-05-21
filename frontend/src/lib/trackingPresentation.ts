@@ -38,6 +38,23 @@ export function bestByConfidence(detections: Detection[]): Detection | undefined
   )
 }
 
+export function isContainerClass(className: string | null | undefined): boolean {
+  return /container/i.test(className ?? '')
+}
+
+export function distanceToFrameCenter(det: Detection): number {
+  const dx = det.box.x - 0.5
+  const dy = det.box.y - 0.5
+  return dx * dx + dy * dy
+}
+
+export function pickCenterDetection(detections: Detection[]): Detection | undefined {
+  return detections.reduce<Detection | undefined>(
+    (best, d) => (!best || distanceToFrameCenter(d) < distanceToFrameCenter(best) ? d : best),
+    undefined,
+  )
+}
+
 /**
  * Presentation policy for the single-target use case: keep ByteTrack running on
  * every detection, then show one stable primary track per class. We preserve a
@@ -58,6 +75,12 @@ export function pickPrimaryTrackPerClassFrames(frames: InferenceResult[]): Infer
 
     const detections: Detection[] = []
     for (const [className, classDetections] of detectionsByClass) {
+      if (isContainerClass(className)) {
+        const chosen = pickCenterDetection(classDetections)
+        if (chosen) detections.push(chosen)
+        continue
+      }
+
       const primaryTrackId = primaryTrackByClass.get(className)
       const currentPrimary =
         primaryTrackId != null

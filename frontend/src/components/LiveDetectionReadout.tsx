@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { bestByConfidence, isContainerClass, pickCenterDetection } from '@/lib/trackingPresentation'
 import { computeZForDetection } from '@/lib/zCalibration'
 import type { InferenceResult, ZCalibration } from '@/types'
 
@@ -108,7 +109,19 @@ export default function LiveDetectionReadout({
           z: null,
         }
       }
-      const best = dets.reduce((a, b) => (a.confidence > b.confidence ? a : b))
+      const best = isContainerClass(cls) ? pickCenterDetection(dets) : bestByConfidence(dets)
+      if (!best) {
+        return {
+          className: cls,
+          color: classColorMap[cls],
+          confidence: null,
+          trackId: null,
+          trackSource: null,
+          x: null,
+          y: null,
+          z: null,
+        }
+      }
       return {
         className: cls,
         color: classColorMap[cls],

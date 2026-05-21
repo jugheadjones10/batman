@@ -62,6 +62,27 @@ def _measurement_size_px(
     return s * equivalent_size_ratio
 
 
+def _is_container_class(class_name: str | None) -> bool:
+    """Return true for target classes that should use center-container picking."""
+    return "container" in str(class_name or "").strip().lower()
+
+
+def _center_distance_sq(det: dict) -> float:
+    """Squared distance from bbox center to normalized frame center (0.5, 0.5)."""
+    box = det["box"]
+    dx = float(box["x"]) - 0.5
+    dy = float(box["y"]) - 0.5
+    return dx * dx + dy * dy
+
+
+def _pick_center_detection(dets: list[dict], class_name: str) -> dict | None:
+    """Pick the detection for ``class_name`` whose bbox center is nearest frame center."""
+    candidates = [d for d in dets if d.get("class_name") == class_name]
+    if not candidates:
+        return None
+    return min(candidates, key=_center_distance_sq)
+
+
 def _fit_single_class(pairs: list[tuple[float, float]]) -> dict:
     """Fit a k_over_s or linear_inv model from (s, z_mm) pairs.
 
@@ -194,7 +215,11 @@ def estimate(
     measurement_source: str = BBOX_LONGER_SIDE,
     equivalent_size_ratio: float | None = None,
 ) -> list[dict]:
-    """Apply ``model`` to every detection whose class is in ``target_classes``.
+    """Apply ``model`` to target detections.
+
+    Container target classes are center-selected per frame so side containers do
+    not participate in spreader/container gap estimates. Other target classes
+    keep the historical all-detections behaviour.
 
     Modifies detection dicts in-place by adding a rounded ``z_mm`` field.
     Returns the modified frames list.
@@ -204,13 +229,32 @@ def estimate(
         return frames
 
     target_set = set(target_classes)
+    center_only_targets = {
+        class_name
+        for class_name in target_set
+        if class_name != reference_class and _is_container_class(class_name)
+    }
     model_type = model.get("type")
     estimated_count = 0
 
     for frame in frames:
-        for det in frame.get("detections", []):
+        dets = frame.get("detections", [])
+        center_selected = {
+            id(det)
+            for class_name in center_only_targets
+            if (det := _pick_center_detection(dets, class_name)) is not None
+        }
+
+        for det in dets:
             if det.get("class_name") not in target_set:
                 continue
+
+            if det.get("class_name") in center_only_targets:
+                det.pop("z_mm", None)
+                det.pop("z_selected", None)
+                if id(det) not in center_selected:
+                    continue
+                det["z_selected"] = True
 
             s = _measurement_size_px(
                 det,
