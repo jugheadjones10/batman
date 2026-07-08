@@ -29,6 +29,7 @@ import SideViewSchematic from '@/components/SideViewSchematic'
 import DetectionOverlaySvg from '@/components/DetectionOverlaySvg'
 import { smoothFramesPerTrack } from '@/lib/oneEuroFilter'
 import {
+  buildStackingOverlayBoxes,
   buildTrackedOverlayBoxes,
   COLOR_EXTRAPOLATED,
   COLOR_MEASURED,
@@ -36,7 +37,10 @@ import {
   DEFAULT_TRACKER_PARAMS,
   findClosestFrameIndex,
   pickPrimaryTrackPerClassFrames,
+  resolveContainerClass,
+  resolveSpreaderClass,
 } from '@/lib/trackingPresentation'
+import { analyzeStacking } from '@/lib/stackingDistance'
 import type {
   InferenceConfig,
   InferenceGPUSubmitRequest,
@@ -689,6 +693,7 @@ export default function InferencePage() {
                   videos={videos}
                   selectedVideo={selectedVideo}
                   presentationFrames={presentationFrames}
+                  smoothedTrackedFrames={smoothedTrackedFrames}
                   rawFrames={rawFrames}
                   zCalibration={zCalibration}
                   bytetrackFetching={bytetrackFetching}
@@ -1238,6 +1243,8 @@ interface InferencePlaybackPanelProps {
   videos?: ProjectVideo[]
   selectedVideo?: ProjectVideo
   presentationFrames: InferenceResult[]
+  /** All smoothed ByteTrack tracks (pre primary-pick); needed for stacking analysis. */
+  smoothedTrackedFrames: InferenceResult[]
   rawFrames: InferenceResult[]
   zCalibration: ZCalibration | null
   bytetrackFetching: boolean
@@ -1249,6 +1256,7 @@ function InferencePlaybackPanel({
   videos,
   selectedVideo,
   presentationFrames,
+  smoothedTrackedFrames,
   rawFrames,
   zCalibration,
   bytetrackFetching,
@@ -1315,6 +1323,46 @@ function InferencePlaybackPanel({
   const vid = selectedVideo ?? videos?.find((v) => String(v.id) === selectedCell.video)
   const vw = vid?.width || 1920
   const vh = vid?.height || 1080
+
+  // Loaded-spreader stacking analysis over ALL smoothed tracks (the primary
+  // pick collapses containers to the center one, which is exactly the carried
+  // container we must exclude).
+  const stackingAnalysis = useMemo(() => {
+    if (smoothedTrackedFrames.length === 0) return null
+    const names = new Set<string>()
+    for (const f of smoothedTrackedFrames) {
+      for (const d of f.detections) names.add(d.class_name)
+    }
+    const allClasses = Array.from(names).sort()
+    const spreaderClass = resolveSpreaderClass(allClasses, zCalibration)
+    const containerClass = resolveContainerClass(allClasses, spreaderClass)
+    if (!spreaderClass || !containerClass || spreaderClass === containerClass) return null
+    return analyzeStacking({
+      frames: smoothedTrackedFrames,
+      spreaderClass,
+      containerClass,
+      videoWidth: vw,
+      videoHeight: vh,
+      calibration: zCalibration,
+    })
+  }, [smoothedTrackedFrames, zCalibration, vw, vh])
+
+  // smoothedTrackedFrames and presentationFrames are index-aligned (the
+  // primary pick is a per-frame map), so the tracked frame index is valid for
+  // both the stacking analysis and the full smoothed frame.
+  const currentSmoothedFrame =
+    currentTrackedFrameIndex >= 0
+      ? smoothedTrackedFrames[currentTrackedFrameIndex] ?? null
+      : null
+  const stackingBoxes = useMemo(
+    () => buildStackingOverlayBoxes(currentSmoothedFrame, stackingAnalysis, currentTrackedFrameIndex),
+    [currentSmoothedFrame, stackingAnalysis, currentTrackedFrameIndex],
+  )
+  const overlayBoxes = useMemo(
+    () => [...trackedOverlay.boxes, ...stackingBoxes],
+    [trackedOverlay.boxes, stackingBoxes],
+  )
+
   const videoSrc = api.videos.streamUrl(projectName, selectedCell.video, true)
   const trackedCount = trackedOverlay.measured + trackedOverlay.extrapolated
   const hasPresentationFrames = presentationFrames.length > 0
@@ -1359,7 +1407,7 @@ function InferencePlaybackPanel({
               }}
             />
             <DetectionOverlaySvg
-              boxes={trackedOverlay.boxes}
+              boxes={overlayBoxes}
               videoWidth={vw}
               videoHeight={vh}
             />
@@ -1380,6 +1428,7 @@ function InferencePlaybackPanel({
               runName={selectedCell.run}
               videoId={selectedCell.video}
               inferenceId={selectedCell.inferenceId}
+              stacking={stackingAnalysis}
             />
           ) : (
             <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-xs text-muted-foreground">

@@ -1,5 +1,6 @@
-import type { Detection, InferenceResult } from '@/types'
+import type { Detection, InferenceResult, ZCalibration } from '@/types'
 import type { OverlayBox } from '@/components/DetectionOverlaySvg'
+import type { StackingAnalysis } from '@/lib/stackingDistance'
 
 export const DEFAULT_TRACKER_PARAMS = {
   track_activation_threshold: 0.25,
@@ -15,6 +16,8 @@ export const DEFAULT_OEF = {
 
 export const COLOR_MEASURED = '#34d399'
 export const COLOR_EXTRAPOLATED = '#fbbf24'
+export const COLOR_CARRIED = '#38bdf8'
+export const COLOR_TARGET = '#c084fc'
 
 export function findClosestFrameIndex(frames: InferenceResult[], time: number): number {
   if (frames.length === 0) return -1
@@ -52,6 +55,41 @@ export function pickCenterDetection(detections: Detection[]): Detection | undefi
   return detections.reduce<Detection | undefined>(
     (best, d) => (!best || distanceToFrameCenter(d) < distanceToFrameCenter(best) ? d : best),
     undefined,
+  )
+}
+
+/**
+ * Default spreader-class resolution shared by the schematic and the stacking
+ * analysis. Prefer the round-feature proxy class from the calibration, then a
+ * class literally named "spreader" (but not "container"), then the calibration
+ * reference class.
+ */
+export function resolveSpreaderClass(
+  allClasses: string[],
+  calibration: ZCalibration | null | undefined,
+): string {
+  return (
+    (calibration?.measurement_source === 'round_feature_equivalent_length' &&
+    calibration.reference_class &&
+    allClasses.includes(calibration.reference_class)
+      ? calibration.reference_class
+      : undefined) ??
+    allClasses.find((c) => /spreader/i.test(c) && !/container/i.test(c)) ??
+    (calibration?.reference_class && allClasses.includes(calibration.reference_class)
+      ? calibration.reference_class
+      : undefined) ??
+    allClasses[0] ??
+    ''
+  )
+}
+
+/** Default container-class resolution: first class mentioning "container". */
+export function resolveContainerClass(allClasses: string[], spreaderClass: string): string {
+  return (
+    allClasses.find((c) => isContainerClass(c) && c !== spreaderClass) ??
+    allClasses.find((c) => c !== spreaderClass) ??
+    allClasses[0] ??
+    ''
   )
 }
 
@@ -100,6 +138,52 @@ export function pickPrimaryTrackPerClassFrames(frames: InferenceResult[]): Infer
 
     return { ...frame, detections }
   })
+}
+
+/**
+ * Stacking overlay: extra boxes for the carried container (held by the
+ * spreader) and the locked target container it will be placed on. Drawn from
+ * the full smoothed tracked frame (not the primary-picked one) because the
+ * target track is, by definition, not the center container.
+ */
+export function buildStackingOverlayBoxes(
+  smoothedFrame: InferenceResult | null,
+  analysis: StackingAnalysis | null,
+  frameIndex: number,
+): OverlayBox[] {
+  if (!smoothedFrame || !analysis) return []
+  const info = analysis.frames[frameIndex]
+  if (!info) return []
+
+  const boxes: OverlayBox[] = []
+  if (info.carriedTrackId != null) {
+    const carried = smoothedFrame.detections.find((d) => d.track_id === info.carriedTrackId)
+    if (carried) {
+      boxes.push({
+        key: `stk-carried-${info.carriedTrackId}`,
+        box: carried.box,
+        color: COLOR_CARRIED,
+        label: `carried #${info.carriedTrackId}`,
+        dashed: carried.track_source === 'lost',
+      })
+    }
+  }
+  if (info.state === 'locked' && analysis.targetTrackId != null) {
+    const target = smoothedFrame.detections.find((d) => d.track_id === analysis.targetTrackId)
+    if (target) {
+      boxes.push({
+        key: `stk-target-${analysis.targetTrackId}`,
+        box: target.box,
+        color: COLOR_TARGET,
+        label:
+          info.gapMm != null
+            ? `target #${analysis.targetTrackId} · ${info.gapMm.toFixed(0)} mm`
+            : `target #${analysis.targetTrackId}`,
+        dashed: target.track_source === 'lost',
+      })
+    }
+  }
+  return boxes
 }
 
 /**

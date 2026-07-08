@@ -100,3 +100,6 @@ site/
 
 # Z-Axis images
 z-axis_images/
+
+# TypeScript incremental build info
+*.tsbuildinfo

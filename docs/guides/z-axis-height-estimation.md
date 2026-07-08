@@ -269,6 +269,28 @@ Open a finished inference run on the **Inference** page and expand the **Z-Axis 
 
 The right-hand column of a calibrated inference run also renders a **Side-View Schematic** card: a live elevation diagram of camera → spreader → container that updates as the video plays. Pick the spreader and container classes with the two dropdowns; the container's length is read straight from the calibration's `length_mm` (falling back to an aspect-ratio inference if the calibration is absent), the vertical height is the ISO-standard 2591 mm, and the card reports the four distances (camera→spreader, spreader→container-top, container height, camera→container-bottom). Use it as a quick sanity check on whether the calibrated z values produce physically plausible stacking.
 
+## Stacking distance with a loaded spreader
+
+The center-container rule above assumes an **empty** spreader descending onto the pickup container. When the spreader is already **carrying** a container and lowering it onto a stack, the geometry inverts: the container at screen center is the *carried* one, and the actual target — the container the load will be placed on — sits underneath it, partially occluded. Picking the center container would measure the distance from the spreader to its own load.
+
+Batman handles this with a frontend analysis (`frontend/src/lib/stackingDistance.ts`) that runs over the smoothed ByteTrack frames on the inference detail page. It moves through three states:
+
+1. **Carried-container detection.** A container track is flagged as *carried* when three cues hold together: its bbox covers a minimum fraction of the spreader box (an intersection test rather than center-in-box, so it survives the close-range parallax of an offset camera), it moves in lockstep with the spreader (the on-screen velocity difference between the two tracks stays below a small threshold), and it reads at the spreader's depth — its pinhole Z is within ~1 m of the spreader's (or, without a calibration, its pixel size matches the spreader's, since both share the same real-world length). The depth cue is what separates the carried box from the target directly below it, which also overlaps and is also static on screen but sits at least a container height farther from the camera. The depth cue is **skipped for boxes clipped by the frame edge**: when the load is close to the camera it is larger than the field of view, the truncated bbox under-measures the pixel size, and the pinhole Z reads meters too far — for those boxes, overlap and lockstep alone decide. The flag needs ~0.7 s of continuous evidence to acquire and survives short detection dropouts.
+
+2. **Target lock on vertical-movement start.** While the trolley translates horizontally, every background container sweeps across the frame. The moment the trolley stops and hoisting begins, the surroundings freeze but the spreader keeps moving (its bbox grows as it descends). The analysis watches for exactly that signature: the median on-screen speed of all non-carried container tracks stays below a stillness threshold for ~1 s while the spreader's center speed or relative bbox-scale rate stays above a movement threshold for ~0.5 s. When both hold and a carried container is present, the target is **locked**: the non-carried container track nearest the frame center at that moment.
+
+3. **Frozen target Z and remaining drop.** The target's `z_mm` is frozen at the lock: the median pinhole Z of its track over a window around the lock frame (2 s before to 0.5 s after, preferring matched over Kalman-extrapolated boxes). Freezing is deliberate — the target is static and the camera has stopped translating, so its true Z no longer changes, and the growing occlusion from the descending load would otherwise corrupt the live bbox measurement. Each subsequent frame then reports the **remaining drop**:
+
+```
+gap = z_target_top − (z_spreader + 2591 mm)
+```
+
+i.e. the distance from the *bottom* of the carried container (spreader plane plus one ISO container height) to the *top* of the locked target. `z_spreader` stays live per frame, so the gap counts down to 0 as the load lands.
+
+In the UI, the tracked-video overlay marks the carried container (sky blue, `carried #id`) and the locked target (purple, `target #id · N mm`), and the side-view schematic switches to a stacked rendering — carried container attached under the spreader, target container at its frozen Z, with the amber bracket now measuring carried-bottom → target-top. A status line under the schematic reports `carrying — waiting for vertical movement` before the lock and the live remaining drop after it.
+
+All thresholds (lockstep velocity epsilon, stillness epsilon, movement thresholds, acquire/sustain durations) are exported constants at the top of `frontend/src/lib/stackingDistance.ts`.
+
 ---
 
 ## Persisted shape (`result.json`)
@@ -330,8 +352,9 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
 - `backend/app/api/inference.py` — REST endpoints: save calibration, apply estimation, re-export video.
 - `frontend/src/components/ZCalibrationPanel.tsx` — the calibration UI.
 - `frontend/src/pages/ZCalibrationPage.tsx` — the full-screen frame picker for selecting calibration frames.
-- `frontend/src/components/SideViewSchematic.tsx` — the live elevation diagram of camera / spreader / container on the inference detail page.
+- `frontend/src/components/SideViewSchematic.tsx` — the live elevation diagram of camera / spreader / container on the inference detail page, including the loaded-spreader stacked mode.
 - `frontend/src/lib/zCalibration.ts` — shared frontend fallback calculation for bbox and round-feature measurement sources.
+- `frontend/src/lib/stackingDistance.ts` — loaded-spreader stacking analysis: carried-container detection, vertical-movement target lock, frozen target Z, per-frame remaining drop.
 
 ---
 

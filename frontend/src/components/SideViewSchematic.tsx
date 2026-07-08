@@ -4,6 +4,7 @@ import { Box } from 'lucide-react'
 import { api } from '@/api/client'
 import { bestByConfidence, pickCenterDetection } from '@/lib/trackingPresentation'
 import { computeZForBox } from '@/lib/zCalibration'
+import { ISO_CONTAINER_HEIGHT_MM, type StackingAnalysis } from '@/lib/stackingDistance'
 import type { BoundingBox, Detection, InferenceResult } from '@/types'
 
 interface SideViewSchematicProps {
@@ -15,11 +16,12 @@ interface SideViewSchematicProps {
   runName: string
   videoId: string
   inferenceId: string
+  /** Loaded-spreader stacking analysis, index-aligned with `frames`. */
+  stacking?: StackingAnalysis | null
 }
 
 // ISO shipping container constants (standard dry-box, not high-cube).
 const ISO_CONTAINER_SHORT_SIDE_MM = 2438
-const ISO_CONTAINER_HEIGHT_MM = 2591
 const ISO_CONTAINER_LENGTHS_MM = [6058, 12192, 13716] as const
 const ISO_CONTAINER_LABELS: Record<number, string> = {
   6058: '20 ft',
@@ -86,6 +88,7 @@ export default function SideViewSchematic({
   runName,
   videoId,
   inferenceId,
+  stacking = null,
 }: SideViewSchematicProps) {
   const { data: calResp } = useQuery({
     queryKey: ['z-calibration', projectName, runName, videoId, inferenceId],
@@ -135,6 +138,11 @@ export default function SideViewSchematic({
 
   const frameIndex = findClosestFrameIndex(frames, currentTime)
   const frame = frameIndex >= 0 && frameIndex < frames.length ? frames[frameIndex] : null
+
+  // Loaded-spreader stacking: per-frame state from the analysis (index-aligned
+  // with `frames`), plus the frozen Z of the locked target container.
+  const stackingInfo = stacking != null && frameIndex >= 0 ? stacking.frames[frameIndex] ?? null : null
+  const stackingLocked = stackingInfo?.state === 'locked' && stacking?.targetZMm != null
 
   // Pick the container's ISO length ONCE for the whole run. Prefer the
   // calibration's declared `length_mm` (the user told us exactly which ISO size
@@ -217,14 +225,34 @@ export default function SideViewSchematic({
     }
   }
 
+  // Stacked mode: the center container in the presentation frames is the
+  // CARRIED one, so ignore it and place the container shape at the frozen Z of
+  // the locked target instead.
+  if (stackingLocked) {
+    zContainerTop = stacking!.targetZMm
+    containerZSource = 'measured'
+  }
+
+  // Carried container hangs directly under the spreader (its top sits at the
+  // spreader plane under the shared-length pinhole model).
+  const zCarriedTop = stackingLocked && zSpreader != null ? zSpreader : null
+  const zCarriedBottom = zCarriedTop != null ? zCarriedTop + ISO_CONTAINER_HEIGHT_MM : null
+
   const zContainerBottom = zContainerTop != null ? zContainerTop + ISO_CONTAINER_HEIGHT_MM : null
+  // Empty spreader: gap from spreader plane to container top. Loaded spreader:
+  // remaining drop from the carried container's bottom to the target's top.
+  const gapFromMm = stackingLocked ? zCarriedBottom : zSpreader
   const spreaderToContainer =
-    zSpreader != null && zContainerTop != null ? zContainerTop - zSpreader : null
+    gapFromMm != null && zContainerTop != null ? zContainerTop - gapFromMm : null
 
   // Zoom the vertical axis around the stack in the current frame. Using the
   // deepest value across the entire run can make shallow frames bunch up near
   // the camera, especially after switching to a small round-feature proxy.
-  const deepestVisibleMm = Math.max(zSpreader ?? 0, zContainerBottom ?? zContainerTop ?? 0)
+  const deepestVisibleMm = Math.max(
+    zSpreader ?? 0,
+    zCarriedBottom ?? 0,
+    zContainerBottom ?? zContainerTop ?? 0,
+  )
   const zMax = Math.max(
     Math.ceil((deepestVisibleMm + Z_AXIS_HEADROOM_MM) / Z_AXIS_ROUNDING_MM) *
       Z_AXIS_ROUNDING_MM,
@@ -242,6 +270,8 @@ export default function SideViewSchematic({
   const containerTopY = zContainerTop != null ? mmToY(zContainerTop) : null
   const containerBottomY = containerTopY != null ? containerTopY + containerPxHeight : null
   const spreaderY = zSpreader != null ? mmToY(zSpreader) : null
+  const carriedTopY = zCarriedTop != null ? mmToY(zCarriedTop) : null
+  const carriedBottomY = carriedTopY != null ? carriedTopY + containerPxHeight : null
 
   const ticks = useMemo(() => {
     const out: { mm: number; y: number }[] = []
@@ -380,6 +410,31 @@ export default function SideViewSchematic({
               </g>
             )}
 
+            {/* carried container (stacked mode): hangs under the spreader */}
+            {carriedTopY != null && (
+              <g style={{ transform: `translateY(${carriedTopY - TOP_Y}px)` }}>
+                <ContainerShape
+                  centerX={AXIS_X}
+                  topY={TOP_Y}
+                  halfWidthPx={containerHalfPx}
+                  heightPx={containerPxHeight}
+                  estimated={spreaderZSource === 'estimated'}
+                />
+                <text
+                  x={AXIS_X}
+                  y={TOP_Y + containerPxHeight / 2 + 3}
+                  fontSize={Math.max(8, Math.min(10, containerPxHeight * 0.45))}
+                  fill="#e0f2fe"
+                  fontFamily="ui-sans-serif, system-ui"
+                  fontWeight={600}
+                  textAnchor="middle"
+                  style={{ pointerEvents: 'none' }}
+                >
+                  carried
+                </text>
+              </g>
+            )}
+
             {/* container */}
             {containerTopY != null && (
               <g style={{ transform: `translateY(${containerTopY - TOP_Y}px)` }}>
@@ -401,7 +456,7 @@ export default function SideViewSchematic({
                   textAnchor="middle"
                   style={{ pointerEvents: 'none' }}
                 >
-                  {containerLabel}
+                  {stackingLocked ? `target · ${containerLabel}` : containerLabel}
                   {containerZSource === 'estimated' ? ' (est.)' : ''}
                 </text>
               </g>
@@ -424,7 +479,7 @@ export default function SideViewSchematic({
             {spreaderY != null && containerTopY != null && spreaderToContainer != null && (
               <DimensionBracket
                 x={INNER_BRACKET_X}
-                y1={spreaderY}
+                y1={stackingLocked && carriedBottomY != null ? carriedBottomY : spreaderY}
                 y2={containerTopY}
                 label={`${spreaderToContainer.toFixed(0)} mm`}
                 tone="amber"
@@ -470,6 +525,24 @@ export default function SideViewSchematic({
             )}
           </svg>
         </div>
+
+        {stackingInfo != null && stackingInfo.state !== 'idle' && (
+          <div className="text-[11px] text-muted-foreground">
+            {stackingInfo.state === 'carrying' ? (
+              <span className="text-sky-300">
+                Carrying container — waiting for vertical movement to lock the target.
+              </span>
+            ) : (
+              <span className="text-purple-300">
+                Target locked
+                {stacking?.targetTrackId != null ? ` (track #${stacking.targetTrackId})` : ''}
+                {stackingInfo.gapMm != null
+                  ? ` — remaining drop ${stackingInfo.gapMm.toFixed(0)} mm`
+                  : ''}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
