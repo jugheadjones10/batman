@@ -1,9 +1,7 @@
 """Inference API routes."""
 
 import asyncio
-import io
 import json
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -17,7 +15,7 @@ from pydantic import BaseModel, Field
 from backend.app.api.projects import get_project_path, load_project_config
 from backend.app.config import settings
 from backend.app.models.training import InferenceConfig, InferenceGPUSubmitRequest
-from backend.app.services import skew_estimator, z_estimator
+from backend.app.services import z_estimator
 from backend.app.services.gpu_service import GPUJobState, gpu_service
 from backend.app.services.inference_runner import inference_runner
 from backend.app.services.tracker import TrackingConfig
@@ -57,7 +55,6 @@ async def load_model(project_name: str, request: LoadModelRequest):
     checkpoint_path = None
     model_type = "rfdetr"
     model_size = "base"
-    task = "detection"
     run_name = None
 
     for run_dir in runs_dir.iterdir():
@@ -81,8 +78,9 @@ async def load_model(project_name: str, request: LoadModelRequest):
                 model_type = "rfdetr"
 
             # Extract variant: "rf-detr-small" → "small", or from config.
-            # Order matters: check "xlarge" before "large" so it doesn't match the prefix.
-            for variant in ("nano", "small", "medium", "base", "xlarge", "large"):
+            if "seg" in model_field.lower() or "xlarge" in model_field.lower():
+                raise HTTPException(status_code=400, detail="Only detection checkpoints are supported")
+            for variant in ("nano", "small", "medium", "base", "large"):
                 if variant in model_field:
                     model_size = variant
                     break
@@ -91,8 +89,8 @@ async def load_model(project_name: str, request: LoadModelRequest):
             if cfg_model:
                 model_size = cfg_model
             cfg_task = cfg_training.get("task") or meta.get("task")
-            if cfg_task:
-                task = cfg_task
+            if cfg_task and cfg_task != "detection":
+                raise HTTPException(status_code=400, detail="Only detection checkpoints are supported")
 
             # Fallback: meta may not have checkpoint_path (e.g. local run before backend wrote it)
             if not checkpoint_path:
@@ -116,8 +114,8 @@ async def load_model(project_name: str, request: LoadModelRequest):
                 classes = class_info.get("classes", classes)
                 # class_info.json may also carry task (written by cli/train)
                 ci_task = class_info.get("task")
-                if ci_task:
-                    task = ci_task
+                if ci_task and ci_task != "detection":
+                    raise HTTPException(status_code=400, detail="Only detection checkpoints are supported")
             break
 
     if not checkpoint_path:
@@ -134,11 +132,10 @@ async def load_model(project_name: str, request: LoadModelRequest):
         model_type,
         device=device,
         model_size=model_size,
-        task=task,
     )
     inference_runner.current_run_name = run_name
 
-    return {"message": "Model loaded successfully", "run_name": run_name, "task": task}
+    return {"message": "Model loaded successfully", "run_name": run_name}
 
 
 @router.post("/run-on-image")
@@ -240,7 +237,7 @@ def _persist_inference_result(
     config: InferenceConfig,
     result: dict,
 ) -> dict:
-    """Write result.json and run the skew estimator. Returns the enriched result."""
+    """Write result.json and return the persisted result."""
     video_resolution = _get_video_resolution(project_path, video_id)
 
     persist_data = {
@@ -268,14 +265,6 @@ def _persist_inference_result(
     }
     with open(result_dir / "result.json", "w") as f:
         json.dump(persist_data, f, indent=2)
-
-    # Score per-frame skew between spreader and container (only has any effect
-    # when the current model is segmentation-capable and masks are present).
-    try:
-        skew_summary = skew_estimator.apply_skew_to_result(result_dir, video_resolution)
-        result["skew"] = skew_summary
-    except Exception as e:
-        logger.warning(f"skew_estimator failed for {result_dir}: {e}")
 
     result["persisted"] = True
     result["run_name"] = run_name
@@ -322,7 +311,7 @@ async def run_on_video_stream(
       2. Repeated `{"type": "progress", "current": i, "total": N, "avg_fps": f,
          "eta_s": t}` (~5 Hz).
       3. `{"type": "stage", "stage": "encoding_video"}` while ffmpeg re-encodes.
-      4. `{"type": "stage", "stage": "post_processing"}` during skew/save.
+      4. `{"type": "stage", "stage": "post_processing"}` while saving results.
       5. Terminal `{"type": "complete", "inference_id": ..., "total_frames": N,
          "avg_fps": f, ...}` OR `{"type": "error", "message": ...}`.
 
@@ -613,126 +602,6 @@ async def delete_inference_result(
         raise HTTPException(status_code=404, detail="Inference result not found")
 
     return {"message": "Inference result deleted"}
-
-
-class ExtractFramesRequest(BaseModel):
-    frame_numbers: list[int]
-
-
-@router.post("/results/{run_name}/{video_id}/{inference_id}/extract-frames")
-async def extract_inference_frames(
-    project_name: str,
-    run_name: str,
-    video_id: str,
-    inference_id: str,
-    request: ExtractFramesRequest,
-):
-    """Extract selected frames as JPEG images with their detection data, returned as a ZIP."""
-    if not request.frame_numbers:
-        raise HTTPException(status_code=400, detail="No frame numbers specified")
-
-    project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # Load inference result
-    project = Project.load(project_path)
-    result = project.get_inference_result(run_name, video_id, inference_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Inference result not found")
-
-    # Build lookup from frame_number -> frame data
-    frames_by_number: dict[int, dict] = {}
-    for frame in result.get("frames", []):
-        frames_by_number[frame["frame_number"]] = frame
-
-    # Resolve source video path
-    videos_meta_path = project_path / "videos" / "videos.json"
-    if not videos_meta_path.exists():
-        raise HTTPException(status_code=404, detail="No videos found")
-
-    with open(videos_meta_path) as f:
-        videos_meta = json.load(f)
-
-    if str(video_id) not in videos_meta:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    video_path = Path(videos_meta[str(video_id)]["original_path"])
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found")
-
-    # Open video and get resolution
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise HTTPException(status_code=500, detail="Could not open video file")
-
-    vid_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # Sort frame numbers for sequential seeking efficiency
-    sorted_frames = sorted(set(request.frame_numbers))
-
-    # Build ZIP in memory
-    zip_buffer = io.BytesIO()
-    export_frames = []
-
-    try:
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for frame_num in sorted_frames:
-                if frame_num < 0 or frame_num >= total_frames:
-                    logger.warning(f"Skipping out-of-range frame {frame_num}")
-                    continue
-
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning(f"Could not read frame {frame_num}")
-                    continue
-
-                # Encode as JPEG
-                success, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                if not success:
-                    logger.warning(f"Could not encode frame {frame_num}")
-                    continue
-
-                filename = f"frame_{frame_num:06d}.jpg"
-                zf.writestr(filename, jpeg_buf.tobytes())
-
-                # Look up detection data
-                frame_data = frames_by_number.get(frame_num)
-                export_frames.append(
-                    {
-                        "frame_number": frame_num,
-                        "timestamp": frame_data["timestamp"]
-                        if frame_data
-                        else frame_num / cap.get(cv2.CAP_PROP_FPS),
-                        "image_filename": filename,
-                        "detections": frame_data.get("detections", []) if frame_data else [],
-                    }
-                )
-
-            # Write detections JSON
-            detections_json = {
-                "project": project_name,
-                "run_name": run_name,
-                "video_id": video_id,
-                "inference_id": inference_id,
-                "video_resolution": {"width": vid_width, "height": vid_height},
-                "frames": export_frames,
-            }
-            zf.writestr("detections.json", json.dumps(detections_json, indent=2))
-    finally:
-        cap.release()
-
-    zip_buffer.seek(0)
-    zip_filename = f"{project_name}_{run_name}_{video_id}_{inference_id}_frames.zip"
-
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
-    )
 
 
 @router.post("/export-video/{video_id}")
@@ -1162,175 +1031,6 @@ async def export_z_video(
                 tmp_path.unlink(missing_ok=True)
 
     return {"message": "Video re-exported with Z overlays", "output_path": str(output_path)}
-
-
-class RerenderRequest(BaseModel):
-    render_mode: str = "polygon"  # "polygon" | "bbox"
-
-
-@router.post("/results/{run_name}/{video_id}/{inference_id}/rerender")
-async def rerender_detected_video_endpoint(
-    project_name: str,
-    run_name: str,
-    video_id: str,
-    inference_id: str,
-    request: RerenderRequest,
-):
-    """Re-bake `detected.mp4` with a different overlay mode (polygon / bbox).
-
-    Reads the existing `result.json` (no re-inference) and the original source
-    video, then writes a new `detected.mp4` with overlays drawn according to
-    the requested render_mode. The chosen mode is persisted back into
-    `result.json#config.render_mode` for future reference.
-    """
-    mode = (request.render_mode or "polygon").lower()
-    if mode not in ("polygon", "bbox"):
-        raise HTTPException(
-            status_code=400,
-            detail="render_mode must be one of: polygon, bbox",
-        )
-
-    project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
-    result_path = result_dir / "result.json"
-    if not result_path.exists():
-        raise HTTPException(status_code=404, detail="Inference result not found")
-
-    videos_meta_path = project_path / "videos" / "videos.json"
-    if not videos_meta_path.exists():
-        raise HTTPException(status_code=404, detail="No videos found")
-    with open(videos_meta_path) as f:
-        videos_meta = json.load(f)
-    if str(video_id) not in videos_meta:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    source_video_path = Path(videos_meta[str(video_id)]["original_path"])
-    if not source_video_path.exists():
-        raise HTTPException(status_code=404, detail="Source video file not found")
-
-    output_path = result_dir / "detected.mp4"
-
-    from src.core.inference import rerender_detected_video
-
-    try:
-        frames_written = await asyncio.to_thread(
-            rerender_detected_video,
-            source_video_path,
-            result_path,
-            output_path,
-            mode,
-        )
-    except Exception as e:
-        logger.exception("Rerender failed")
-        raise HTTPException(status_code=500, detail=f"Rerender failed: {e}") from e
-
-    # Persist the chosen mode in result.json so the UI can reflect the current state.
-    try:
-        with open(result_path) as f:
-            data = json.load(f)
-        cfg = data.get("config") or {}
-        cfg["render_mode"] = mode
-        data["config"] = cfg
-        with open(result_path, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to persist render_mode in result.json: {e}")
-
-    return {
-        "message": f"Video re-rendered in '{mode}' mode",
-        "render_mode": mode,
-        "frames_written": frames_written,
-        "output_path": str(output_path),
-    }
-
-
-class RenderComparisonRequest(BaseModel):
-    render_mode: str = "polygon"
-    track_activation_threshold: float = Field(0.25, ge=0, le=1)
-    lost_track_buffer: int = Field(30, ge=1, le=600)
-    minimum_matching_threshold: float = Field(0.8, ge=0, le=1)
-
-
-@router.post("/results/{run_name}/{video_id}/{inference_id}/render-comparison")
-async def render_comparison_endpoint(
-    project_name: str,
-    run_name: str,
-    video_id: str,
-    inference_id: str,
-    request: RenderComparisonRequest,
-):
-    """Render side-by-side comparison videos: raw per-frame detections vs
-    sv.ByteTrack, both derived from the existing result.json (no re-inference).
-
-    Writes `detected_raw.mp4` and `detected_bytetrack.mp4` into the inference
-    result directory. Served via the existing video endpoint with
-    ?variant=raw or ?variant=bytetrack.
-    """
-    mode = (request.render_mode or "polygon").lower()
-    if mode not in ("polygon", "bbox"):
-        raise HTTPException(
-            status_code=400,
-            detail="render_mode must be one of: polygon, bbox",
-        )
-
-    project_path = get_project_path(project_name)
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    result_dir = _resolve_result_dir(project_path, run_name, video_id, inference_id)
-    result_path = result_dir / "result.json"
-    if not result_path.exists():
-        raise HTTPException(status_code=404, detail="Inference result not found")
-
-    videos_meta_path = project_path / "videos" / "videos.json"
-    if not videos_meta_path.exists():
-        raise HTTPException(status_code=404, detail="No videos found")
-    with open(videos_meta_path) as f:
-        videos_meta = json.load(f)
-    if str(video_id) not in videos_meta:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    source_video_path = Path(videos_meta[str(video_id)]["original_path"])
-    if not source_video_path.exists():
-        raise HTTPException(status_code=404, detail="Source video file not found")
-
-    out_raw = result_dir / "detected_raw.mp4"
-    out_bt = result_dir / "detected_bytetrack.mp4"
-
-    from src.core.inference import render_comparison_videos
-
-    try:
-        frames_written = await asyncio.to_thread(
-            render_comparison_videos,
-            source_video_path,
-            result_path,
-            out_raw,
-            out_bt,
-            mode,
-            request.track_activation_threshold,
-            request.lost_track_buffer,
-            request.minimum_matching_threshold,
-        )
-    except Exception as e:
-        logger.exception("Comparison render failed")
-        raise HTTPException(
-            status_code=500, detail=f"Comparison render failed: {e}"
-        ) from e
-
-    return {
-        "message": "Comparison videos rendered",
-        "frames_written": frames_written,
-        "has_raw_video": out_raw.exists(),
-        "has_bytetrack_video": out_bt.exists(),
-        "bytetrack_config": {
-            "track_activation_threshold": request.track_activation_threshold,
-            "lost_track_buffer": request.lost_track_buffer,
-            "minimum_matching_threshold": request.minimum_matching_threshold,
-        },
-    }
 
 
 @router.get("/results/{run_name}/{video_id}/{inference_id}/bytetrack-frames")

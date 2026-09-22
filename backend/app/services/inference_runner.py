@@ -3,10 +3,9 @@
 import asyncio
 import time
 from pathlib import Path
-from typing import AsyncGenerator, Callable, Literal, Optional
+from typing import AsyncGenerator, Callable, Optional
 
 import cv2
-import numpy as np
 from loguru import logger
 
 # Type alias for the streaming progress callback used by the API layer to
@@ -19,10 +18,9 @@ from loguru import logger
 # asyncio.Queue.put_nowait via call_soon_threadsafe) should happen inside it.
 ProgressCallback = Callable[[dict], None]
 
-from backend.app.config import settings
 from backend.app.services.tracker import Tracker, TrackingConfig
 from src.core.inference import Detection, draw_detections
-from src.core.trainer import get_device, get_device_info, resolve_rfdetr_class
+from src.core.trainer import get_device, get_device_info, resolve_rfdetr_class, validate_detection_checkpoint
 
 
 class InferenceRunner:
@@ -32,7 +30,6 @@ class InferenceRunner:
         self.model = None
         self.model_path: Optional[Path] = None
         self.model_type: Optional[str] = None
-        self.model_task: str = "detection"
         self.class_names: list[str] = []
         self.current_run_name: Optional[str] = None
         self._device: Optional[str] = None
@@ -41,10 +38,10 @@ class InferenceRunner:
     def _load_rfdetr_model(
         checkpoint_path: Path,
         model_size: str = "base",
-        task: str = "detection",
     ):
-        """Instantiate the correct RF-DETR variant for (task, size)."""
-        Model = resolve_rfdetr_class(task, model_size)
+        """Instantiate the correct RF-DETR variant for the model size."""
+        validate_detection_checkpoint(checkpoint_path)
+        Model = resolve_rfdetr_class(model_size)
         return Model(pretrain_weights=str(checkpoint_path))
 
     async def load_model(
@@ -54,24 +51,25 @@ class InferenceRunner:
         model_type: str = "yolo",
         device: str = "auto",
         model_size: str = "base",
-        task: str = "detection",
     ):
         """Load a trained model onto the given device (auto, cuda, mps, cpu)."""
         self.model_path = checkpoint_path
         self.model_type = model_type
-        self.model_task = task
         self.class_names = class_names
         resolved = get_device(device)
         self._device = resolved
         info = get_device_info(resolved)
-        logger.info(f"Loading model on {info.get('name', resolved)} (task={task})")
+        logger.info(f"Loading model on {info.get('name', resolved)}")
 
         if model_type == "yolo":
             from ultralytics import YOLO
 
-            self.model = YOLO(str(checkpoint_path))
+            model = YOLO(str(checkpoint_path))
+            if model.task != "detect":
+                raise ValueError("Only detection checkpoints are supported.")
+            self.model = model
         elif model_type == "rfdetr":
-            self.model = self._load_rfdetr_model(checkpoint_path, model_size, task=task)
+            self.model = self._load_rfdetr_model(checkpoint_path, model_size)
             if hasattr(self.model, "to") and resolved != "cpu":
                 try:
                     import torch
@@ -345,7 +343,6 @@ class InferenceRunner:
                             confidence=d.get("confidence", 1.0),
                             track_id=d.get("track_id"),
                             z_mm=d.get("z_mm"),
-                            mask=d.get("mask"),
                         )
                         for d in detections
                     ]
@@ -538,10 +535,6 @@ class InferenceRunner:
     def _parse_rfdetr_results(self, results, img_shape=None) -> list[dict]:
         """Parse RF-DETR model output to common format (normalized center box, class_name, etc.).
         img_shape: (height, width) of the image; required to normalize pixel coords from the model.
-
-        For segmentation models (results.mask present), extracts the largest contour from each
-        instance mask, simplifies it with approxPolyDP, and attaches it as a normalised polygon
-        under the "mask" field on each detection.
         """
         out = []
         if results is None:
@@ -561,9 +554,6 @@ class InferenceRunner:
                 return out
         else:
             img_w = img_h = 1
-
-        masks = getattr(results, "mask", None)
-        has_masks = masks is not None and len(masks) == n
 
         for i in range(n):
             xyxy = results.xyxy[i]
@@ -591,56 +581,8 @@ class InferenceRunner:
                 "class_name": class_name,
                 "confidence": conf,
             }
-            if has_masks:
-                poly = _mask_to_polygon_norm(masks[i], img_w, img_h)
-                if poly is not None:
-                    det["mask"] = poly
             out.append(det)
         return out
-
-
-def _mask_to_polygon_norm(mask, img_w: int, img_h: int) -> Optional[list[list[float]]]:
-    """Extract the largest contour of a binary mask and return as a normalised polygon.
-
-    Accepts HxW numpy arrays / torch tensors; any non-zero value is treated as inside.
-    The contour is simplified with cv2.approxPolyDP at epsilon=1.5px to keep result.json small.
-    Returns None if the mask is empty, degenerate, or any step fails.
-    """
-    try:
-        if hasattr(mask, "detach"):
-            mask = mask.detach().cpu().numpy()
-        elif hasattr(mask, "cpu"):
-            mask = mask.cpu().numpy()
-        arr = np.asarray(mask)
-        if arr.ndim == 3:
-            arr = arr.squeeze()
-        if arr.ndim != 2:
-            return None
-        bin_mask = (arr > 0).astype(np.uint8)
-        if bin_mask.max() == 0:
-            return None
-
-        contours, _ = cv2.findContours(
-            bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return None
-        biggest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(biggest) <= 0:
-            return None
-
-        simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
-        pts = simplified.reshape(-1, 2)
-        if len(pts) < 3:
-            return None
-
-        return [
-            [float(x) / img_w, float(y) / img_h]
-            for x, y in pts
-        ]
-    except Exception as e:
-        logger.debug(f"mask_to_polygon_norm failed: {e}")
-        return None
 
 
 # Global instance

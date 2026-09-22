@@ -18,6 +18,7 @@ export const COLOR_MEASURED = '#34d399'
 export const COLOR_EXTRAPOLATED = '#fbbf24'
 export const COLOR_CARRIED = '#38bdf8'
 export const COLOR_TARGET = '#c084fc'
+export const COLOR_PICKUP_TARGET = '#a3e635'
 
 export function findClosestFrameIndex(frames: InferenceResult[], time: number): number {
   if (frames.length === 0) return -1
@@ -142,9 +143,10 @@ export function pickPrimaryTrackPerClassFrames(frames: InferenceResult[]): Infer
 
 /**
  * Stacking overlay: extra boxes for the carried container (held by the
- * spreader) and the locked target container it will be placed on. Drawn from
- * the full smoothed tracked frame (not the primary-picked one) because the
- * target track is, by definition, not the center container.
+ * spreader), the locked pickup/placement target, and — while the spreader is
+ * empty — the reference container nearest the spreader. Drawn from the full
+ * smoothed tracked frame (not the primary-picked one) because these tracks
+ * are, by design, not the center container.
  */
 export function buildStackingOverlayBoxes(
   smoothedFrame: InferenceResult | null,
@@ -168,18 +170,31 @@ export function buildStackingOverlayBoxes(
       })
     }
   }
-  if (info.state === 'locked' && analysis.targetTrackId != null) {
-    const target = smoothedFrame.detections.find((d) => d.track_id === analysis.targetTrackId)
+  if ((info.state === 'locked' || info.state === 'pickup') && info.targetTrackId != null) {
+    const target = smoothedFrame.detections.find((d) => d.track_id === info.targetTrackId)
     if (target) {
+      const prefix = info.state === 'pickup' ? 'pickup target' : 'target'
       boxes.push({
-        key: `stk-target-${analysis.targetTrackId}`,
+        key: `stk-target-${info.targetTrackId}`,
         box: target.box,
         color: COLOR_TARGET,
         label:
           info.gapMm != null
-            ? `target #${analysis.targetTrackId} · ${info.gapMm.toFixed(0)} mm`
-            : `target #${analysis.targetTrackId}`,
+            ? `${prefix} #${info.targetTrackId} · ${info.gapMm.toFixed(0)} mm`
+            : `${prefix} #${info.targetTrackId}`,
         dashed: target.track_source === 'lost',
+      })
+    }
+  }
+  if (info.state === 'idle' && info.emptyTargetTrackId != null) {
+    const nearest = smoothedFrame.detections.find((d) => d.track_id === info.emptyTargetTrackId)
+    if (nearest) {
+      boxes.push({
+        key: `stk-nearest-${info.emptyTargetTrackId}`,
+        box: nearest.box,
+        color: COLOR_PICKUP_TARGET,
+        label: `nearest #${info.emptyTargetTrackId}`,
+        dashed: nearest.track_source === 'lost',
       })
     }
   }

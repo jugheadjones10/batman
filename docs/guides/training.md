@@ -1,5 +1,8 @@
 # Training Workflow Guide
 
+Training supports RF-DETR bounding-box detection with nano, small, base, medium,
+and large models. Non-detection checkpoints must be retrained for detection.
+
 Complete end-to-end guide for training RF-DETR models with Batman.
 
 ## Overview
@@ -73,6 +76,74 @@ python -m cli.classes rename \
   --old-name "crane-boom" \
   --new-name "crane_boom"
 ```
+
+### Spreader load state (required for stacking distance)
+
+The stacking-distance analysis needs to know whether the spreader is carrying a
+container. **This cannot be recovered from bounding boxes.** In a nadir crane
+view the detector emits a `container` box coincident with the spreader body
+whether or not a load hangs from it, so no geometric cue distinguishes the two
+states — measured on real footage, the container track sat at overlap 1.00 with
+the spreader box both while loaded and while visibly empty. The information has
+to come from the class label.
+
+Split the spreader body class in two and label every spreader box as one of:
+
+| class | label when |
+| --- | --- |
+| `spreader_loaded` | a container is attached to the spreader |
+| `spreader_empty` | no container is attached (the spreader frame is see-through) |
+
+Guidelines that matter for the downstream state machine:
+
+- **Label the transition late, not early.** During a pickup approach the target
+  container fills the spreader's footprint well before it is attached. Only
+  switch to `spreader_loaded` once the load is actually held (twist locks
+  engaged / the spreader begins to lift it). Switching early makes the analysis
+  end the pickup before touchdown.
+- **Cover mid-cycle starts.** Include clips that *begin* with a loaded
+  spreader. These are exactly the cases motion-based inference cannot resolve,
+  and the first frames of such a clip are what anchor the whole cycle.
+- **Keep the Z-reference class separate.** The calibration reference (e.g. a
+  `round` casting) is unaffected — do not split it.
+
+Any class name matching `loaded`/`laden`/`full` reads as loaded, and
+`empty`/`unladen`/`bare` as empty, so `spreader-laden` etc. also work. A plain
+`spreader` class still works but leaves the carry state to motion inference,
+which mis-reads clips that start with a load. See
+[Z-axis height estimation](z-axis-height-estimation.md) for how the analysis
+consumes this.
+
+#### Splitting an already-labelled `spreader` class
+
+Load state stays constant over long runs of frames and changes only once or
+twice per clip, so this is a handful of frame ranges per video rather than a
+per-frame decision. Do not delete and redraw boxes.
+
+1. **Rename** the existing class `spreader` to `spreader_empty`. Annotations
+   reference classes by index, so a rename touches no boxes:
+
+```bash
+python -m cli.classes rename \
+  --project "data/projects/MyProject" \
+  --old-name spreader \
+  --new-name spreader_empty
+```
+
+2. **Add** a `spreader_loaded` class on the project page.
+3. In the video annotation page, scrub to the frame where the load is first
+   held and note the `frame #` shown in the playback bar; do the same for the
+   frame where it is released. Then use **Reassign class** in the toolbar with
+   *From* `spreader_empty`, *To* `spreader_loaded`, and that frame range.
+   Repeat per carry in the clip.
+
+The frame range applies to every extracted frame it covers, not only the frames
+the filmstrip is currently showing, so a wide filmstrip interval will not
+silently skip frames. To fix a single box instead, select it and press its class
+number key.
+
+Reassignment cannot be undone, so check the frame count shown in the dialog
+before confirming.
 
 ## Step 3: Configure Training
 
@@ -405,6 +476,7 @@ See the [Training CLI docs](../cli/train.md#manual-data-subdatasets) for the ful
 - Upload a video, then open **Annotate** on that video.
 - Extract frames (e.g. every N frames), then use the filmstrip to switch between **Interval** (every Nth frame) and **Annotated** (only frames that have labels).
 - Draw boxes or use **Auto-label with SAM3** with scope: all visible frames, current frame only, or unlabeled frames only.
+- Hold **Space** to temporarily hide existing annotations and disable their hit areas while drawing an overlapping box. Release **Space** to restore them.
 
 ### CLI: SAM3 auto-label
 

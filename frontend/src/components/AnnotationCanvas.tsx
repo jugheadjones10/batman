@@ -1,15 +1,11 @@
-import { useState, useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react'
+import { useState, useRef, useEffect, useCallback, useImperativeHandle, useMemo, forwardRef } from 'react'
 import type { Annotation, BoundingBox } from '@/types'
 
 const MIN_BOX_NORM = 5 / 1024
 const HANDLE_SIZE_NORM = 12 / 1024
-const VERTEX_RADIUS_PX = 5
-const VERTEX_HIT_RADIUS_PX = 9
-const CLOSE_POLYGON_RADIUS_PX = 12
 const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
-type Tool = 'bbox' | 'polygon'
-type DragMode = 'none' | 'draw' | 'move' | 'resize' | 'move-vertex' | 'move-polygon'
+type DragMode = 'none' | 'draw' | 'move' | 'resize'
 type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | null
 
 type UndoAction =
@@ -18,7 +14,6 @@ type UndoAction =
       type: 'update'
       id: number
       previousBox: BoundingBox
-      previousPolygon?: number[][] | null
     }
   | { type: 'delete'; annotation: Annotation }
   | { type: 'restore'; annotation: Annotation }
@@ -31,8 +26,8 @@ export interface AnnotationCanvasProps {
   selectedAnnotationId: number | null
   selectedClassId: number
   classes: string[]
-  onCreateAnnotation: (box: BoundingBox, classId: number, polygon?: number[][]) => void
-  onUpdateAnnotation: (id: number, box: BoundingBox, polygon?: number[][] | null) => void
+  onCreateAnnotation: (box: BoundingBox, classId: number) => void
+  onUpdateAnnotation: (id: number, box: BoundingBox) => void
   onDeleteAnnotation: (id: number) => void
   onSelectAnnotation: (id: number | null) => void
   onAnnotationCreated?: (annotation: Annotation) => void
@@ -68,11 +63,8 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
   const [drawingBox, setDrawingBox] = useState<BoundingBox | null>(null)
   const [resizeHandle, setResizeHandle] = useState<ResizeHandle>(null)
   const [originalBox, setOriginalBox] = useState<BoundingBox | null>(null)
-  const [originalPolygon, setOriginalPolygon] = useState<number[][] | null>(null)
   const [optimisticAnnotations, setOptimisticAnnotations] = useState<Annotation[] | null>(null)
-  const [tool, setTool] = useState<Tool>('bbox')
-  const [draftPolygon, setDraftPolygon] = useState<{ x: number; y: number }[]>([])
-  const [draggedVertexIdx, setDraggedVertexIdx] = useState<number | null>(null)
+  const [annotationsHidden, setAnnotationsHidden] = useState(false)
 
   // Hot-path values stored as refs to avoid re-renders on every mouse move
   const mousePosRef = useRef<{ x: number; y: number } | null>(null)
@@ -85,6 +77,10 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
   const cycleClickIndexRef = useRef(0)
 
   const displayAnnotations = optimisticAnnotations ?? annotations
+  const interactiveAnnotations = useMemo(
+    () => (annotationsHidden ? [] : displayAnnotations),
+    [annotationsHidden, displayAnnotations]
+  )
 
   // Clear optimistic state when the real annotations prop updates (server responded)
   useEffect(() => {
@@ -167,72 +163,18 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
     [getHandleSize]
   )
 
-  const isInsidePolygon = useCallback((x: number, y: number, poly: number[][]): boolean => {
-    let inside = false
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const xi = poly[i][0]
-      const yi = poly[i][1]
-      const xj = poly[j][0]
-      const yj = poly[j][1]
-      const denom = yj - yi
-      if (denom === 0) continue
-      const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / denom + xi
-      if (intersect) inside = !inside
-    }
-    return inside
-  }, [])
-
   const getAnnotationsAtPoint = useCallback(
     (x: number, y: number): Annotation[] => {
       const at: Annotation[] = []
-      for (let i = displayAnnotations.length - 1; i >= 0; i--) {
-        const ann = displayAnnotations[i]
-        if (ann.polygon && ann.polygon.length >= 3) {
-          if (isInsidePolygon(x, y, ann.polygon)) at.push(ann)
-        } else if (isInsideBox(x, y, ann.box)) {
+      for (let i = interactiveAnnotations.length - 1; i >= 0; i--) {
+        const ann = interactiveAnnotations[i]
+        if (isInsideBox(x, y, ann.box)) {
           at.push(ann)
         }
       }
       return at
     },
-    [displayAnnotations, isInsideBox, isInsidePolygon]
-  )
-
-  const polygonBboxFromPoints = useCallback((pts: { x: number; y: number }[] | number[][]): BoundingBox => {
-    let minX = 1
-    let minY = 1
-    let maxX = 0
-    let maxY = 0
-    for (const p of pts as Array<any>) {
-      const px = Array.isArray(p) ? p[0] : p.x
-      const py = Array.isArray(p) ? p[1] : p.y
-      if (px < minX) minX = px
-      if (px > maxX) maxX = px
-      if (py < minY) minY = py
-      if (py > maxY) maxY = py
-    }
-    minX = Math.max(0, Math.min(1, minX))
-    minY = Math.max(0, Math.min(1, minY))
-    maxX = Math.max(0, Math.min(1, maxX))
-    maxY = Math.max(0, Math.min(1, maxY))
-    const width = Math.max(MIN_BOX_NORM, maxX - minX)
-    const height = Math.max(MIN_BOX_NORM, maxY - minY)
-    return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, width, height }
-  }, [])
-
-  const getVertexAtPoint = useCallback(
-    (x: number, y: number, poly: number[][]): number | null => {
-      if (canvasSize.width === 0 || canvasSize.height === 0) return null
-      const radiusX = VERTEX_HIT_RADIUS_PX / canvasSize.width
-      const radiusY = VERTEX_HIT_RADIUS_PX / canvasSize.height
-      for (let i = 0; i < poly.length; i++) {
-        const dx = (x - poly[i][0]) / radiusX
-        const dy = (y - poly[i][1]) / radiusY
-        if (dx * dx + dy * dy <= 1) return i
-      }
-      return null
-    },
-    [canvasSize]
+    [interactiveAnnotations, isInsideBox]
   )
 
   const cycleAnnotationAtPoint = useCallback(
@@ -316,115 +258,13 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       }
     }
 
-    const drawPolygon = (polygon: number[][], color: string, isSelected: boolean) => {
-      if (!polygon || polygon.length < 3) return
-      ctx.beginPath()
-      polygon.forEach(([px, py], i) => {
-        const cx = px * w
-        const cy = py * h
-        if (i === 0) ctx.moveTo(cx, cy)
-        else ctx.lineTo(cx, cy)
-      })
-      ctx.closePath()
-      ctx.fillStyle = color + (isSelected ? '55' : '35')
-      ctx.fill()
-      ctx.strokeStyle = color
-      ctx.lineWidth = isSelected ? 2 : 1.25
-      ctx.stroke()
-    }
-
-    const drawVertexHandles = (polygon: number[][], color: string) => {
-      ctx.fillStyle = '#fff'
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1.5
-      polygon.forEach(([px, py]) => {
-        const cx = px * w
-        const cy = py * h
-        ctx.beginPath()
-        ctx.arc(cx, cy, VERTEX_RADIUS_PX, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.stroke()
-      })
-    }
-
-    const drawPolygonLabel = (polygon: number[][], color: string, label?: string) => {
-      if (!label) return
-      let minX = 1
-      let minY = 1
-      for (const [px, py] of polygon) {
-        if (px < minX) minX = px
-        if (py < minY) minY = py
-      }
-      const lx = minX * w
-      const ly = minY * h
-      ctx.font = '11px system-ui, sans-serif'
-      const metrics = ctx.measureText(label)
-      const padding = 4
-      const labelHeight = 16
-      ctx.fillStyle = color
-      ctx.fillRect(lx, ly - labelHeight, metrics.width + padding * 2, labelHeight)
-      ctx.fillStyle = '#fff'
-      ctx.fillText(label, lx + padding, ly - 4)
-    }
-
-    displayAnnotations.forEach((ann) => {
+    interactiveAnnotations.forEach((ann) => {
       const color = ann.class_color || COLORS[0]
       const isSelected = ann.id === selectedAnnotationId
-      const hasPoly = !!(ann.polygon && ann.polygon.length >= 3)
-      if (hasPoly) {
-        drawPolygon(ann.polygon!, color, isSelected)
-        drawPolygonLabel(ann.polygon!, color, ann.class_name)
-        if (isSelected) drawVertexHandles(ann.polygon!, color)
-      } else {
-        drawBox(
-          ann.box,
-          color,
-          isSelected,
-          ann.id === hovered,
-          ann.class_name
-        )
-      }
+      drawBox(ann.box, color, isSelected, ann.id === hovered, ann.class_name)
     })
     if (drawingBox) {
       drawBox(drawingBox, COLORS[selectedClassId % COLORS.length], true, false, classes[selectedClassId], true)
-    }
-
-    // Draft polygon while drawing
-    if (tool === 'polygon' && draftPolygon.length > 0) {
-      const color = COLORS[selectedClassId % COLORS.length]
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1.75
-      ctx.setLineDash([6, 4])
-      ctx.beginPath()
-      draftPolygon.forEach((p, i) => {
-        const cx = p.x * w
-        const cy = p.y * h
-        if (i === 0) ctx.moveTo(cx, cy)
-        else ctx.lineTo(cx, cy)
-      })
-      if (mp) {
-        ctx.lineTo(mp.x * w, mp.y * h)
-      }
-      ctx.stroke()
-      ctx.setLineDash([])
-      // First-vertex marker (click-to-close hint when >=3 points)
-      const first = draftPolygon[0]
-      ctx.fillStyle = draftPolygon.length >= 3 ? color : '#fff'
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1.5
-      ctx.beginPath()
-      ctx.arc(first.x * w, first.y * h, CLOSE_POLYGON_RADIUS_PX / 2, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.stroke()
-      // Other vertices
-      ctx.fillStyle = '#fff'
-      ctx.strokeStyle = color
-      for (let i = 1; i < draftPolygon.length; i++) {
-        ctx.beginPath()
-        ctx.arc(draftPolygon[i].x * w, draftPolygon[i].y * h, VERTEX_RADIUS_PX, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.stroke()
-      }
     }
 
     if (mp && dragMode === 'draw' && dragStart) {
@@ -442,27 +282,7 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       ctx.setLineDash([])
     }
 
-    // Tool indicator (top-right)
-    {
-      const label =
-        tool === 'polygon'
-          ? draftPolygon.length > 0
-            ? `Polygon · ${draftPolygon.length} pts · Enter close · Esc cancel`
-            : 'Polygon (P to switch · click to add vertex)'
-          : 'Bbox (P for polygon)'
-      ctx.font = '11px system-ui, sans-serif'
-      const padding = 6
-      const metrics = ctx.measureText(label)
-      const boxW = metrics.width + padding * 2
-      const boxH = 18
-      const bx = w - boxW - 8
-      const by = 8
-      ctx.fillStyle = 'rgba(0,0,0,0.6)'
-      ctx.fillRect(bx, by, boxW, boxH)
-      ctx.fillStyle = tool === 'polygon' ? '#4ECDC4' : '#fff'
-      ctx.fillText(label, bx + padding, by + 13)
-    }
-  }, [canvasSize, displayAnnotations, selectedAnnotationId, drawingBox, selectedClassId, classes, dragMode, dragStart, tool, draftPolygon])
+  }, [canvasSize, interactiveAnnotations, selectedAnnotationId, drawingBox, selectedClassId, classes, dragMode, dragStart])
 
   // Schedule a canvas redraw on the next animation frame (coalesces multiple calls)
   const scheduleRedraw = useCallback(() => {
@@ -485,35 +305,15 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
 
   const updateCursor = useCallback(
     (x: number, y: number) => {
-      if (tool === 'polygon') {
-        // If hovering selected polygon's vertex, show grab cursor
-        if (selectedAnnotationId) {
-          const sel = displayAnnotations.find((a) => a.id === selectedAnnotationId)
-          if (sel?.polygon && sel.polygon.length >= 3) {
-            const vIdx = getVertexAtPoint(x, y, sel.polygon)
-            if (vIdx !== null) { setCursorDirect('grab'); return }
-            if (isInsidePolygon(x, y, sel.polygon)) { setCursorDirect('move'); return }
-          }
-        }
-        setCursorDirect('crosshair')
-        return
-      }
       if (selectedAnnotationId) {
-        const selectedAnn = displayAnnotations.find((a) => a.id === selectedAnnotationId)
+        const selectedAnn = interactiveAnnotations.find((a) => a.id === selectedAnnotationId)
         if (selectedAnn) {
-          // Vertex takes priority over bbox handles for polygon annotations
-          if (selectedAnn.polygon && selectedAnn.polygon.length >= 3) {
-            const vIdx = getVertexAtPoint(x, y, selectedAnn.polygon)
-            if (vIdx !== null) { setCursorDirect('grab'); return }
-          }
           const handle = getResizeHandle(x, y, selectedAnn.box)
           if (handle === 'nw' || handle === 'se') { setCursorDirect('nwse-resize'); return }
           if (handle === 'ne' || handle === 'sw') { setCursorDirect('nesw-resize'); return }
           if (handle === 'n' || handle === 's') { setCursorDirect('ns-resize'); return }
           if (handle === 'e' || handle === 'w') { setCursorDirect('ew-resize'); return }
-          if (selectedAnn.polygon && selectedAnn.polygon.length >= 3) {
-            if (isInsidePolygon(x, y, selectedAnn.polygon)) { setCursorDirect('move'); return }
-          } else if (isInsideBox(x, y, selectedAnn.box)) { setCursorDirect('move'); return }
+          if (isInsideBox(x, y, selectedAnn.box)) { setCursorDirect('move'); return }
         }
       }
       const at = getAnnotationsAtPoint(x, y)
@@ -529,37 +329,8 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       }
       setCursorDirect('crosshair')
     },
-    [tool, selectedAnnotationId, displayAnnotations, getResizeHandle, isInsideBox, isInsidePolygon, getVertexAtPoint, getAnnotationsAtPoint, setCursorDirect, scheduleRedraw]
+    [selectedAnnotationId, interactiveAnnotations, getResizeHandle, isInsideBox, getAnnotationsAtPoint, setCursorDirect, scheduleRedraw]
   )
-
-  const closeDraftPolygon = useCallback(() => {
-    if (draftPolygon.length < 3) return
-    const poly: number[][] = draftPolygon.map((p) => [
-      Math.max(0, Math.min(1, p.x)),
-      Math.max(0, Math.min(1, p.y)),
-    ])
-    const box = polygonBboxFromPoints(poly)
-    onCreateAnnotation(box, selectedClassId, poly)
-    const placeholder: Annotation = {
-      id: -(Date.now()),
-      frame_id: 0,
-      class_label_id: selectedClassId,
-      class_name: classes[selectedClassId] || '',
-      class_color: COLORS[selectedClassId % COLORS.length],
-      box,
-      polygon: poly,
-      confidence: 1,
-      source: 'manual',
-      is_exemplar: false,
-      created_at: '',
-      updated_at: '',
-    }
-    setOptimisticAnnotations([...(optimisticAnnotations ?? annotations), placeholder])
-    setDraftPolygon([])
-    // Return to bbox tool so the user can select/translate the shape immediately
-    // without the next click being interpreted as a new polygon vertex.
-    setTool('bbox')
-  }, [draftPolygon, polygonBboxFromPoints, onCreateAnnotation, selectedClassId, classes, optimisticAnnotations, annotations])
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -568,75 +339,23 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       if (!coords) return
       const { x, y } = coords
 
-      // Polygon tool: click = add vertex, close when clicking near first vertex
-      if (tool === 'polygon') {
-        // Allow dragging vertices of the currently selected polygon even in polygon tool
-        if (selectedAnnotationId) {
-          const sel = displayAnnotations.find((a) => a.id === selectedAnnotationId)
-          if (sel?.polygon && sel.polygon.length >= 3) {
-            const vIdx = getVertexAtPoint(x, y, sel.polygon)
-            if (vIdx !== null) {
-              setDragMode('move-vertex')
-              setDraggedVertexIdx(vIdx)
-              setDragStart({ x, y })
-              setOriginalBox({ ...sel.box })
-              setOriginalPolygon(sel.polygon.map((p) => [p[0], p[1]]))
-              return
-            }
-          }
-        }
-        if (draftPolygon.length >= 3 && canvasSize.width > 0 && canvasSize.height > 0) {
-          const first = draftPolygon[0]
-          const dxPx = (x - first.x) * canvasSize.width
-          const dyPx = (y - first.y) * canvasSize.height
-          if (dxPx * dxPx + dyPx * dyPx <= CLOSE_POLYGON_RADIUS_PX * CLOSE_POLYGON_RADIUS_PX) {
-            closeDraftPolygon()
-            return
-          }
-        }
-        setDraftPolygon([...draftPolygon, { x, y }])
-        return
-      }
-
       // Bbox tool
       if (selectedAnnotationId) {
-        const selectedAnn = displayAnnotations.find((a) => a.id === selectedAnnotationId)
+        const selectedAnn = interactiveAnnotations.find((a) => a.id === selectedAnnotationId)
         if (selectedAnn) {
-          // Polygon annotations: vertex drag or whole-polygon drag only (no bbox handles)
-          if (selectedAnn.polygon && selectedAnn.polygon.length >= 3) {
-            const vIdx = getVertexAtPoint(x, y, selectedAnn.polygon)
-            if (vIdx !== null) {
-              setDragMode('move-vertex')
-              setDraggedVertexIdx(vIdx)
-              setDragStart({ x, y })
-              setOriginalBox({ ...selectedAnn.box })
-              setOriginalPolygon(selectedAnn.polygon.map((p) => [p[0], p[1]]))
-              return
-            }
-            if (isInsidePolygon(x, y, selectedAnn.polygon)) {
-              setDragMode('move-polygon')
-              setDragStart({ x, y })
-              setOriginalBox({ ...selectedAnn.box })
-              setOriginalPolygon(selectedAnn.polygon.map((p) => [p[0], p[1]]))
-              return
-            }
-            // Fall through: clicking outside the polygon with a polygon ann selected
-            // should behave like empty-space (select other / start drawing).
-          } else {
-            const handle = getResizeHandle(x, y, selectedAnn.box)
-            if (handle) {
-              setDragMode('resize')
-              setResizeHandle(handle)
-              setDragStart({ x, y })
-              setOriginalBox({ ...selectedAnn.box })
-              return
-            }
-            if (isInsideBox(x, y, selectedAnn.box)) {
-              setDragMode('move')
-              setDragStart({ x, y })
-              setOriginalBox({ ...selectedAnn.box })
-              return
-            }
+          const handle = getResizeHandle(x, y, selectedAnn.box)
+          if (handle) {
+            setDragMode('resize')
+            setResizeHandle(handle)
+            setDragStart({ x, y })
+            setOriginalBox({ ...selectedAnn.box })
+            return
+          }
+          if (isInsideBox(x, y, selectedAnn.box)) {
+            setDragMode('move')
+            setDragStart({ x, y })
+            setOriginalBox({ ...selectedAnn.box })
+            return
           }
         }
       }
@@ -646,12 +365,7 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
         const ann = at[cycleClickIndexRef.current % at.length] ?? at[0]
         setDragStart({ x, y })
         setOriginalBox({ ...ann.box })
-        if (ann.polygon && ann.polygon.length >= 3) {
-          setDragMode('move-polygon')
-          setOriginalPolygon(ann.polygon.map((p) => [p[0], p[1]]))
-        } else {
-          setDragMode('move')
-        }
+        setDragMode('move')
         return
       }
       onSelectAnnotation(null)
@@ -659,7 +373,7 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       setDragMode('draw')
       setDragStart({ x, y })
     },
-    [disabled, getNormalizedCoords, tool, draftPolygon, canvasSize, closeDraftPolygon, selectedAnnotationId, displayAnnotations, getVertexAtPoint, isInsidePolygon, getResizeHandle, isInsideBox, getAnnotationsAtPoint, cycleAnnotationAtPoint, onSelectAnnotation]
+    [disabled, getNormalizedCoords, selectedAnnotationId, interactiveAnnotations, getResizeHandle, isInsideBox, getAnnotationsAtPoint, cycleAnnotationAtPoint, onSelectAnnotation]
   )
 
   const handleMouseMove = useCallback(
@@ -670,15 +384,13 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
       mousePosRef.current = { x, y }
       if (dragMode === 'none') {
         updateCursor(x, y)
-        // Keep rubberband line updated while drafting a polygon
-        if (tool === 'polygon' && draftPolygon.length > 0) scheduleRedraw()
         return
       }
       if (!dragStart) return
       if (dragMode === 'draw') {
-        let left = Math.min(dragStart.x, x)
+        const left = Math.min(dragStart.x, x)
         let right = Math.max(dragStart.x, x)
-        let top = Math.min(dragStart.y, y)
+        const top = Math.min(dragStart.y, y)
         let bottom = Math.max(dragStart.y, y)
         if (right - left < MIN_BOX_NORM) right = left + MIN_BOX_NORM
         if (bottom - top < MIN_BOX_NORM) bottom = top + MIN_BOX_NORM
@@ -699,43 +411,6 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
         setOptimisticAnnotations((prev) => {
           const base = prev ?? annotations
           return base.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox } : a))
-        })
-        return
-      }
-      if (dragMode === 'move-vertex' && originalPolygon && selectedAnnotationId && draggedVertexIdx !== null) {
-        const nx = Math.max(0, Math.min(1, x))
-        const ny = Math.max(0, Math.min(1, y))
-        const newPoly = originalPolygon.map((p, i) => (i === draggedVertexIdx ? [nx, ny] : [p[0], p[1]]))
-        const newBox = polygonBboxFromPoints(newPoly)
-        setOptimisticAnnotations((prev) => {
-          const base = prev ?? annotations
-          return base.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox, polygon: newPoly } : a))
-        })
-        return
-      }
-      if (dragMode === 'move-polygon' && originalPolygon && originalBox && selectedAnnotationId) {
-        const dx = x - dragStart.x
-        const dy = y - dragStart.y
-        // Clamp translation so polygon stays within [0,1]
-        let minX = 1, minY = 1, maxX = 0, maxY = 0
-        for (const p of originalPolygon) {
-          if (p[0] < minX) minX = p[0]
-          if (p[0] > maxX) maxX = p[0]
-          if (p[1] < minY) minY = p[1]
-          if (p[1] > maxY) maxY = p[1]
-        }
-        const clampedDx = Math.max(-minX, Math.min(1 - maxX, dx))
-        const clampedDy = Math.max(-minY, Math.min(1 - maxY, dy))
-        const newPoly = originalPolygon.map((p) => [p[0] + clampedDx, p[1] + clampedDy])
-        const newBox: BoundingBox = {
-          x: originalBox.x + clampedDx,
-          y: originalBox.y + clampedDy,
-          width: originalBox.width,
-          height: originalBox.height,
-        }
-        setOptimisticAnnotations((prev) => {
-          const base = prev ?? annotations
-          return base.map((a) => (a.id === selectedAnnotationId ? { ...a, box: newBox, polygon: newPoly } : a))
         })
         return
       }
@@ -764,7 +439,7 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
         })
       }
     },
-    [getNormalizedCoords, dragMode, dragStart, originalBox, originalPolygon, draggedVertexIdx, selectedAnnotationId, resizeHandle, annotations, updateCursor, tool, draftPolygon, scheduleRedraw, polygonBboxFromPoints]
+    [getNormalizedCoords, dragMode, dragStart, originalBox, selectedAnnotationId, resizeHandle, annotations, updateCursor]
   )
 
   const handleMouseUp = useCallback(() => {
@@ -799,39 +474,17 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
           ann.box.width !== originalBox.width ||
           ann.box.height !== originalBox.height
         if (changed) {
-          undoStackRef.current.push({ type: 'update', id: selectedAnnotationId, previousBox: originalBox, previousPolygon: ann.polygon ?? null })
+          undoStackRef.current.push({ type: 'update', id: selectedAnnotationId, previousBox: originalBox })
           redoStackRef.current = []
-          onUpdateAnnotation(selectedAnnotationId, ann.box, ann.polygon ?? undefined)
-        }
-      }
-    }
-    if ((dragMode === 'move-vertex' || dragMode === 'move-polygon') && selectedAnnotationId) {
-      const current = optimisticAnnotations ?? annotations
-      const ann = current.find((a) => a.id === selectedAnnotationId)
-      if (ann && originalBox && originalPolygon) {
-        const polyChanged =
-          !ann.polygon ||
-          ann.polygon.length !== originalPolygon.length ||
-          ann.polygon.some((p, i) => p[0] !== originalPolygon[i][0] || p[1] !== originalPolygon[i][1])
-        if (polyChanged) {
-          undoStackRef.current.push({
-            type: 'update',
-            id: selectedAnnotationId,
-            previousBox: originalBox,
-            previousPolygon: originalPolygon,
-          })
-          redoStackRef.current = []
-          onUpdateAnnotation(selectedAnnotationId, ann.box, ann.polygon ?? undefined)
+          onUpdateAnnotation(selectedAnnotationId, ann.box)
         }
       }
     }
     setDragMode('none')
     setDragStart(null)
     setOriginalBox(null)
-    setOriginalPolygon(null)
-    setDraggedVertexIdx(null)
     setResizeHandle(null)
-  }, [dragMode, drawingBox, selectedClassId, selectedAnnotationId, optimisticAnnotations, annotations, originalBox, originalPolygon, onCreateAnnotation, onUpdateAnnotation, classes])
+  }, [dragMode, drawingBox, selectedClassId, selectedAnnotationId, optimisticAnnotations, annotations, originalBox, onCreateAnnotation, onUpdateAnnotation, classes])
 
   const pushDeleteToUndo = useCallback((annotation: Annotation) => {
     undoStackRef.current.push({ type: 'delete', annotation })
@@ -849,23 +502,13 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
     (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
       if (disabled) return
+      if (e.code === 'Space' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault()
+        setAnnotationsHidden(true)
+        return
+      }
       if (e.key === 'Escape') {
-        if (draftPolygon.length > 0) {
-          setDraftPolygon([])
-          return
-        }
         onSelectAnnotation(null)
-        return
-      }
-      if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        e.preventDefault()
-        setTool((t) => (t === 'polygon' ? 'bbox' : 'polygon'))
-        setDraftPolygon([])
-        return
-      }
-      if (e.key === 'Enter' && tool === 'polygon' && draftPolygon.length >= 3) {
-        e.preventDefault()
-        closeDraftPolygon()
         return
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAnnotationId) {
@@ -897,18 +540,16 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
                 type: 'update',
                 id: action.id,
                 previousBox: current.box,
-                previousPolygon: current.polygon ?? null,
               })
             }
-            const prevPoly = action.previousPolygon
             setOptimisticAnnotations(
               displayAnnotations.map((a) =>
                 a.id === action.id
-                  ? { ...a, box: action.previousBox, polygon: prevPoly === null ? undefined : prevPoly ?? a.polygon }
+                  ? { ...a, box: action.previousBox }
                   : a
               )
             )
-            onUpdateAnnotation(action.id, action.previousBox, prevPoly === null ? undefined : prevPoly)
+            onUpdateAnnotation(action.id, action.previousBox)
           } else if (action.type === 'delete' && onRestoreAnnotation) {
             onRestoreAnnotation(action.annotation).then((created) => {
               if (created) redoStackRef.current.push({ type: 'create', annotation: created })
@@ -931,18 +572,16 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
                 type: 'update',
                 id: action.id,
                 previousBox: current.box,
-                previousPolygon: current.polygon ?? null,
               })
             }
-            const prevPoly = action.previousPolygon
             setOptimisticAnnotations(
               displayAnnotations.map((a) =>
                 a.id === action.id
-                  ? { ...a, box: action.previousBox, polygon: prevPoly === null ? undefined : prevPoly ?? a.polygon }
+                  ? { ...a, box: action.previousBox }
                   : a
               )
             )
-            onUpdateAnnotation(action.id, action.previousBox, prevPoly === null ? undefined : prevPoly)
+            onUpdateAnnotation(action.id, action.previousBox)
           } else if (action.type === 'restore' && onRestoreAnnotation) {
             onRestoreAnnotation(action.annotation).then((created) => {
               if (created) undoStackRef.current.push({ type: 'create', annotation: created })
@@ -964,12 +603,25 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
         }
       }
     },
-    [disabled, selectedAnnotationId, displayAnnotations, onSelectAnnotation, onDeleteAnnotation, onUpdateAnnotation, onCreateAnnotation, onRestoreAnnotation, pushDeleteToUndo, draftPolygon, tool, closeDraftPolygon]
+    [disabled, selectedAnnotationId, displayAnnotations, onSelectAnnotation, onDeleteAnnotation, onUpdateAnnotation, onCreateAnnotation, onRestoreAnnotation, pushDeleteToUndo]
   )
 
   useEffect(() => {
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      e.preventDefault()
+      setAnnotationsHidden(false)
+    }
+    const handleWindowBlur = () => setAnnotationsHidden(false)
+
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleWindowBlur)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleWindowBlur)
+    }
   }, [handleKeyDown])
 
   // Cleanup rAF on unmount
@@ -992,9 +644,6 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onDoubleClick={() => {
-            if (tool === 'polygon' && draftPolygon.length >= 3) closeDraftPolygon()
-          }}
           onMouseLeave={() => {
             handleMouseUp()
             mousePosRef.current = null
@@ -1002,6 +651,11 @@ function AnnotationCanvasInner(props: AnnotationCanvasProps, ref: React.Forwarde
             scheduleRedraw()
           }}
         />
+        {annotationsHidden && (
+          <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-xs text-white">
+            Annotations hidden — release Space to show
+          </div>
+        )}
       </div>
     </div>
   )

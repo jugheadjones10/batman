@@ -138,7 +138,6 @@ export const api = {
       frame_id: number | string
       class_label_id: number
       box: import('@/types').BoundingBox
-      polygon?: number[][]
       track_id?: number
       source?: string
     }) =>
@@ -149,7 +148,6 @@ export const api = {
     update: (projectName: string, annotationId: number, data: Partial<{
       class_label_id: number
       box: import('@/types').BoundingBox
-      polygon: number[][]
       track_id: number
     }>) =>
       request<import('@/types').Annotation>(
@@ -172,6 +170,24 @@ export const api = {
       request<{ message: string; deleted: number; frames_cleared: number }>(
         `/projects/${projectName}/annotations/clear-frames`,
         { method: 'POST', body: JSON.stringify({ frame_ids: frameIds.map(String) }) }
+      ),
+    /** Move annotations between classes across many frames (e.g. splitting a class). */
+    reassignClass: (
+      projectName: string,
+      frameIds: (number | string)[],
+      toClassLabelId: number,
+      fromClassLabelId: number | null,
+    ) =>
+      request<{ message: string; annotations_updated: number; frames_affected: number }>(
+        `/projects/${projectName}/annotations/reassign-class`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            frame_ids: frameIds.map(String),
+            to_class_label_id: toClassLabelId,
+            from_class_label_id: fromClassLabelId,
+          }),
+        }
       ),
   },
 
@@ -438,27 +454,6 @@ export const api = {
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}`,
         { method: 'DELETE' }
       ),
-    extractFrames: async (
-      projectName: string,
-      runName: string,
-      videoId: string,
-      inferenceId: string,
-      frameNumbers: number[],
-    ): Promise<Blob> => {
-      const response = await fetch(
-        `${API_BASE}/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/extract-frames`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame_numbers: frameNumbers }),
-        },
-      )
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: 'Extract failed' }))
-        throw new Error(error.detail || `Request failed: ${response.status}`)
-      }
-      return response.blob()
-    },
     submitGpu: (projectName: string, data: import('@/types').InferenceGPUSubmitRequest) =>
       request<{ job_id: string; run_name: string }>(
         `/projects/${projectName}/inference/submit-gpu`,
@@ -510,43 +505,6 @@ export const api = {
       request<{ message: string; output_path: string }>(
         `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/z-export-video`,
         { method: 'POST' }
-      ),
-    rerender: (
-      projectName: string,
-      runName: string,
-      videoId: string,
-      inferenceId: string,
-      renderMode: 'polygon' | 'bbox',
-    ) =>
-      request<{ message: string; render_mode: string; frames_written: number; output_path: string }>(
-        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/rerender`,
-        { method: 'POST', body: JSON.stringify({ render_mode: renderMode }) }
-      ),
-    renderComparison: (
-      projectName: string,
-      runName: string,
-      videoId: string,
-      inferenceId: string,
-      options?: {
-        render_mode?: 'polygon' | 'bbox'
-        track_activation_threshold?: number
-        lost_track_buffer?: number
-        minimum_matching_threshold?: number
-      },
-    ) =>
-      request<{
-        message: string
-        frames_written: number
-        has_raw_video: boolean
-        has_bytetrack_video: boolean
-        bytetrack_config: {
-          track_activation_threshold: number
-          lost_track_buffer: number
-          minimum_matching_threshold: number
-        }
-      }>(
-        `/projects/${projectName}/inference/results/${runName}/${videoId}/${inferenceId}/render-comparison`,
-        { method: 'POST', body: JSON.stringify(options ?? {}) },
       ),
     getBytetrackFrames: (
       projectName: string,

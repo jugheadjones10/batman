@@ -394,7 +394,6 @@ npm run lint
 
 ### v1.0 (Planned)
 - [ ] Multi-GPU / remote training support
-- [ ] Video segmentation preview
 - [ ] Active learning suggestions
 - [ ] Model comparison dashboard
 - [ ] Export to ONNX/TensorRT

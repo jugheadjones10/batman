@@ -102,7 +102,6 @@ async def list_frame_annotations(project_name: str, frame_id: str):
                     width=ann_data["width"],
                     height=ann_data["height"],
                 ),
-                polygon=ann_data.get("polygon"),
                 track_id=ann_data.get("track_id"),
                 confidence=ann_data.get("confidence", 1.0),
                 source=ann_data.get("source", "manual"),
@@ -149,8 +148,6 @@ async def create_annotation(project_name: str, data: AnnotationCreate):
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
-    if data.polygon is not None:
-        ann_record["polygon"] = data.polygon
     annotations_meta[str(ann_id)] = ann_record
 
     _save_annotations_meta(project_path, annotations_meta)
@@ -170,7 +167,6 @@ async def create_annotation(project_name: str, data: AnnotationCreate):
         class_name=class_name,
         class_color=colors[class_id % len(colors)],
         box=data.box,
-        polygon=data.polygon,
         track_id=data.track_id,
         confidence=1.0,
         source=data.source,
@@ -215,8 +211,6 @@ async def update_annotation(project_name: str, annotation_id: int, data: Annotat
         ann_data["is_exemplar"] = data.is_exemplar
     if data.exemplar_type is not None:
         ann_data["exemplar_type"] = data.exemplar_type
-    if data.polygon is not None:
-        ann_data["polygon"] = data.polygon
 
     ann_data["updated_at"] = now.isoformat()
     _save_annotations_meta(project_path, annotations_meta)
@@ -236,7 +230,6 @@ async def update_annotation(project_name: str, annotation_id: int, data: Annotat
             width=ann_data["width"],
             height=ann_data["height"],
         ),
-        polygon=ann_data.get("polygon"),
         track_id=ann_data.get("track_id"),
         confidence=ann_data.get("confidence", 1.0),
         source=ann_data.get("source", "manual"),
@@ -310,6 +303,72 @@ async def clear_multiple_frames(project_name: str, data: ClearFramesRequest):
         "message": f"Cleared {len(to_delete)} annotations from {len(data.frame_ids)} frames",
         "deleted": len(to_delete),
         "frames_cleared": len(data.frame_ids),
+    }
+
+
+class ReassignClassRequest(BaseModel):
+    frame_ids: list[str]
+    to_class_label_id: int
+    # None reassigns every annotation on the listed frames.
+    from_class_label_id: Optional[int] = None
+
+
+@router.post("/annotations/reassign-class")
+async def reassign_annotation_class(project_name: str, data: ReassignClassRequest):
+    """Move annotations from one class to another across many frames.
+
+    Splitting an existing class in two (for example `spreader` into
+    `spreader_loaded` / `spreader_empty`) otherwise means deleting and
+    redrawing every box, since a class is a property that stays constant over
+    long runs of frames.
+    """
+    project_path = get_project_path(project_name)
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    config = load_project_config(project_path)
+    classes = config.get("classes", [])
+    if not 0 <= data.to_class_label_id < len(classes):
+        raise HTTPException(status_code=400, detail="Target class does not exist")
+
+    annotations_meta = _load_annotations_meta(project_path)
+    target_frames = set(data.frame_ids)
+    now = datetime.utcnow()
+
+    updated = 0
+    frames_touched: set[str] = set()
+    for ann_data in annotations_meta.values():
+        frame_id = str(ann_data.get("frame_id"))
+        if frame_id not in target_frames:
+            continue
+        if (
+            data.from_class_label_id is not None
+            and ann_data.get("class_label_id", 0) != data.from_class_label_id
+        ):
+            continue
+        if ann_data.get("class_label_id") == data.to_class_label_id:
+            continue
+        ann_data["class_label_id"] = data.to_class_label_id
+        ann_data["updated_at"] = now.isoformat()
+        updated += 1
+        frames_touched.add(frame_id)
+
+    if updated:
+        _save_annotations_meta(project_path, annotations_meta)
+        config["updated_at"] = now.isoformat()
+        save_project_config(project_path, config)
+
+    logger.info(
+        f"Reassigned {updated} annotations to class "
+        f"'{classes[data.to_class_label_id]}' across {len(frames_touched)} frames"
+    )
+    return {
+        "message": (
+            f"Reassigned {updated} annotations to "
+            f"'{classes[data.to_class_label_id]}' across {len(frames_touched)} frames"
+        ),
+        "annotations_updated": updated,
+        "frames_affected": len(frames_touched),
     }
 
 

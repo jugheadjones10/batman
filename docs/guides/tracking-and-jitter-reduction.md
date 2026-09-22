@@ -5,13 +5,13 @@ Raw per-frame RF-DETR output has two problems that show up the moment you try to
 1. **Missed frames.** The detector occasionally drops an object for a frame or two — the spreader vanishes mid-descent even though nothing physically changed.
 2. **Bounding-box jitter.** Even when the detector *does* fire every frame, the box wobbles by a few pixels in random directions. Because distance is computed as `Z = k / s` with `s` the longer bbox side (see [Distance Calibration](z-axis-height-estimation.md)), that pixel jitter shows up on the Side-View Schematic as a nervous flicker on the z reading.
 
-Batman fixes both on the Inference detail page. Opening **Open Tracking Compare** lands you on a dedicated page that puts the raw detector output and a post-processed version side-by-side — video overlays on top, Side-View Schematics below — all driven by live-tunable controls. No re-inference; all of this is a pure transformation of the saved `result.json`.
+The Inference detail page applies tracking and smoothing automatically to playback overlays, position graphs, and the Side-View Schematic. These are transformations of the saved `result.json`; no re-inference is needed. Parameters use the defaults in `frontend/src/lib/trackingPresentation.ts`.
 
-This guide explains the three techniques that power that page:
+This guide explains the three techniques that power inference playback:
 
 1. **Gap-fill tracking** — an `sv.ByteTrack` instance re-associates frame-by-frame detections into stable tracks, and keeps predicting the box for a few extra frames when the detector loses its object.
 2. **Kalman-posterior emission** — instead of shipping the raw detector bbox on matched frames, we surface ByteTrack's internal Kalman state (the posterior after fusing prediction + measurement). Same infrastructure; different output. Cheapest jitter reduction available.
-3. **One Euro filter** — a second-stage adaptive low-pass filter applied per-track on top of the Kalman posterior. Heavy smoothing at rest, quick release on motion; two sliders expose the full trade-off live.
+3. **One Euro filter** — a second-stage adaptive low-pass filter applied per-track on top of the Kalman posterior. Heavy smoothing at rest, quick release on motion; the parameters control the trade-off between jitter and lag.
 
 Techniques 2 and 3 compose cleanly: the Kalman posterior makes matched and extrapolated frames come from a single KF state vector (removing a structural discontinuity), and the One Euro filter scrubs the residual detector noise out of whatever the backend emits.
 
@@ -40,7 +40,7 @@ The first thing we want is *continuity*: when the detector misses the spreader o
 
 This is what a **tracker** gives you. Batman reuses `supervision.ByteTrack` (the MOT algorithm from Zhang et al., ECCV 2022 — developed at ByteDance — which pairs a linear Kalman filter with a two-pass IoU association on high- and low-confidence detections). The tracker assigns every detection a `track_id` that is stable across frames, and when a detection is missing it continues predicting the box from the Kalman filter for up to `lost_track_buffer` frames before giving up.
 
-On the compare page the ByteTrack side renders:
+Inference playback renders tracked boxes as follows:
 
 - **Solid green boxes** — a *measured* track: a raw detection of the same class overlaps the tracked box with IoU ≥ 0.3 on this frame.
 - **Dashed amber boxes** — an *extrapolated* track: the detection was missed on this frame but the track is still inside `lost_track_buffer`, so we're showing the Kalman prediction.
@@ -65,15 +65,15 @@ Every class's tracker advances every frame (including empty ones), so its Kalman
 
 ### The three tunable ByteTrack knobs
 
-All three appear as live sliders on the compare page's **Tracker settings** card. Under the hood they map 1:1 to `sv.ByteTrack` constructor args:
+The defaults in `DEFAULT_TRACKER_PARAMS` map directly to `sv.ByteTrack` constructor arguments:
 
-| Slider                         | What it gates                                                                                                                                                                      | Default |
+| Parameter                      | What it gates                                                                                                                                                                      | Default |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `track_activation_threshold`   | Minimum detection confidence for a detection to *spawn* a new track. Lower = flickerier new tracks from marginal detections; higher = misses legitimate objects with shy confidence. | 0.25    |
 | `lost_track_buffer`            | Frames a track stays alive with Kalman predictions after its detection disappears. Above this, the track is killed. At 30 fps, 30 frames ≈ 1 s of gap fill.                         | 30      |
 | `minimum_matching_threshold`   | IoU gate for associating a current detection to an existing track's Kalman-predicted box. Lower = more lenient matching through jitter.                                             | 0.8     |
 
-The slider values flow through a React Query cache key so every change triggers a fresh backend re-track (debounced 250 ms so dragging doesn't hammer the backend).
+The inference page requests `/bytetrack-frames` with these defaults and caches the response with React Query.
 
 ---
 
@@ -209,24 +209,15 @@ export function smoothFramesPerTrack<F extends Frame>(
 
 Detections without a `track_id` (shouldn't happen on the tracked side, but defensive) are passed through unchanged.
 
-### The two sliders in the UI
+### Smoothing defaults
 
-On the compare page, the **Post-tracker smoothing — One Euro filter** card exposes:
+Inference playback applies `DEFAULT_OEF.minCutoff = 1.0` Hz and
+`DEFAULT_OEF.beta = 0.007` through `smoothFramesPerTrack`. These parameters
+are configured in `frontend/src/lib/trackingPresentation.ts`.
 
-| Slider       | Range    | Default | Effect                                                                                             |
-| ------------ | -------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `min_cutoff` | 0.10 – 5.00 Hz | 1.00    | Cutoff at rest. Drop toward 0.3–0.5 for heavier smoothing on stationary objects (more lag on sudden motion). |
-| `beta`       | 0.000 – 0.100  | 0.007   | Speed coefficient. Raise toward 0.02–0.05 if the object visibly lags when it accelerates.           |
-| **Enable**   | checkbox | on      | Turns the filter into an identity pass. Instant A/B without a re-fetch.                            |
-| **Reset**    | button   | —       | Back to defaults.                                                                                  |
-
-Because the filter is pure frontend state, moving a slider re-runs the filter in-place — no API call, no cache invalidation. Dragging either knob redraws the right-side overlay and schematic on the next React paint.
-
-!!! tip "Tuning workflow"
-    1. Leave defaults on (`1.0`, `0.007`) and scrub a few seconds of video.
-    2. **If it's still jittery at rest**, drop `min_cutoff` toward `0.3–0.5`. This is the biggest lever.
-    3. **If the tracked box visibly lags the raw overlay on fast motion**, raise `beta` toward `0.02–0.05`.
-    4. **If a measured detection briefly flips to amber (extrapolated) under aggressive smoothing**, that's a UI-labeling artifact, not a tracking failure — see the caveat at the end of this guide.
+Lower `minCutoff` for stronger smoothing at rest; raise `beta` to reduce lag
+on fast motion. Parameter changes require a code change and should be checked
+against representative footage.
 
 ### Expected result
 
@@ -261,56 +252,15 @@ The two filters are in series on the same signal, but they solve different probl
 This is why stacking them behaves well: the knobs on Part 3 expose a clean trade-off between residual jitter and lag, without having to care about the stateful interactions inside ByteTrack. If you turn Part 3 off, you get a less-jittery version of what you had before; turn it on, and you can push the quiet-at-rest behavior as far as your lag tolerance allows.
 
 !!! warning "IoU-based green/amber labeling caveat"
-    The compare page labels a tracked box **measured** (solid green) if any same-class raw detection overlaps it with IoU ≥ 0.3, otherwise **extrapolated** (dashed amber). Under aggressive One Euro smoothing the tracked box can drift a few pixels from the raw detection it was matched to, and for small objects that's enough to drop the IoU under 0.3 and flip the label to amber even though the detection was actually present. 0.3 is a loose threshold and sane defaults won't cross it, but if you see a green→amber flash under `min_cutoff ≈ 0.3` / `beta ≈ 0.05` on a small bbox, that's the cause. It's a cosmetic quirk of the badging, not a tracking failure.
+    The shared overlay renderer labels a tracked box **measured** (solid green) if any same-class raw detection overlaps it with IoU ≥ 0.3, otherwise **extrapolated** (dashed amber). Under aggressive One Euro smoothing the tracked box can drift a few pixels from the raw detection it was matched to, and for small objects that's enough to drop the IoU under 0.3 and flip the label to amber even though the detection was actually present. 0.3 is a loose threshold and sane defaults won't cross it, but if you see a green→amber flash under `min_cutoff ≈ 0.3` / `beta ≈ 0.05` on a small bbox, that's the cause. It's a cosmetic quirk of the badging, not a tracking failure.
 
 ---
 
 ## Using it from the UI
 
-### Getting there
-
-1. Open a finished inference run on the **Inference** page.
-2. In the detail panel, click **Open Tracking Compare**.
-
-The compare page deep-links the project / run / video / inference triple, so you can share a URL that jumps straight to a specific comparison view.
-
-### What the page gives you
-
-```
-┌── Tracker settings ───────────────────────────────────────────── Reset ─┐
-│  track_activation_threshold   lost_track_buffer    minimum_matching   │
-│  ████▒▒▒▒▒▒ 0.25              30 frames ≈ 1.0 s    ████████▓▓ 0.80    │
-└─────────────────────────────────────────────────────────────────────────┘
-
-┌── Post-tracker smoothing — One Euro filter ──  [x] Enable   Reset ────┐
-│  min_cutoff (Hz)                    beta                                │
-│  ██▒▒▒▒▒▒▒▒ 1.00                    ▒▒▒▒▒▒▒▒▒▒ 0.007                   │
-└─────────────────────────────────────────────────────────────────────────┘
-
-frame 247  ·  raw dets: 3 (shown 2)  ·  tracked: 2 (measured 2, extrapolated 0)
-                                                    live: act=0.25·buf=30·match=0.80
-
-┌── Raw (per-frame best) ──────────────┐  ┌── ByteTrack + One Euro ──────────┐
-│  [video overlay: max-conf per class] │  │  [video overlay: track-smoothed] │
-└──────────────────────────────────────┘  └──────────────────────────────────┘
-
-┌── Schematic (raw) ──────────────────┐  ┌── Schematic (ByteTrack + One Euro)┐
-│  camera → spreader → container       │  │  same, but tracking-smoothed     │
-└─────────────────────────────────────┘  └──────────────────────────────────┘
-```
-
-Both videos are playhead-synchronised: play/pause/seek on the left mirrors to the right. A React Query debounce (250 ms) absorbs slider drags so dragging `track_activation_threshold` doesn't fire a burst of re-tracks against the backend.
-
-### What happens behind each knob
-
-| Knob                         | Where it runs              | Triggers                           |
-| ---------------------------- | -------------------------- | ---------------------------------- |
-| `track_activation_threshold` | Backend (re-tracks)        | Debounced 250 ms → `/bytetrack-frames` |
-| `lost_track_buffer`          | Backend (re-tracks)        | Debounced 250 ms → `/bytetrack-frames` |
-| `minimum_matching_threshold` | Backend (re-tracks)        | Debounced 250 ms → `/bytetrack-frames` |
-| `min_cutoff`                 | Frontend (re-smooths)      | Instant memo invalidation         |
-| `beta`                       | Frontend (re-smooths)      | Instant memo invalidation         |
-| OEF Enable                   | Frontend (identity toggle) | Instant memo invalidation         |
+Open a finished inference run on the **Inference** page. Tracking and smoothing
+are applied to playback automatically. Scrub or play the video to inspect the
+overlays, position graphs, and schematic.
 
 ---
 
@@ -320,9 +270,7 @@ Both videos are playhead-synchronised: play/pause/seek on the left mirrors to th
 | ----------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
 | `result.json`                       | Raw per-frame detections with `z_mm` computed from **raw** bboxes.         | Original inference; not modified.      |
 | `/bytetrack-frames` JSON (endpoint) | Tracked frames with Kalman-posterior bboxes and no `z_mm`. Recomputed on every request from the three ByteTrack knobs. | The `get_bytetrack_frames` endpoint.   |
-| `detected_raw.mp4`                  | Video with raw per-frame boxes drawn.                                      | `render_comparison_videos` (on demand). |
-| `detected_bytetrack.mp4`            | Video with Kalman-posterior boxes drawn.                                   | `render_comparison_videos` (on demand). |
-| One Euro state                      | Lives entirely in the browser tab. Never persisted.                        | Slider changes.                        |
+| One Euro state                      | Lives entirely in the browser tab. Never persisted.                        | Tracked-frame changes.                 |
 
 The raw ground truth always stays in `result.json`. Tracking and smoothing are overlays you can layer on top non-destructively.
 
@@ -332,11 +280,11 @@ The raw ground truth always stays in `result.json`. Tracking and smoothing are o
 
 - `src/core/inference.py`
   - `compute_bytetrack_frames()` — runs one `sv.ByteTrack` per class over a `result.json`; emits tracked frames with Kalman-posterior bboxes and no `z_mm`. Docstring enumerates the invariants.
-  - `render_comparison_videos()` — renders `detected_raw.mp4` and `detected_bytetrack.mp4` from the same source; shares the Kalman-posterior output.
 - `backend/app/api/inference.py`
-  - `GET /results/.../bytetrack-frames` — thin wrapper around `compute_bytetrack_frames`; takes the three ByteTrack knobs as query params; no server-side cache (the work is fast enough to redo on every keystroke).
+  - `GET /results/.../bytetrack-frames` — thin wrapper around `compute_bytetrack_frames`; takes the three ByteTrack knobs as query params; no server-side cache.
 - `frontend/src/lib/oneEuroFilter.ts` — the `OneEuroFilter` class and `smoothFramesPerTrack()` helper.
-- `frontend/src/pages/TrackingComparePage.tsx` — the compare page. Holds the ByteTrack debounce and the One Euro memo; wires both knobs through to the right-side overlay and schematic.
+- `frontend/src/pages/InferencePage.tsx` — requests tracked frames and applies One Euro smoothing for playback, graphs, and the schematic.
+- `frontend/src/lib/trackingPresentation.ts` — shared tracker and smoothing defaults, track selection, and overlay helpers.
 - `frontend/src/components/DetectionOverlaySvg.tsx` — SVG bbox overlay on top of each video pane.
 - `frontend/src/components/SideViewSchematic.tsx` — the elevation schematic. Recomputes z from the bbox via calibration when `z_mm` is absent (the path the tracked side uses).
 
@@ -345,8 +293,8 @@ The raw ground truth always stays in `result.json`. Tracking and smoothing are o
 ## Practical tips
 
 - **Fix structural problems before reaching for One Euro.** If the spreader is flickering because the *detector* is dropping it every 5 frames, bumping `lost_track_buffer` to cover the gap is a better fix than smoothing harder. One Euro works best on residual noise, not on missing data.
-- **Don't stack smoothers if you're going to persist the output.** Everything here is non-destructive on purpose — `result.json` stays raw, and the smoothed boxes only live in the compare-page transforms. Persisting smoothed bboxes back into `result.json` would make Part 2's `z_mm`-dropping decision a much bigger commitment.
+- **Don't stack smoothers if you're going to persist the output.** Everything here is non-destructive on purpose — `result.json` stays raw, and the smoothed boxes only live in the inference playback transforms. Persisting smoothed bboxes back into `result.json` would make Part 2's `z_mm`-dropping decision a much bigger commitment.
 - **Prefer the defaults until you see a real problem.** `min_cutoff = 1.0` / `beta = 0.007` is the MediaPipe-style default and removes ~87% of detector jitter without visible lag at 25–30 fps. Only deviate if you have a specific failure mode you can name.
 - **Match `lost_track_buffer` to the gap you actually observe.** 30 frames ≈ 1 s at 30 fps. If the detector's worst gap on your footage is 3 frames, setting the buffer to 300 just extends phantom tracks further into empty frames without helping.
-- **Watch the live counter while sliding.** The "tracked: N (measured X, extrapolated Y)" string is live; if `extrapolated` stays at 0 no matter how you slide `lost_track_buffer`, the detector isn't actually missing frames on this clip and you don't need gap-fill — only the jitter sliders will do anything visible.
-- **Related reading.** [Distance Calibration (Z-axis)](z-axis-height-estimation.md) for how `Z = k / s` turns the smoothed bbox into a smoothed z; [Segmentation & Skew Angle](segmentation-and-skew.md) for the other signal that's rendered on the schematic.
+
+Related reading: [Distance Calibration (Z-axis)](z-axis-height-estimation.md).

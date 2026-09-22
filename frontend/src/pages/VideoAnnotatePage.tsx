@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -46,6 +46,12 @@ export default function VideoAnnotatePage() {
   const [selectedFrameIndices, setSelectedFrameIndices] = useState<Set<number>>(new Set())
   const lastClickedIndexRef = useRef<number | null>(null)
   const [samModalOpen, setSamModalOpen] = useState(false)
+  const [reassignModalOpen, setReassignModalOpen] = useState(false)
+  const [reassignFromClassId, setReassignFromClassId] = useState(-1)
+  const [reassignToClassId, setReassignToClassId] = useState(0)
+  const [reassignScope, setReassignScope] = useState<'range' | 'selected' | 'current'>('range')
+  const [reassignRangeStart, setReassignRangeStart] = useState('')
+  const [reassignRangeEnd, setReassignRangeEnd] = useState('')
   const [samClassDescriptions, setSamClassDescriptions] = useState<Record<string, string>>({})
   const [samConfidence, setSamConfidence] = useState(0.25)
   const [samSkipLabeled, setSamSkipLabeled] = useState(true)
@@ -97,6 +103,36 @@ export default function VideoAnnotatePage() {
   const currentFrame = filteredFrames[currentFrameIndex]
   const currentFrameId = currentFrame ? String(currentFrame.id) : null
 
+  // A frame range is resolved against every extracted frame, not just the ones
+  // the filmstrip is showing, so a wide interval never silently skips frames.
+  const reassignTargetFrames = useMemo<Frame[]>(() => {
+    if (reassignScope === 'current') return currentFrame ? [currentFrame] : []
+    if (reassignScope === 'selected') {
+      return Array.from(selectedFrameIndices)
+        .map((i) => filteredFrames[i])
+        .filter(Boolean)
+    }
+    const start = Number(reassignRangeStart)
+    const end = Number(reassignRangeEnd)
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return []
+    if (reassignRangeStart === '' || reassignRangeEnd === '') return []
+    const lo = Math.min(start, end)
+    const hi = Math.max(start, end)
+    return frames.filter((f) => f.frame_number >= lo && f.frame_number <= hi)
+  }, [
+    reassignScope,
+    reassignRangeStart,
+    reassignRangeEnd,
+    currentFrame,
+    selectedFrameIndices,
+    filteredFrames,
+    frames,
+  ])
+
+  const reassignAnnotatedFrameCount = reassignTargetFrames.filter(
+    (f) => (f.annotation_count ?? 0) > 0,
+  ).length
+
   const { data: annotations } = useQuery({
     queryKey: ['annotations', projectName, currentFrameId],
     queryFn: () => api.annotations.listForFrame(projectName!, currentFrameId!),
@@ -104,7 +140,7 @@ export default function VideoAnnotatePage() {
   })
 
   const createAnnotationMutation = useMutation({
-    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox; polygon?: number[][] }) =>
+    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
       api.annotations.create(projectName!, data),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
@@ -114,8 +150,8 @@ export default function VideoAnnotatePage() {
   })
 
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box, polygon }: { id: number; box: BoundingBox; polygon?: number[][] }) =>
-      api.annotations.update(projectName!, id, { box, ...(polygon !== undefined && { polygon }) }),
+    mutationFn: ({ id, box }: { id: number; box: BoundingBox }) =>
+      api.annotations.update(projectName!, id, { box }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
       queryClient.invalidateQueries({ queryKey: ['video-frames', projectName, videoId] })
@@ -164,6 +200,20 @@ export default function VideoAnnotatePage() {
     },
   })
 
+  const reassignClassMutation = useMutation({
+    mutationFn: (vars: { frameIds: string[]; toClassId: number; fromClassId: number | null }) =>
+      api.annotations.reassignClass(projectName!, vars.frameIds, vars.toClassId, vars.fromClassId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['annotations', projectName] })
+      queryClient.invalidateQueries({ queryKey: ['video-frames', projectName, videoId] })
+      setReassignModalOpen(false)
+      toast({ title: 'Class reassigned', description: data.message, type: 'success' })
+    },
+    onError: (e: Error) => {
+      toast({ title: 'Reassign failed', description: e.message, type: 'error' })
+    },
+  })
+
   const updateAnnotationClassMutation = useMutation({
     mutationFn: ({ id, class_label_id }: { id: number; class_label_id: number }) =>
       api.annotations.update(projectName!, id, { class_label_id }),
@@ -195,17 +245,16 @@ export default function VideoAnnotatePage() {
   }, [filmstripMode, frameInterval])
 
   const handleCreateAnnotation = useCallback(
-    (box: BoundingBox, classId: number, polygon?: number[][]) => {
+    (box: BoundingBox, classId: number) => {
       if (!currentFrame) return
-      createAnnotationMutation.mutate({ frame_id: currentFrame.id, class_label_id: classId, box, polygon })
+      createAnnotationMutation.mutate({ frame_id: currentFrame.id, class_label_id: classId, box })
     },
     [currentFrame, createAnnotationMutation]
   )
 
   const handleUpdateAnnotation = useCallback(
-    (id: number, box: BoundingBox, polygon?: number[][] | null) => {
-      const polyArg = polygon === null ? undefined : polygon
-      updateAnnotationMutation.mutate({ id, box, polygon: polyArg })
+    (id: number, box: BoundingBox) => {
+      updateAnnotationMutation.mutate({ id, box })
     },
     [updateAnnotationMutation]
   )
@@ -222,7 +271,6 @@ export default function VideoAnnotatePage() {
         frame_id: currentFrameId,
         class_label_id: annotation.class_label_id,
         box: annotation.box,
-        ...(annotation.polygon && { polygon: annotation.polygon }),
       })
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentFrameId] })
       queryClient.invalidateQueries({ queryKey: ['video-frames', projectName, videoId] })
@@ -358,6 +406,7 @@ export default function VideoAnnotatePage() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (samModalOpen || reassignModalOpen) return
       if (e.key === 'Escape') {
         if (selectedFrameIndices.size > 0) {
           e.preventDefault()
@@ -382,7 +431,14 @@ export default function VideoAnnotatePage() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentFrameIndex, project?.classes?.length, handleSelectClass, selectedFrameIndices.size])
+  }, [
+    currentFrameIndex,
+    project?.classes?.length,
+    handleSelectClass,
+    selectedFrameIndices.size,
+    samModalOpen,
+    reassignModalOpen,
+  ])
 
   useEffect(() => {
     const strip = thumbnailStripRef.current
@@ -498,6 +554,23 @@ export default function VideoAnnotatePage() {
           <Button
             variant="outline"
             size="sm"
+            className="h-8"
+            onClick={() => {
+              const lastFrame = frames[frames.length - 1]
+              setReassignRangeStart(
+                currentFrame ? String(currentFrame.frame_number) : '0',
+              )
+              setReassignRangeEnd(lastFrame ? String(lastFrame.frame_number) : '0')
+              setReassignModalOpen(true)
+            }}
+            disabled={(project?.classes?.length ?? 0) < 2 || frames.length === 0}
+            title="Move annotations from one class to another across many frames"
+          >
+            Reassign class
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             className="gap-1.5 h-8"
             onClick={() => setSamModalOpen(true)}
             disabled={!project?.classes?.length}
@@ -552,12 +625,17 @@ export default function VideoAnnotatePage() {
             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => goToFrame(filteredFrames.length - 1)}>
               <SkipForward className="h-3.5 w-3.5" />
             </Button>
+            {currentFrame && (
+              <span className="text-[11px] font-mono text-muted-foreground ml-2">
+                frame #{currentFrame.frame_number}
+              </span>
+            )}
             <span className="text-[11px] text-muted-foreground ml-2">
               {annotatedCount} / {frames.length} frames annotated
             </span>
             <div className="flex-1" />
             <span className="text-[10px] text-muted-foreground hidden sm:block">
-              ← → navigate • 1-9 class • Del delete • ⌘Z undo • ⌘Y / ⌘⇧Z redo • ⌘-click / Shift-click multi-select
+              ← → navigate • 1-9 class • Hold Space hide boxes • Del delete • ⌘Z undo • ⌘Y / ⌘⇧Z redo • ⌘-click / Shift-click multi-select
             </span>
           </div>
           {selectedFrameIndices.size > 0 && (
@@ -746,6 +824,166 @@ export default function VideoAnnotatePage() {
           )}
         </div>
       </div>
+
+      {/* Bulk class reassignment modal */}
+      {reassignModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => !reassignClassMutation.isPending && setReassignModalOpen(false)}
+        >
+          <Card
+            className="w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <CardHeader className="py-4">
+              <CardTitle className="text-lg">Reassign class</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Move existing boxes from one class to another across many frames — for
+                splitting a class without redrawing anything.
+              </p>
+            </CardHeader>
+            <CardContent className="flex-1 overflow-y-auto py-0 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                    From
+                  </label>
+                  <select
+                    value={reassignFromClassId}
+                    onChange={(e) => setReassignFromClassId(Number(e.target.value))}
+                    disabled={reassignClassMutation.isPending}
+                    className="w-full rounded border bg-background px-2 py-1.5 text-sm h-9"
+                  >
+                    <option value={-1}>Any class</option>
+                    {project?.classes.map((cls, i) => (
+                      <option key={cls} value={i}>
+                        {cls}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                    To
+                  </label>
+                  <select
+                    value={reassignToClassId}
+                    onChange={(e) => setReassignToClassId(Number(e.target.value))}
+                    disabled={reassignClassMutation.isPending}
+                    className="w-full rounded border bg-background px-2 py-1.5 text-sm h-9"
+                  >
+                    {project?.classes.map((cls, i) => (
+                      <option key={cls} value={i}>
+                        {cls}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                  Frames to change
+                </label>
+                <div className="flex flex-col gap-1">
+                  {(['range', 'selected', 'current'] as const).map((scope) => (
+                    <label key={scope} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="reassignScope"
+                        checked={reassignScope === scope}
+                        onChange={() => setReassignScope(scope)}
+                        disabled={reassignClassMutation.isPending}
+                      />
+                      <span className="text-sm">
+                        {scope === 'range' && 'Frame number range (all extracted frames)'}
+                        {scope === 'selected' &&
+                          `Frames selected in filmstrip (${selectedFrameIndices.size})`}
+                        {scope === 'current' && 'Current frame only'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {reassignScope === 'range' && (
+                <div className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                      First frame
+                    </label>
+                    <Input
+                      type="number"
+                      value={reassignRangeStart}
+                      onChange={(e) => setReassignRangeStart(e.target.value)}
+                      disabled={reassignClassMutation.isPending}
+                      className="h-9 text-sm"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                      Last frame
+                    </label>
+                    <Input
+                      type="number"
+                      value={reassignRangeEnd}
+                      onChange={(e) => setReassignRangeEnd(e.target.value)}
+                      disabled={reassignClassMutation.isPending}
+                      className="h-9 text-sm"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                {reassignTargetFrames.length} frame(s) in scope, {reassignAnnotatedFrameCount}{' '}
+                with annotations.
+                {currentFrame && ` Current frame is #${currentFrame.frame_number}.`}
+              </p>
+            </CardContent>
+            <CardFooter className="py-4 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => !reassignClassMutation.isPending && setReassignModalOpen(false)}
+                disabled={reassignClassMutation.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={
+                  reassignClassMutation.isPending || reassignAnnotatedFrameCount === 0
+                }
+                onClick={() => {
+                  const fromName =
+                    reassignFromClassId === -1
+                      ? 'any class'
+                      : project?.classes[reassignFromClassId]
+                  const toName = project?.classes[reassignToClassId]
+                  const ok = confirm(
+                    `Reassign boxes from ${fromName} to ${toName} across ` +
+                      `${reassignAnnotatedFrameCount} annotated frame(s)? This cannot be undone.`,
+                  )
+                  if (!ok) return
+                  reassignClassMutation.mutate({
+                    frameIds: reassignTargetFrames.map((f) => String(f.id)),
+                    toClassId: reassignToClassId,
+                    fromClassId: reassignFromClassId === -1 ? null : reassignFromClassId,
+                  })
+                }}
+              >
+                {reassignClassMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                    Reassigning...
+                  </>
+                ) : (
+                  'Reassign'
+                )}
+              </Button>
+            </CardFooter>
+          </Card>
+        </div>
+      )}
 
       {/* SAM3 Auto-label modal */}
       {samModalOpen && (

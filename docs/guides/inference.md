@@ -176,68 +176,7 @@ The detail panel uses a two-column layout on wide screens:
 5. **Stats** -- total frames, keyframes, total detections, average inference time
 6. **Config** -- confidence threshold, IoU, frame interval, tracking mode
 7. **Detection timeline** -- bar chart of detection counts per frame
-8. **Actions** -- links to the Frame Viewer and Z-Axis Calibration tool
-
-### Extracting Frames for Z-Axis Calibration
-
-After running inference, you can extract specific frames as JPEG images along with their bounding box data. This is useful for distance calibration (see [Distance Calibration (Z-axis)](z-axis-height-estimation.md)).
-
-1. Click a cell in the results matrix to open the detail panel
-2. Click **Open Frame Viewer** in the Extract Frames section
-3. The frame viewer opens in a full-screen layout similar to the annotation tool:
-    - **Center**: the current frame with detection bounding box overlays (colored by class)
-    - **Bottom filmstrip**: scrollable thumbnails of all inference frames with navigation controls
-    - **Right sidebar**: detection details for the current frame (classes, confidence, bounding boxes)
-4. Navigate frames with arrow keys or the filmstrip
-5. Select frames for export:
-    - **Space** toggles the current frame
-    - **Cmd/Ctrl-click** on filmstrip thumbnails for multi-select
-    - **Shift-click** for range selection
-    - **Select all** via the floating bar
-6. Click **Download ZIP** to download the selected frames
-
-The ZIP file contains:
-
-- **JPEG images** -- one per selected frame (`frame_000042.jpg`, etc.)
-- **`detections.json`** -- bounding box data for all selected frames, including:
-    - Video resolution (`width`, `height`) for converting normalized boxes to pixels
-    - Per-frame detections with class name, confidence, and normalized bounding box (`x`, `y`, `width`, `height` as center + size in 0-1 range)
-
-Example `detections.json` structure:
-
-```json
-{
-  "project": "CraneHook",
-  "run_name": "rfdetr_run_1",
-  "video_id": "1",
-  "inference_id": "20250327_143022",
-  "video_resolution": { "width": 1920, "height": 1080 },
-  "frames": [
-    {
-      "frame_number": 42,
-      "timestamp": 1.4,
-      "image_filename": "frame_000042.jpg",
-      "detections": [
-        {
-          "class_name": "crane_hook",
-          "class_id": 0,
-          "confidence": 0.94,
-          "box": { "x": 0.49, "y": 0.27, "width": 0.06, "height": 0.15 }
-        }
-      ]
-    }
-  ]
-}
-```
-
-To convert normalized boxes to pixel coordinates:
-
-```python
-bbox_center_x_px = detection["box"]["x"] * video_resolution["width"]
-bbox_center_y_px = detection["box"]["y"] * video_resolution["height"]
-bbox_width_px = detection["box"]["width"] * video_resolution["width"]
-bbox_height_px = detection["box"]["height"] * video_resolution["height"]
-```
+8. **Calibration** -- link to the Z-Axis Calibration tool
 
 ### Z-Axis Calibration
 

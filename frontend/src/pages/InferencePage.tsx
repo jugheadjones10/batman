@@ -13,9 +13,7 @@ import {
   CheckCircle2,
   Server,
   Monitor,
-  ImageIcon,
   Ruler,
-  Activity,
 } from 'lucide-react'
 import { api } from '@/api/client'
 import { Button } from '@/components/ui/Button'
@@ -51,6 +49,8 @@ import type {
   Video as ProjectVideo,
   ZCalibration,
 } from '@/types'
+
+const DEFAULT_INFERENCE_CONFIDENCE = 0.2
 
 /**
  * Live progress for a streaming local inference run. `stage` is the coarsest
@@ -113,7 +113,7 @@ export default function InferencePage() {
   // appear selected at once when they happened to share an id.
   const [runTarget, setRunTarget] = useState<{ runName: string; videoId: string } | null>(null)
   const [config, setConfig] = useState<Partial<InferenceConfig>>({
-    confidence_threshold: 0.5,
+    confidence_threshold: DEFAULT_INFERENCE_CONFIDENCE,
     iou_threshold: 0.45,
     enable_tracking: false,
     tracking_mode: 'visible_only',
@@ -135,7 +135,7 @@ export default function InferencePage() {
     no_video: boolean
   }>({
     run_name: null,
-    confidence: 0.5,
+    confidence: DEFAULT_INFERENCE_CONFIDENCE,
     frame_interval: 1,
     track: false,
     track_thresh: 0.25,
@@ -298,7 +298,7 @@ export default function InferencePage() {
             // Backend resolves the active model from `current_run_name` set by
             // load-model; this field is kept for backwards compatibility only.
             model_run_id: 0,
-            confidence_threshold: config.confidence_threshold || 0.5,
+            confidence_threshold: config.confidence_threshold ?? DEFAULT_INFERENCE_CONFIDENCE,
             iou_threshold: config.iou_threshold || 0.45,
             max_detections: 100,
             enable_tracking: config.enable_tracking ?? false,
@@ -765,26 +765,6 @@ export default function InferencePage() {
 
                 {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
                   <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
-                    <ImageIcon className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium">Extract Frames</p>
-                      <p className="text-xs text-muted-foreground">
-                        Browse frames with detection overlays and download selected frames as images with bounding box data.
-                      </p>
-                    </div>
-                    <Link
-                      to={`/projects/${projectName}/inference/${encodeURIComponent(selectedCell.run)}/${encodeURIComponent(selectedCell.video)}/${encodeURIComponent(selectedCell.inferenceId)}/frames`}
-                    >
-                      <Button variant="outline" size="sm" className="gap-1.5 whitespace-nowrap">
-                        <ImageIcon className="h-3.5 w-3.5" />
-                        Open Frame Viewer
-                      </Button>
-                    </Link>
-                  </div>
-                )}
-
-                {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
-                  <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
                     <Ruler className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium">Z-Axis Height Estimation</p>
@@ -798,26 +778,6 @@ export default function InferencePage() {
                       <Button variant="outline" size="sm" className="gap-1.5 whitespace-nowrap">
                         <Ruler className="h-3.5 w-3.5" />
                         Open Calibration
-                      </Button>
-                    </Link>
-                  </div>
-                )}
-
-                {detailResult.frames && detailResult.frames.length > 0 && selectedCell && (
-                  <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border">
-                    <Activity className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium">Tracking Comparison</p>
-                      <p className="text-xs text-muted-foreground">
-                        Side-by-side raw vs ByteTrack with live sliders for the three tracker parameters.
-                      </p>
-                    </div>
-                    <Link
-                      to={`/projects/${projectName}/inference/${encodeURIComponent(selectedCell.run)}/${encodeURIComponent(selectedCell.video)}/${encodeURIComponent(selectedCell.inferenceId)}/tracking-compare`}
-                    >
-                      <Button variant="outline" size="sm" className="gap-1.5 whitespace-nowrap">
-                        <Activity className="h-3.5 w-3.5" />
-                        Open Tracking Compare
                       </Button>
                     </Link>
                   </div>
@@ -960,13 +920,13 @@ export default function InferencePage() {
                     </h3>
                     <div>
                       <label className="text-sm mb-1 block">
-                        Confidence: {((config.confidence_threshold || 0.5) * 100).toFixed(0)}%
+                        Confidence: {((config.confidence_threshold ?? DEFAULT_INFERENCE_CONFIDENCE) * 100).toFixed(0)}%
                       </label>
                       <input
                         type="range"
                         min={0}
                         max={100}
-                        value={(config.confidence_threshold || 0.5) * 100}
+                        value={(config.confidence_threshold ?? DEFAULT_INFERENCE_CONFIDENCE) * 100}
                         onChange={(e) =>
                           setConfig({ ...config, confidence_threshold: Number(e.target.value) / 100 })
                         }

@@ -76,10 +76,6 @@ export default function LiveDetectionReadout({
     ? Math.floor(rawFrameIndex / skipFrames) * skipFrames
     : rawFrameIndex
 
-  const currentFrame = quantizedIndex >= 0 && quantizedIndex < frames.length
-    ? frames[Math.min(quantizedIndex, frames.length - 1)]
-    : null
-
   const readouts = useMemo<ClassReadout[]>(() => {
     const idx = Math.min(quantizedIndex, frames.length - 1)
     const frame = idx >= 0 ? frames[idx] : null
@@ -185,28 +181,6 @@ export default function LiveDetectionReadout({
           </div>
         </div>
       ))}
-      <div className="rounded-lg border border-border bg-neutral-900/80 p-3">
-        <div className="flex items-center gap-2 mb-2.5">
-          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 bg-amber-400" />
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Spreader ↔ Container Skew
-          </span>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <ReadoutBox
-            label="Skew (°)"
-            value={currentFrame?.skew_deg != null ? currentFrame.skew_deg.toFixed(2) : null}
-          />
-          <ReadoutBox
-            label="Spreader (°)"
-            value={currentFrame?.spreader_deg != null ? currentFrame.spreader_deg.toFixed(2) : null}
-          />
-          <ReadoutBox
-            label="Container (°)"
-            value={currentFrame?.container_deg != null ? currentFrame.container_deg.toFixed(2) : null}
-          />
-        </div>
-      </div>
     </div>
   )
 }

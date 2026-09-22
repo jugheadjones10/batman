@@ -139,10 +139,14 @@ export default function SideViewSchematic({
   const frameIndex = findClosestFrameIndex(frames, currentTime)
   const frame = frameIndex >= 0 && frameIndex < frames.length ? frames[frameIndex] : null
 
-  // Loaded-spreader stacking: per-frame state from the analysis (index-aligned
-  // with `frames`), plus the frozen Z of the locked target container.
+  // Stacking analysis: per-frame state (index-aligned with `frames`), the
+  // frozen Z of the locked target, and the empty-spreader reference container.
   const stackingInfo = stacking != null && frameIndex >= 0 ? stacking.frames[frameIndex] ?? null : null
-  const stackingLocked = stackingInfo?.state === 'locked' && stacking?.targetZMm != null
+  const stackingCarrying = stackingInfo?.state === 'carrying'
+  const stackingLocked = stackingInfo?.state === 'locked' && stackingInfo.targetZMm != null
+  const stackingPickup = stackingInfo?.state === 'pickup' && stackingInfo.targetZMm != null
+  const stackingIdle = stackingInfo?.state === 'idle'
+  const stackingLoaded = stackingCarrying || stackingLocked
 
   // Pick the container's ISO length ONCE for the whole run. Prefer the
   // calibration's declared `length_mm` (the user told us exactly which ISO size
@@ -210,7 +214,11 @@ export default function SideViewSchematic({
   //   1. `det.z_mm` persisted by the backend (target of the last calibration).
   //   2. Client-side flat-model extrapolation (same k / m,c as every class).
   let zContainerTop: number | null = container.z
-  let containerZSource: 'measured' | 'estimated' | null = container.z != null ? 'measured' : null
+  // 'inferred' = plane derived from physical contact (touchdown), used when
+  // the target has no usable detection of its own — the normal case for a
+  // container being descended onto, since the load occludes it.
+  let containerZSource: 'measured' | 'estimated' | 'inferred' | null =
+    container.z != null ? 'measured' : null
   if (zContainerTop == null && container.box != null) {
     const computed = computeZForBox(
       calibration,
@@ -225,17 +233,40 @@ export default function SideViewSchematic({
     }
   }
 
-  // Stacked mode: the center container in the presentation frames is the
-  // CARRIED one, so ignore it and place the container shape at the frozen Z of
-  // the locked target instead.
-  if (stackingLocked) {
-    zContainerTop = stacking!.targetZMm
-    containerZSource = 'measured'
+  // Loaded mode: the center container in the presentation frames is the
+  // CARRIED one. It is rendered from the spreader below, so do not also draw it
+  // as the target. Once locked, the actual target appears at its frozen Z.
+  // Pickup mode: the empty spreader descends onto its locked target, drawn at
+  // the frozen Z. Idle mode: the analysis picks the container nearest the
+  // spreader (NOT the frame center — the presentation frames' center pick is
+  // the wrong physical target for an offset camera), measured live.
+  if (stackingLocked || stackingPickup) {
+    zContainerTop = stackingInfo!.targetZMm
+    containerZSource = stackingInfo!.targetZInferred ? 'inferred' : 'measured'
+  } else if (stackingCarrying) {
+    zContainerTop = null
+    containerZSource = null
+  } else if (stackingIdle && stackingInfo != null) {
+    zContainerTop = stackingInfo.emptyTargetZMm
+    containerZSource =
+      stackingInfo.emptyTargetZMm == null
+        ? null
+        : stackingInfo.emptyTargetZEstimated
+          ? 'estimated'
+          : 'measured'
+  }
+
+  // The analysis constructs one continuous, collision-safe descent trajectory;
+  // at the lock frame it equals the live pre-lock Z, and at touchdown it is
+  // exactly at the contact plane (one container height above the target when
+  // loaded, the target's top when picking up empty).
+  if ((stackingLocked || stackingPickup) && stackingInfo?.displayedSpreaderZMm != null) {
+    zSpreader = stackingInfo.displayedSpreaderZMm
   }
 
   // Carried container hangs directly under the spreader (its top sits at the
   // spreader plane under the shared-length pinhole model).
-  const zCarriedTop = stackingLocked && zSpreader != null ? zSpreader : null
+  const zCarriedTop = stackingLoaded && zSpreader != null ? zSpreader : null
   const zCarriedBottom = zCarriedTop != null ? zCarriedTop + ISO_CONTAINER_HEIGHT_MM : null
 
   const zContainerBottom = zContainerTop != null ? zContainerTop + ISO_CONTAINER_HEIGHT_MM : null
@@ -245,13 +276,19 @@ export default function SideViewSchematic({
   const spreaderToContainer =
     gapFromMm != null && zContainerTop != null ? zContainerTop - gapFromMm : null
 
-  // Zoom the vertical axis around the stack in the current frame. Using the
-  // deepest value across the entire run can make shallow frames bunch up near
-  // the camera, especially after switching to a small round-feature proxy.
+  // Keep one vertical scale throughout the loaded sequence. The target is not
+  // drawn until lock, but its frozen depth is already backfilled through the
+  // carrying phase by the offline analysis; reserving that extent prevents the
+  // whole diagram from jumping when the target first appears.
+  const loadedSequenceBottomMm =
+    (stackingLoaded || stackingPickup) && stackingInfo?.targetZMm != null
+      ? stackingInfo.targetZMm + ISO_CONTAINER_HEIGHT_MM
+      : 0
   const deepestVisibleMm = Math.max(
     zSpreader ?? 0,
     zCarriedBottom ?? 0,
     zContainerBottom ?? zContainerTop ?? 0,
+    loadedSequenceBottomMm,
   )
   const zMax = Math.max(
     Math.ceil((deepestVisibleMm + Z_AXIS_HEADROOM_MM) / Z_AXIS_ROUNDING_MM) *
@@ -443,7 +480,7 @@ export default function SideViewSchematic({
                   topY={TOP_Y}
                   halfWidthPx={containerHalfPx}
                   heightPx={containerPxHeight}
-                  estimated={containerZSource === 'estimated'}
+                  estimated={containerZSource === 'estimated' || containerZSource === 'inferred'}
                 />
                 {/* ISO length label centered inside the container body */}
                 <text
@@ -456,8 +493,11 @@ export default function SideViewSchematic({
                   textAnchor="middle"
                   style={{ pointerEvents: 'none' }}
                 >
-                  {stackingLocked ? `target · ${containerLabel}` : containerLabel}
+                  {stackingLocked || stackingPickup
+                    ? `target · ${containerLabel}`
+                    : containerLabel}
                   {containerZSource === 'estimated' ? ' (est.)' : ''}
+                  {containerZSource === 'inferred' ? ' (inferred)' : ''}
                 </text>
               </g>
             )}
@@ -530,12 +570,24 @@ export default function SideViewSchematic({
           <div className="text-[11px] text-muted-foreground">
             {stackingInfo.state === 'carrying' ? (
               <span className="text-sky-300">
-                Carrying container — waiting for vertical movement to lock the target.
+                Carrying container — waiting for descent to lock the target.
+              </span>
+            ) : stackingInfo.state === 'pickup' ? (
+              <span className="text-lime-300">
+                Pickup target locked
+                {stackingInfo.targetTrackId != null
+                  ? ` (track #${stackingInfo.targetTrackId})`
+                  : ' (not detected — plane from touchdown)'}
+                {stackingInfo.gapMm != null
+                  ? ` — remaining drop ${stackingInfo.gapMm.toFixed(0)} mm`
+                  : ''}
               </span>
             ) : (
               <span className="text-purple-300">
-                Target locked
-                {stacking?.targetTrackId != null ? ` (track #${stacking.targetTrackId})` : ''}
+                Placement target locked
+                {stackingInfo.targetTrackId != null
+                  ? ` (track #${stackingInfo.targetTrackId})`
+                  : ' (not detected — plane from touchdown)'}
                 {stackingInfo.gapMm != null
                   ? ` — remaining drop ${stackingInfo.gapMm.toFixed(0)} mm`
                   : ''}

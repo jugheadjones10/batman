@@ -85,7 +85,7 @@ export default function AnnotatePage() {
 
   // Create annotation mutation
   const createAnnotationMutation = useMutation({
-    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox; polygon?: number[][] }) =>
+    mutationFn: (data: { frame_id: number | string; class_label_id: number; box: BoundingBox }) =>
       api.annotations.create(projectName!, data),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage?.frame_id] })
@@ -96,11 +96,10 @@ export default function AnnotatePage() {
 
   // Update annotation mutation
   const updateAnnotationMutation = useMutation({
-    mutationFn: ({ id, box, class_label_id, polygon }: { id: number; box?: BoundingBox; class_label_id?: number; polygon?: number[][] }) => {
+    mutationFn: ({ id, box, class_label_id }: { id: number; box?: BoundingBox; class_label_id?: number }) => {
       return api.annotations.update(projectName!, id, {
         ...(box && { box }),
         ...(class_label_id !== undefined && { class_label_id }),
-        ...(polygon !== undefined && { polygon }),
       })
     },
     onSuccess: () => {
@@ -197,17 +196,16 @@ export default function AnnotatePage() {
   const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']
 
   const handleCreateAnnotation = useCallback(
-    (box: BoundingBox, classId: number, polygon?: number[][]) => {
+    (box: BoundingBox, classId: number) => {
       if (!currentImage) return
-      createAnnotationMutation.mutate({ frame_id: currentImage.frame_id, class_label_id: classId, box, polygon })
+      createAnnotationMutation.mutate({ frame_id: currentImage.frame_id, class_label_id: classId, box })
     },
     [currentImage, createAnnotationMutation]
   )
 
   const handleUpdateAnnotation = useCallback(
-    (id: number, box: BoundingBox, polygon?: number[][] | null) => {
-      const polyArg = polygon === null ? undefined : polygon
-      updateAnnotationMutation.mutate({ id, box, polygon: polyArg })
+    (id: number, box: BoundingBox) => {
+      updateAnnotationMutation.mutate({ id, box })
     },
     [updateAnnotationMutation]
   )
@@ -224,7 +222,6 @@ export default function AnnotatePage() {
         frame_id: currentImage.frame_id,
         class_label_id: annotation.class_label_id,
         box: annotation.box,
-        ...(annotation.polygon && { polygon: annotation.polygon }),
       })
       queryClient.invalidateQueries({ queryKey: ['annotations', projectName, currentImage.frame_id] })
       return created
@@ -525,7 +522,7 @@ export default function AnnotatePage() {
             <div className="flex-1" />
 
             <span className="text-[10px] text-muted-foreground hidden sm:block">
-              ← → navigate • 1-9 class • Del delete • ⌘Z undo • ⌘⇧Z redo • ⌘-click / Shift-click multi-select
+              ← → navigate • 1-9 class • Hold Space hide boxes • Del delete • ⌘Z undo • ⌘⇧Z redo • ⌘-click / Shift-click multi-select
             </span>
           </div>
           {selectedImageIndices.size > 0 && (

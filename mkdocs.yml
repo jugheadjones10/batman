@@ -45,12 +45,13 @@ nav:
       - Submit Benchmark: scripts/submit-benchmark.md
       - Development Server: scripts/run-dev.md
   - Guides:
+      - Project Folder Structure: guides/project-folder-structure.md
+      - 프로젝트 폴더 구조 (한국어): guides/project-folder-structure.ko.md
       - Training Workflow: guides/training.md
       - Inference Workflow: guides/inference.md
       - Experiment Framework: guides/experiments.md
       - Benchmarking Guide: guides/benchmarking.md
       - Distance Calibration (Z-axis): guides/z-axis-height-estimation.md
-      - Segmentation & Skew Angle: guides/segmentation-and-skew.md
       - Tracking & Jitter Reduction: guides/tracking-and-jitter-reduction.md
       - SLURM Usage: guides/slurm.md
       - Troubleshooting: troubleshooting.md

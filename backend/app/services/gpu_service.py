@@ -542,7 +542,6 @@ class GPUService:
         exclude_videos: list[str] | None = None,
         infer_after: bool = False,
         infer_test_only: bool = False,
-        task: str = "detection",
     ) -> tuple[str, str]:
         """Generate a SLURM training script. Returns (script_content, job_name)."""
         gpu_cfg = GPU_CONFIGS.get(gpu_type)
@@ -568,7 +567,6 @@ class GPUService:
             f"--output-dataset {output_dataset}",
             f"--output-dir {output_dir}",
             f"--model {model}",
-            f"--task {task}",
             f"--epochs {epochs}",
             f"--batch-size {batch_size}",
             f"--image-size {image_size}",

@@ -258,7 +258,6 @@ async def submit_training(project_name: str, request: TrainingSubmitRequest):
         output_dir=output_dir,
         output_dataset=output_dataset,
         model=request.training.model,
-        task=request.training.task,
         epochs=request.training.epochs,
         batch_size=batch_size,
         image_size=request.training.image_size,
@@ -357,8 +356,6 @@ def _build_local_train_argv(
         "auto",
         "--model",
         request.training.model,
-        "--task",
-        request.training.task,
         "--epochs",
         str(request.training.epochs),
         "--image-size",
@@ -1005,7 +1002,6 @@ async def delete_training_run(project_name: str, run_name: str):
     if meta_path.exists():
         with open(meta_path) as f:
             meta = json.load(f)
-        local_pid = meta.get("local_pid")
         if run_name in _local_training_processes:
             proc = _local_training_processes[run_name]
             try:

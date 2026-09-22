@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Training ─────────────────────────────────────────────────────────────
@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 class TrainingConfig(BaseModel):
     """RF-DETR training hyper-parameters (mirrors cli.train defaults)."""
 
-    model: Literal["nano", "small", "base", "medium", "large", "xlarge"] = "base"
-    task: Literal["detection", "segmentation"] = "detection"
+    model: Literal["nano", "small", "base", "medium", "large"] = "base"
+    model_config = ConfigDict(extra="forbid")
     epochs: int = Field(50, ge=1, le=1000)
     batch_size: int | None = None  # None = auto based on GPU type
     image_size: int = 640
@@ -112,7 +112,7 @@ class InferenceGPUSubmitRequest(BaseModel):
     run_name: Optional[str] = None  # training run to use; None → latest
     video_ids: Optional[list[str]] = None  # None → all project videos
     test_only: bool = False
-    model: Literal["nano", "small", "base", "medium", "large", "xlarge"] = "base"
+    model: Literal["nano", "small", "base", "medium", "large"] = "base"
     confidence: float = 0.5
     frame_interval: int = 1
     track: bool = False

@@ -8,9 +8,7 @@ import AnnotatePage from '@/pages/AnnotatePage'
 import VideoAnnotatePage from '@/pages/VideoAnnotatePage'
 import TrainingPage from '@/pages/TrainingPage'
 import InferencePage from '@/pages/InferencePage'
-import InferenceFrameSelectPage from '@/pages/InferenceFrameSelectPage'
 import ZCalibrationPage from '@/pages/ZCalibrationPage'
-import TrackingComparePage from '@/pages/TrackingComparePage'
 
 function App() {
   return (
@@ -26,9 +24,7 @@ function App() {
           </Route>
           <Route path="projects/:projectName/annotate" element={<AnnotatePage />} />
           <Route path="projects/:projectName/annotate/video/:videoId" element={<VideoAnnotatePage />} />
-          <Route path="projects/:projectName/inference/:runName/:videoId/:inferenceId/frames" element={<InferenceFrameSelectPage />} />
           <Route path="projects/:projectName/inference/:runName/:videoId/:inferenceId/z-calibration" element={<ZCalibrationPage />} />
-          <Route path="projects/:projectName/inference/:runName/:videoId/:inferenceId/tracking-compare" element={<TrackingComparePage />} />
         </Route>
       </Routes>
       <Toaster />

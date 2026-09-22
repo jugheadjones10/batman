@@ -84,8 +84,6 @@ export interface Annotation {
   class_name: string
   class_color: string
   box: BoundingBox
-  /** Normalised polygon ([[x,y], ...] in [0,1]); present only for seg-enabled classes. */
-  polygon?: number[][] | null
   track_id?: number
   confidence: number
   source: 'auto' | 'manual' | 'corrected'
@@ -110,16 +108,13 @@ export interface Track {
 }
 
 // Training types (RF-DETR only, GPU cluster execution)
-export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large' | 'xlarge'
-export type RFDETRTask = 'detection' | 'segmentation'
+export type RFDETRModelSize = 'nano' | 'small' | 'base' | 'medium' | 'large'
 export type GPUType = 'h200' | 'h100-96' | 'h100-47' | 'a100-80' | 'a100-40' | 'nv'
 export type DataSource = 'manual_data' | 'imports' | 'videos'
 export type ManualDataSplitStrategy = 'proportional' | 'val_only' | 'train_only' | 'train_and_val' | 'all_splits'
 
 export interface TrainingConfig {
   model: RFDETRModelSize
-  /** RF-DETR task; "segmentation" uses the RF-DETR-Seg family. Default: "detection". */
-  task?: RFDETRTask
   epochs: number
   batch_size: number | null  // null = auto based on GPU
   image_size: number
@@ -272,8 +267,6 @@ export interface Detection {
   z_mm?: number
   /** Backend-selected center container target for Z/gap estimation. */
   z_selected?: boolean
-  /** Normalised polygon produced by RF-DETR-Seg (present for seg models only). */
-  mask?: number[][] | null
 }
 
 export interface InferenceResult {
@@ -281,10 +274,6 @@ export interface InferenceResult {
   timestamp: number
   detections: Detection[]
   inference_time_ms: number
-  /** Signed skew between spreader and container in (-90, 90], if both are present. */
-  skew_deg?: number
-  spreader_deg?: number
-  container_deg?: number
 }
 
 export interface InferenceResultSummary {
@@ -298,7 +287,6 @@ export interface InferenceResultSummary {
     frame_interval: number
     tracking: boolean
     tracking_mode: string
-    render_mode?: 'polygon' | 'bbox'
   }
   stats: {
     total_frames: number

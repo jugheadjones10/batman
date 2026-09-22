@@ -4,7 +4,6 @@ Batman turns bounding boxes into **real-world distance** (`z_mm`). Given a detec
 
 This guide explains the intuition, the math, the measurement sources, and the calibration modes the system actually ships.
 
-> For the angular counterpart — how *twisted* the container is relative to the spreader — see [Segmentation & Skew Angle](segmentation-and-skew.md). `z_mm` and `skew_deg` live in the same `result.json` and render side-by-side in the live overlay.
 
 ## The idea in one picture
 
@@ -244,16 +243,20 @@ This keeps the calibration on the same physical scale as whole container bboxes.
 
 ## Using it from the UI
 
-Open a finished inference run on the **Inference** page and expand the **Z-Axis Calibration** panel.
+Open a finished inference run on the **Inference** page and open its calibration page.
 
-1. **Measurement Source** — choose the whole bbox longer side, or the round feature diameter scaled to equivalent spreader length.
-2. **Container/spreader length (ℓ)** — dropdown of 20 / 40 / 45 ft. Sets the shared real-world size for the spreader and every target. It is required for round-feature mode.
-3. **Round feature diameter** — shown only in round-feature mode. Enter the physical feature diameter in mm; the UI previews `length_mm / round_feature_diameter_mm`.
-4. **Reference Class / Round Feature Class** — the class you'll calibrate with. In round-feature mode this should be the detected round feature class, not the whole spreader class.
-5. **Estimation Targets** — one row per additional class you want distances for. The reference class is auto-added if missing.
-6. **Calibration Points** — for each calibration frame, enter the frame number and ground-truth distance in mm. 1 works; 2+ is better. In round-feature mode the frame only needs a clear round feature detection at the known spreader distance.
-7. **Calibrate & Estimate** — fits the model, writes `z_mm` onto every matching non-container target and only the center container target in each frame, then persists into the run's `result.json`.
-8. **Re-export Video with Z** — re-encodes the annotated video with the distance overlays baked in.
+The main form has two steps:
+
+1. **Round feature class** — confirm `round` (selected automatically when available). If your model names the feature differently, select that class. Without a detected round feature, run inference with a model trained to detect it.
+2. **Known distances** — browse to a frame, click **Add Frame** (or press Space), and enter the camera-to-reference distance in millimetres. One point is the minimum; a second at a different height lets the fit account for a constant offset. These are camera distances, **not** spreader-to-target gaps.
+
+Click **Apply calibration**, then return to inference to view the gap. New calibrations always use round-feature measurement and automatically include the reference and spreader/container classes. Whole-object targets must share the specified container/spreader length. Frame sampling only changes browsing: entered and saved points are retained, including points outside the sampled filmstrip. Clicking one of those points switches to every-frame browsing.
+
+**Advanced settings** contains container length, round-feature diameter, and classes sharing the calibration. There is no measurement-method selector: the page always uses round-feature diameter scaled to equivalent spreader length. Both physical dimensions are required by the current scale-transfer model. Missing dimensions open Advanced and prevent applying an incomplete calibration. Existing round-feature settings, label detection indices, and feature offsets are preserved when recalibrating.
+
+Previously saved whole-object calibrations remain usable in inference. Opening one in this page starts a fresh round-feature setup, retaining its container length when available. Its old distance labels and reference are not reused because they may describe a different measurement plane. The old calibration stays active until new round-feature points and dimensions are submitted with **Apply calibration**. Whole-object math below remains documented for those historical results.
+
+Calibration supplies camera distances; tracking supplies load state and the target plane. For an overhead view, empty clearance is `target top − spreader`, and loaded clearance is `target top − spreader − load height`. The current tracking implementation assumes a **2,591 mm** load height. Occluded targets may be inferred from touchdown and are marked as inferred; calibration alone does not locate them or guarantee correct load classification.
 
 !!! warning "Length-sharing assumption"
     Every class in the target list must genuinely share the same real-world length `ℓ` as the reference. A telescoping spreader locked onto a container satisfies this by construction. A free-floating container at a different ISO length, or a bare spreader not yet engaged, does not — exclude those frames or re-calibrate with the correct `ℓ`.
@@ -269,27 +272,81 @@ Open a finished inference run on the **Inference** page and expand the **Z-Axis 
 
 The right-hand column of a calibrated inference run also renders a **Side-View Schematic** card: a live elevation diagram of camera → spreader → container that updates as the video plays. Pick the spreader and container classes with the two dropdowns; the container's length is read straight from the calibration's `length_mm` (falling back to an aspect-ratio inference if the calibration is absent), the vertical height is the ISO-standard 2591 mm, and the card reports the four distances (camera→spreader, spreader→container-top, container height, camera→container-bottom). Use it as a quick sanity check on whether the calibrated z values produce physically plausible stacking.
 
-## Stacking distance with a loaded spreader
+## Stacking distance across the crane cycle
 
-The center-container rule above assumes an **empty** spreader descending onto the pickup container. When the spreader is already **carrying** a container and lowering it onto a stack, the geometry inverts: the container at screen center is the *carried* one, and the actual target — the container the load will be placed on — sits underneath it, partially occluded. Picking the center container would measure the distance from the spreader to its own load.
-
-Batman handles this with a frontend analysis (`frontend/src/lib/stackingDistance.ts`) that runs over the smoothed ByteTrack frames on the inference detail page. It moves through three states:
-
-1. **Carried-container detection.** A container track is flagged as *carried* when three cues hold together: its bbox covers a minimum fraction of the spreader box (an intersection test rather than center-in-box, so it survives the close-range parallax of an offset camera), it moves in lockstep with the spreader (the on-screen velocity difference between the two tracks stays below a small threshold), and it reads at the spreader's depth — its pinhole Z is within ~1 m of the spreader's (or, without a calibration, its pixel size matches the spreader's, since both share the same real-world length). The depth cue is what separates the carried box from the target directly below it, which also overlaps and is also static on screen but sits at least a container height farther from the camera. The depth cue is **skipped for boxes clipped by the frame edge**: when the load is close to the camera it is larger than the field of view, the truncated bbox under-measures the pixel size, and the pinhole Z reads meters too far — for those boxes, overlap and lockstep alone decide. The flag needs ~0.7 s of continuous evidence to acquire and survives short detection dropouts.
-
-2. **Target lock on vertical-movement start.** While the trolley translates horizontally, every background container sweeps across the frame. The moment the trolley stops and hoisting begins, the surroundings freeze but the spreader keeps moving (its bbox grows as it descends). The analysis watches for exactly that signature: the median on-screen speed of all non-carried container tracks stays below a stillness threshold for ~1 s while the spreader's center speed or relative bbox-scale rate stays above a movement threshold for ~0.5 s. When both hold and a carried container is present, the target is **locked**: the non-carried container track nearest the frame center at that moment.
-
-3. **Frozen target Z and remaining drop.** The target's `z_mm` is frozen at the lock: the median pinhole Z of its track over a window around the lock frame (2 s before to 0.5 s after, preferring matched over Kalman-extrapolated boxes). Freezing is deliberate — the target is static and the camera has stopped translating, so its true Z no longer changes, and the growing occlusion from the descending load would otherwise corrupt the live bbox measurement. Each subsequent frame then reports the **remaining drop**:
+A crane move is a repeating cycle: the empty spreader descends onto a pickup container, hoists it, travels, lowers it onto a stack, releases it, and hoists back up empty. Each phase needs a different physical target for the spreader↔container distance — and only one of them (the loaded travel) matches the naive "container at screen center" pick. Batman handles the whole cycle with a frontend analysis (`frontend/src/lib/stackingDistance.ts`) that runs over the smoothed ByteTrack frames on the inference detail page and moves through four states:
 
 ```
-gap = z_target_top − (z_spreader + 2591 mm)
+idle ──(descent starts)──▶ pickup ──(load acquired)──▶ carrying
+  ▲                                                        │
+  │                                              (descent starts, lock)
+  └──────────(put-down detach)──────────── locked ◀────────┘
 ```
 
-i.e. the distance from the *bottom* of the carried container (spreader plane plus one ISO container height) to the *top* of the locked target. `z_spreader` stays live per frame, so the gap counts down to 0 as the load lands.
+Two spreader roles are resolved independently. The **Z class** is the calibration reference (possibly a small proxy feature such as a round casting, whose bbox stays unclipped and yields trustworthy pinhole Z). The **geometry class** (`resolveGeometrySpreaderClass`) is a detection class literally named like "spreader", used for all *spatial* reasoning; it falls back to the Z class when absent. Every pickup/placement candidate must **overlap the spreader's geometry box** (≥ 20 % of the smaller box): a container that is not under the spreader can never be the physical target, no matter how close it is to the frame center — when nothing under the spreader is detected, the target is honestly `null` instead of a wrong neighbor.
 
-In the UI, the tracked-video overlay marks the carried container (sky blue, `carried #id`) and the locked target (purple, `target #id · N mm`), and the side-view schematic switches to a stacked rendering — carried container attached under the spreader, target container at its frozen Z, with the amber bracket now measuring carried-bottom → target-top. A status line under the schematic reports `carrying — waiting for vertical movement` before the lock and the live remaining drop after it.
+The geometry box is **anchored to the Z-reference feature** (`pickGeometrySpreader`): detectors emit spurious extra spreader boxes on lookalike structures (container stacks seen end-on) whose confidence momentarily exceeds the real spreader's, and picking by confidence alone makes the body box jump across the frame between consecutive frames. Since the reference feature is physically mounted *on* the spreader, the body is the candidate whose box contains it, and containment outranks any confidence margin.
 
-All thresholds (lockstep velocity epsilon, stillness epsilon, movement thresholds, acquire/sustain durations) are exported constants at the top of `frontend/src/lib/stackingDistance.ts`.
+### Merged (coincident) blobs
+
+Detectors routinely emit **one box** covering the spreader and whatever is in line with it, and report that same box under both the spreader and container classes — observed identical to four decimal places on real footage. Such a `container` track is not an independent observation: its box *is* the spreader's box, so it says nothing about whether a load is attached, and every attachment cue passes it trivially. `isMergedWithSpreader` (≥ 80 % overlap of the smaller box, size ratio ≤ 1.3) identifies them, and they are then treated as follows:
+
+- **Never attachment evidence, never detach evidence.** Whether a merged blob is a load or a static container below is decided by the Z-profile sequence alone.
+- **Never static background.** A merged blob's apparent motion during a descent is large; counting it as background reads as "the trolley moved" and aborts every lock episode.
+- **Never a placement target while carrying** — it is the load, so measuring against it would compare the load to itself and pin the gap near zero for the whole descent.
+- **Kept as a target candidate while empty**, where the blob is the best available handle on the container directly beneath the spreader.
+- **Adopted as the carried track for display** while carrying, so the overlay labels it as the load.
+
+1. **Idle (empty spreader).** The reference container is the **under-spreader track nearest the spreader**. Selection is sticky (a challenger must be ~20 % closer to steal it) so it doesn't flicker between stacks, and right after a put-down it is seeded with the just-placed container, so the schematic keeps measuring spreader ↔ placed box while the spreader hoists away. The container's Z prefers a **contact-learned plane** (see below) over the live pinhole read; live reads from edge-clipped bboxes are never used.
+
+2. **Pickup lock (empty spreader descending).** When the background container tracks have been still for ~1 s (trolley stopped) and the spreader has been *descending* for ~0.5 s (signed bbox-scale rate: shrinking = moving away from the overhead camera) **and has actually travelled ≥ 100 mm in depth since that streak began**, the reference container is **locked** as the pickup target and its Z is frozen (see below). The absolute-depth requirement matters because the scale-rate test is relative and a hovering spreader fakes sustained streaks from bbox noise, which produced phantom locks during travel. The lock may be **blind** (`targetTrackId = null`) when no container is detected under the spreader — the descent is real even when the detector misses the target — and a visible target is adopted later if one appears.
+
+    The episode ends when the load is acquired (→ carrying), or aborts if the background starts moving again. There is deliberately **no separate ascent-timer abort**: the Z-profile branch below resolves both outcomes from the same trigger (real rise off the deepest plane), marking the episode `aborted` when the approach never really descended (≥ 300 mm). A timer-only rule fired on scale noise during landing plateaus — twist-lock engagement can hold the spreader at the touchdown plane for tens of seconds — and killed otherwise valid episodes.
+
+### Load state: the one thing boxes cannot tell you
+
+Whether the spreader carries a container is **not observable from bounding boxes** in this camera geometry. The detector emits a `container` box coincident with the spreader body in nearly every frame regardless of load — measured on "Stacking 2", the container track sat at overlap 1.00 with the spreader box both at t = 3 s (visibly loaded) and at t = 125 s (visibly empty, spreader frame see-through). The distinction is purely one of appearance, which a box cannot express.
+
+Everything below therefore *infers* the carry state from the crane's motion, and that inference has one irreducible blind spot: a clip that **starts mid-cycle with a load already attached** has no preceding pickup to infer from, so the first placement is mis-read as a pickup (no carried container drawn, and the target plane one ISO height too shallow because the placement offset is not applied).
+
+The fix is at the model: label the spreader body as `spreader_loaded` / `spreader_empty` (see [Training](training.md#spreader-load-state-required-for-stacking-distance)). When such classes are present the analysis treats them as **authoritative** — a direct observation always beats an indirect inference:
+
+- The first reading of the clip is accepted immediately, anchoring the cycle. Nothing else can do this, and the state cannot have changed yet.
+- Later disagreements flip the state only after `LOAD_CLASS_CONFIRM_SECONDS` (1 s) of sustained evidence, since per-frame classification flickers around the transition.
+- `loaded` while believed empty starts a carry (and completes any open pickup); `empty` while believed carrying releases the load through the normal put-down path. A carry declared this way is treated as already hoisted, since its hoist happened before the clip began — otherwise the put-down could never fire.
+- All spreader-body classes are used interchangeably for *spatial* reasoning, so splitting the class does not affect the geometry gates.
+
+`StackingAnalysis.loadStateSource` reports `'class'` or `'inferred'` so it is always clear which regime produced a result.
+
+3. **Carrying — a state, not a track.** In nadir camera views the carried container hangs directly under the spreader and is largely invisible, so carrying can outlive (or never have) a visible carried track. Without load-state classes it is entered two ways:
+    - **Cue-based acquisition.** A container track qualifies when its bbox overlaps the spreader's geometry box, it moves in lockstep with the spreader's **geometry (body) box** (velocity *and* signed bbox-scale-rate agreement) — judging lockstep against the small off-center Z-class proxy instead makes a rigidly attached load look detached, since the proxy's image motion during a descent differs from the body's — and it reads at the spreader's depth (skipped for edge-clipped boxes, whose pinhole Z is meaningless). Qualification time only accumulates while the spreader is moving **and not descending** — a load is physically acquired by *hoisting*, and during an empty descent the merged under-spreader blob tracks the spreader frame-perfectly, which must never count as evidence.
+    - **Sequence (Z-profile) inference.** During a pickup episode, touchdown followed by sustained re-ascent (the spreader rises ≥ 300 mm above the episode's deepest plane) completes the pickup: the spreader now carries the load even if no container track ever qualified.
+
+    Losing the carried track does **not** end the carry; it only clears the overlay reference.
+
+4. **Placement lock (loaded spreader descending) and put-down.** While carrying, the same still-background + sustained-descent signature locks the placement target: the under-spreader container nearest the spreader that is **not moving with the spreader**, or a blind lock when none is visible. A blind placement lock is the *normal* outcome, not a failure mode: the target sits directly under the carried container and is genuinely occluded by it, so no detector can see it. A **put-down** additionally requires the carry to have physically happened: the spreader must have hoisted ≥ 800 mm above its pickup plane and re-descended ≥ 800 mm before either signal — sustained re-ascent off the new touchdown plane, or the visible carried track failing the carried cues for ~1 s — is allowed to release. This makes the false put-down during the post-pickup hoist (where the same cue-failure signature occurs) impossible. On release the placed container becomes the idle reference target and the cycle returns to state 1.
+
+**Contact-plane knowledge.** Touchdowns are physical measurements: at a pickup touchdown the spreader plane *is* the target's top; at a put-down the deepest carry plane *is* the placed container's top. On "Stacking 1" this inference was independently confirmed: a contact-inferred placement plane of 8922 mm sat 7 mm from the 8915 mm pinhole read of an unclipped box that briefly resolved for the target container. These planes are remembered per track (`knownTopZByTrack`) with before/after semantics — a completed placement leaves its new top at the contact plane, a completed pickup exposes the container below (one ISO height deeper). In camera geometries where every container bbox is clipped by the frame edge (containers longer than the field of view), these contact planes are the **only** valid container depths; all pinhole reads off clipped boxes are excluded throughout.
+
+**Frozen target Z and continuous constrained descent.** For both lock kinds the target's Z is frozen per episode, preferring the most physical source: the episode's own touchdown contact plane (when the episode completed rather than aborted) → a previously contact-learned plane for the track, **snapshotted at lock/adopt time** so a later episode's contact cannot retroactively rewrite the plane an earlier one was measured against → the median pinhole Z of *unclipped* boxes over a window around the lock frame (2 s before to 0.5 s after, preferring matched over Kalman-extrapolated boxes). Freezing is deliberate — the target is static and the camera has stopped translating, so its true Z no longer changes, and the growing occlusion from the descending spreader/load would otherwise corrupt the live bbox measurement. The measured spreader trajectory is mapped between two physical boundary conditions:
+
+```
+displayed_spreader(lock)    = measured_spreader(lock)
+displayed_spreader(contact) = target_top − 2591 mm   (placement)
+displayed_spreader(contact) = target_top             (pickup)
+```
+
+An affine mapping between those endpoints preserves continuity at lock and preserves the timing and progress of the complete measured descent, while compensating for offset or scale disagreement between the independently inferred target and spreader depths. The remaining gap is derived from that same displayed geometry, so it reaches zero exactly when the deepest observed in-episode spreader position reaches the contact plane.
+
+In the UI, the tracked-video overlay marks the carried container (sky blue, `carried #id`), the locked pickup or placement target (purple, `target #id · N mm`), and the idle nearest-to-spreader reference (lime, `nearest #id`). A target whose plane came from contact inference rather than its own bbox is labelled `(inferred)` in the schematic, and the status line reads "not detected — plane from touchdown", so a target correctly drawn at a known depth with no bounding box does not look like a bug. The side-view schematic renders the carried container under the spreader as soon as carrying is detected, then adds the target at its frozen Z when lock occurs; the carried shape therefore does not switch coordinate models or jump at that transition. The vertical axis also reserves the frozen target's full extent throughout the loaded sequence, preventing an auto-zoom jump when the target appears. The amber bracket measures carried-bottom → target-top when loaded (spreader → target-top when empty), and a status line reports the state and live remaining drop.
+
+All thresholds (lockstep velocity and scale-rate epsilons, stillness epsilon, movement/descent thresholds, acquire/detach/sustain durations, empty-target hysteresis and overlap gate, hoist/touchdown margins) are exported constants at the top of `frontend/src/lib/stackingDistance.ts`.
+
+**Offline debugging harness.** The exact frontend pipeline can be reproduced outside the browser to close the feedback loop against a real video: dump ByteTrack frames with `src.core.inference.compute_bytetrack_frames` over a run's `result.json`, then run `frontend/scripts/debugStacking.ts` (bundle with `node_modules/.bin/esbuild scripts/debugStacking.ts --bundle --platform=node --format=esm --alias:@=./src`) to apply the real One Euro smoothing + `analyzeStacking` and print the state timeline, and `frontend/scripts/render_stacking_debug.py` to draw the detections and analysis roles onto the actual video frames.
+
+The harness also asserts **physical invariants** and prints a pass/fail block, each encoding a failure observed on real footage: a placement target may never be the spreader's own merged blob; a completed episode's remaining drop must actually close (< 250 mm); a placement lock requires a carrying state; and the carried identity must not flap frame-to-frame. Run it after any change to the state machine.
+
+`frontend/scripts/simulate_load_classes.py` relabels an existing tracked-frames dump into `spreader_loaded` / `spreader_empty` against a known release time, so the load-state consumption path can be exercised on today's runs before a load-state-aware model exists.
 
 ---
 
@@ -350,11 +407,13 @@ Single-class runs have the same `model` shape (`k_over_s` for 1-label, `linear_i
   - `estimate()` — applies the flat model to target detections, writing `z_mm` in-place; container targets are center-selected per frame.
   - `apply_z_to_result()` — end-to-end: read `result.json`, fit, estimate, write back; raises on legacy schemas.
 - `backend/app/api/inference.py` — REST endpoints: save calibration, apply estimation, re-export video.
-- `frontend/src/components/ZCalibrationPanel.tsx` — the calibration UI.
+- `frontend/src/pages/ZCalibrationPage.tsx` — the active frame browser and simplified calibration UI.
 - `frontend/src/pages/ZCalibrationPage.tsx` — the full-screen frame picker for selecting calibration frames.
 - `frontend/src/components/SideViewSchematic.tsx` — the live elevation diagram of camera / spreader / container on the inference detail page, including the loaded-spreader stacked mode.
 - `frontend/src/lib/zCalibration.ts` — shared frontend fallback calculation for bbox and round-feature measurement sources.
-- `frontend/src/lib/stackingDistance.ts` — loaded-spreader stacking analysis: carried-container detection, vertical-movement target lock, frozen target Z, per-frame remaining drop.
+- `frontend/src/lib/stackingDistance.ts` — crane-cycle stacking analysis: under-spreader target gating, merged-blob handling, pickup and placement locks on descent (including blind locks), cue- and Z-profile-based carrying, hoist-gated put-down, contact-plane knowledge, frozen target Z, per-frame remaining drop.
+- `frontend/scripts/debugStacking.ts` / `frontend/scripts/render_stacking_debug.py` — offline reproduction harness: run the exact analysis pipeline on a stored run, assert physical invariants, and render the roles onto real video frames.
+- `frontend/scripts/simulate_load_classes.py` / `frontend/scripts/inspect_blob.py` — relabel a run with load-state spreader classes to exercise that path, and compare the spreader's merged container box between loaded and empty frames.
 
 ---
 

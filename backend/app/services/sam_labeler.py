@@ -6,7 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 from loguru import logger
 from PIL import Image
@@ -40,7 +39,7 @@ def _resolve_device_for_worker() -> str:
 
 
 class SAMLabeler:
-    """Auto-labeling service using SAM3SemanticPredictor for text-based segmentation."""
+    """Auto-labeling service using SAM3SemanticPredictor to find bounding boxes."""
 
     def __init__(self):
         self.predictor = None
@@ -287,12 +286,6 @@ class SAMLabeler:
                                     "confidence": conf,
                                     "class_id": class_id,
                                 }
-                                if mask_arrays is not None and i < len(mask_arrays):
-                                    poly = self._mask_to_polygon_norm(
-                                        mask_arrays[i], width, height
-                                    )
-                                    if poly is not None:
-                                        det["polygon"] = poly
                                 detections.append(det)
 
                         elif mask_arrays is not None:
@@ -304,9 +297,6 @@ class SAMLabeler:
                                         "confidence": 1.0,
                                         "class_id": class_id,
                                     }
-                                    poly = self._mask_to_polygon_norm(mask, width, height)
-                                    if poly is not None:
-                                        det["polygon"] = poly
                                     detections.append(det)
 
                 except Exception as e:
@@ -366,9 +356,6 @@ class SAMLabeler:
                                 "confidence": 1.0,
                                 "class_id": class_id,
                             }
-                            poly = self._mask_to_polygon_norm(mask, width, height)
-                            if poly is not None:
-                                det["polygon"] = poly
                             detections.append(det)
 
             return detections
@@ -421,9 +408,6 @@ class SAMLabeler:
                                 "confidence": 1.0,
                                 "class_id": class_id,
                             }
-                            poly = self._mask_to_polygon_norm(mask, width, height)
-                            if poly is not None:
-                                det["polygon"] = poly
                             detections.append(det)
 
             return detections
@@ -519,41 +503,6 @@ class SAMLabeler:
 
         return {"x": float(cx), "y": float(cy), "width": float(w), "height": float(h)}
 
-    @staticmethod
-    def _mask_to_polygon_norm(
-        mask: np.ndarray,
-        img_width: int,
-        img_height: int,
-    ) -> list[list[float]] | None:
-        """Convert a binary mask to a simplified, normalised polygon ([[x,y], ...] in [0,1]).
-
-        Uses the largest external contour simplified with cv2.approxPolyDP at 1.5px.
-        Returns None for empty/degenerate masks.
-        """
-        try:
-            arr = np.asarray(mask)
-            if arr.ndim == 3:
-                arr = arr.squeeze()
-            if arr.ndim != 2:
-                return None
-            bin_mask = (arr > 0).astype(np.uint8)
-            if bin_mask.max() == 0:
-                return None
-            contours, _ = cv2.findContours(
-                bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            if not contours:
-                return None
-            biggest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(biggest) <= 0:
-                return None
-            simplified = cv2.approxPolyDP(biggest, epsilon=1.5, closed=True)
-            pts = simplified.reshape(-1, 2)
-            if len(pts) < 3:
-                return None
-            return [[float(x) / img_width, float(y) / img_height] for x, y in pts]
-        except Exception:
-            return None
 
 
 # Global instance

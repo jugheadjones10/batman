@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import sys
 from datetime import datetime
@@ -84,7 +83,6 @@ def save_training_config(args: argparse.Namespace, output_dir: Path, dataset_dir
             "dataset": str(dataset_dir),
             "output_dir": str(output_dir),
             "model": args.model,
-            "task": args.task,
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "image_size": args.image_size,
@@ -272,10 +270,9 @@ def cmd_train(
         patience=args.patience,
         grad_accum=args.grad_accum,
         resume=str(args.resume) if args.resume else None,
-        task=args.task,
     )
 
-    print(f"\n  Model: RF-DETR {args.model} ({args.task})")
+    print(f"\n  Model: RF-DETR {args.model}")
     print(f"  Dataset: {dataset_dir}")
     print(f"  Output: {args.output_dir}")
     print("\n  Training config:")
@@ -288,7 +285,7 @@ def cmd_train(
         print(f"    Gradient accumulation: {config.grad_accum}")
 
     # Train
-    trainer = RFDETRTrainer(model_size=args.model, task=args.task)
+    trainer = RFDETRTrainer(model_size=args.model)
     print("\n  Starting training...\n")
 
     result = trainer.train(
@@ -306,7 +303,6 @@ def cmd_train(
         "classes": class_names,
         "num_classes": len(class_names),
         "model": f"rf-detr-{args.model}",
-        "task": args.task,
     }
     info_path = args.output_dir / "class_info.json"
     with open(info_path, "w") as f:
@@ -359,7 +355,6 @@ def cmd_infer_after(args: argparse.Namespace, run_dir: Path, class_names: list[s
         checkpoint=checkpoint,
         class_names=class_names,
         model_size=args.model,
-        task=args.task,
     )
     engine.load_model(device=config.device, optimize=True)
 
@@ -519,15 +514,8 @@ Examples:
         help="Output directory for training run (default: {project}/runs/rfdetr_run)",
     )
     train_group.add_argument(
-        "--model", choices=["nano", "small", "base", "medium", "large", "xlarge"], default="base",
-        help="Model size (default: base). 'xlarge' is only valid with --task segmentation.",
-    )
-    train_group.add_argument(
-        "--task",
-        choices=["detection", "segmentation"],
-        default="detection",
-        help="Head type (default: detection). 'segmentation' uses RF-DETR-Seg; requires "
-             "polygon labels for spreader/container (rectangular fallbacks for other classes).",
+        "--model", choices=["nano", "small", "base", "medium", "large"], default="base",
+        help="Detection model size (default: base).",
     )
     train_group.add_argument(
         "--epochs", type=int, default=50, help="Number of training epochs (default: 50)"

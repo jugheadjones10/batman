@@ -7,19 +7,13 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.app.api.projects import get_project_path, load_project_config, save_project_config
 from backend.app.services.sam_labeler import sam_labeler
 from backend.app.services.tracker import Tracker, TrackingConfig
 
 router = APIRouter(prefix="/projects/{project_name}/labeling", tags=["labeling"])
-
-# Only these classes get a polygon stored alongside the bbox; everything else
-# is treated as a rectangular detection. Keeps the labelling surface narrow and
-# mirrors the segmentation training scope.
-POLYGON_CLASS_NAMES: set[str] = {"spreader", "container"}
-
 
 class AutoLabelRequest(BaseModel):
     """Request to run auto-labeling on frames."""
@@ -362,7 +356,6 @@ async def _run_auto_labeling(
             # Save annotations
             for det in tracked_detections:
                 det_class_id = det.get("class_id", 0)
-                det_class_name = classes[det_class_id] if det_class_id < len(classes) else ""
                 ann_record = {
                     "frame_id": frame["id"],
                     "class_label_id": det_class_id,
@@ -377,9 +370,6 @@ async def _run_auto_labeling(
                     "created_at": datetime.utcnow().isoformat(),
                     "updated_at": datetime.utcnow().isoformat(),
                 }
-                polygon = det.get("polygon")
-                if polygon is not None and det_class_name in POLYGON_CLASS_NAMES:
-                    ann_record["polygon"] = polygon
                 all_annotations[str(ann_id)] = ann_record
                 ann_id += 1
                 new_annotations_count += 1

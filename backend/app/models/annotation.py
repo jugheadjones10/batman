@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BoundingBox(BaseModel):
@@ -18,14 +18,11 @@ class BoundingBox(BaseModel):
 class AnnotationCreate(BaseModel):
     """Request to create an annotation."""
 
+    model_config = ConfigDict(extra="forbid")
+
     frame_id: Union[int, str]
     class_label_id: int
     box: BoundingBox
-    # Optional instance-segmentation polygon (normalised [0, 1] coords, list of [x, y]).
-    # Only used for classes that support segmentation (spreader/container); for every
-    # other class we keep bbox-only annotations. A rectangular polygon derived from the
-    # bbox is synthesised at COCO-export time when this field is absent.
-    polygon: Optional[list[list[float]]] = None
     track_id: Optional[int] = None
     source: Literal["auto", "manual", "corrected"] = "manual"
     is_exemplar: bool = False
@@ -35,9 +32,10 @@ class AnnotationCreate(BaseModel):
 class AnnotationUpdate(BaseModel):
     """Request to update an annotation."""
 
+    model_config = ConfigDict(extra="forbid")
+
     class_label_id: Optional[int] = None
     box: Optional[BoundingBox] = None
-    polygon: Optional[list[list[float]]] = None
     track_id: Optional[int] = None
     source: Optional[Literal["auto", "manual", "corrected"]] = None
     is_exemplar: Optional[bool] = None
@@ -53,7 +51,6 @@ class AnnotationInfo(BaseModel):
     class_name: str
     class_color: str
     box: BoundingBox
-    polygon: Optional[list[list[float]]] = None
     track_id: Optional[int] = None
     confidence: float
     source: str

@@ -6,7 +6,7 @@ Run SAM3 auto-labeling on a Batman project from the command line. Supports video
 
 The label CLI:
 
-- Runs SAM3 semantic segmentation on selected frames
+- Uses SAM3 to generate bounding-box labels on selected frames
 - Uses per-class descriptions as prompts (stored in project or overridden by `--descriptions`)
 - Supports video frames (`--video`) or manual-data sources (`--source`)
 - Can target all frames, specific frame IDs, or only unlabeled frames (`--skip-labeled`)
